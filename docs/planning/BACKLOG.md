@@ -10,15 +10,15 @@
 ## Phase 0 Execution Checklist — Repository Foundation and Local Runtime
 
 ### Phase 0.1 — Repository Layout and Planning Docs
-- [ ] Create repository layout from `CLAUDE.md`
-- [ ] Add `docs/planning/BACKLOG.md`
-- [ ] Add `docs/planning/IMPLEMENTATION_PLAN.md`
-- [ ] Add `docs/planning/ARCHITECTURE_NOTES.md`
-- [ ] Add top-level `CLAUDE.md`
-- [ ] Add top-level `AGENTS.md`
-- [ ] Add initial `README.md` with project goal and architecture summary
-- [ ] Verify docs use `phase` consistently for implementation sequencing
-- [ ] Verify no implementation checklist item is marked complete before code exists
+- [x] Create repository layout from `CLAUDE.md`
+- [x] Add `docs/planning/BACKLOG.md`
+- [x] Add `docs/planning/IMPLEMENTATION_PLAN.md`
+- [x] Add `docs/planning/ARCHITECTURE_NOTES.md`
+- [x] Add top-level `CLAUDE.md`
+- [x] Add top-level `AGENTS.md`
+- [x] Add initial `README.md` with project goal and architecture summary
+- [x] Verify docs use `phase` consistently for implementation sequencing
+- [x] Verify no implementation checklist item is marked complete before code exists
 
 ### Phase 0.2 — Go Service Skeleton
 - [ ] Initialize Go module
