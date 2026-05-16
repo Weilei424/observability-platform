@@ -21,19 +21,19 @@
 - [x] Verify no implementation checklist item is marked complete before code exists
 
 ### Phase 0.2 — Go Service Skeleton
-- [ ] Initialize Go module
-- [ ] Add `cmd/server/main.go`
-- [ ] Add config package (`internal/config`)
-- [ ] Add structured logging package (`internal/observability/logger.go`)
-- [ ] Add request ID middleware
-- [ ] Add HTTP router package (`internal/api/router.go`)
-- [ ] Add `GET /healthz`
-- [ ] Add `GET /readyz`
-- [ ] Add writable data directory readiness check
-- [ ] Unit test config loading
-- [ ] Unit test health/readiness handlers
-- [ ] Verify: `go build ./...` passes
-- [ ] Verify: `go test ./...` passes
+- [x] Initialize Go module
+- [x] Add `cmd/server/main.go`
+- [x] Add config package (`internal/config`)
+- [x] Add structured logging package (`internal/observability/logger.go`)
+- [x] Add request ID middleware
+- [x] Add HTTP router package (`internal/api/router.go`)
+- [x] Add `GET /healthz`
+- [x] Add `GET /readyz`
+- [x] Add writable data directory readiness check
+- [x] Unit test config loading
+- [x] Unit test health/readiness handlers
+- [x] Verify: `go build ./...` passes
+- [x] Verify: `go test ./...` passes
 
 ### Phase 0.3 — Local Runtime and Tooling
 - [ ] Add backend Dockerfile
