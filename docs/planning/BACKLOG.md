@@ -36,17 +36,17 @@
 - [x] Verify: `go test ./...` passes
 
 ### Phase 0.3 — Local Runtime and Tooling
-- [ ] Add backend Dockerfile
-- [ ] Add `docker-compose.yml` with backend and Grafana placeholders
-- [ ] Add Makefile target: `build`
-- [ ] Add Makefile target: `test`
-- [ ] Add Makefile target: `lint`
-- [ ] Add Makefile target: `run`
-- [ ] Add Makefile target: `local-up`
-- [ ] Add Makefile target: `local-down`
-- [ ] Add GitHub Actions workflow for build/test/lint
-- [ ] Verify: `make run` starts the backend
-- [ ] Verify: `make local-up` starts backend + Grafana containers
+- [x] Add backend Dockerfile
+- [x] Add `docker-compose.yml` with backend and Grafana placeholders
+- [x] Add Makefile target: `build`
+- [x] Add Makefile target: `test`
+- [x] Add Makefile target: `lint`
+- [x] Add Makefile target: `run`
+- [x] Add Makefile target: `local-up`
+- [x] Add Makefile target: `local-down`
+- [x] Add GitHub Actions workflow for build/test/lint
+- [x] Verify: `make run` starts the backend
+- [x] Verify: `make local-up` starts backend + Grafana containers
 
 ---
 
