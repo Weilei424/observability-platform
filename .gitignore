@@ -36,6 +36,7 @@ server
 
 # AI agent files
 .claude/
+.codex/
 CLAUDE.md
 AGENTS.md
 docs/superpowers/
