@@ -26,7 +26,19 @@ This is not a dashboard UI project. Grafana is the UI. The backend observability
 
 ## Quickstart
 
-> Local run commands will be added in Phase 0.2 once the Go service skeleton is in place, and Docker Compose commands in Phase 0.3.
+```bash
+# Run locally
+make run
+
+# Start backend + Grafana in Docker
+make local-up   # backend: http://localhost:8080  grafana: http://localhost:3000
+make local-down
+
+# Development
+make build
+make test
+make lint
+```
 
 ## Planning Docs
 
