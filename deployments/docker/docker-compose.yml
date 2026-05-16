@@ -1,0 +1,25 @@
+services:
+  backend:
+    build:
+      context: ../../
+      dockerfile: deployments/docker/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      OBS_DATA_DIR: /data
+      OBS_LOG_LEVEL: info
+    volumes:
+      - obs-data:/data
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    ports:
+      - "3000:3000"
+    volumes:
+      - obs-grafana-data:/var/lib/grafana
+      - ../../observability/grafana/datasources:/etc/grafana/provisioning/datasources
+      - ../../observability/grafana/dashboards:/etc/grafana/provisioning/dashboards
+
+volumes:
+  obs-data:
+  obs-grafana-data:
