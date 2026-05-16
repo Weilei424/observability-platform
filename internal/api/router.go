@@ -1,0 +1,19 @@
+package api
+
+import (
+	"github.com/go-chi/chi/v5"
+	chimiddleware "github.com/go-chi/chi/v5/middleware"
+	"github.com/masonwheeler/observability-platform/internal/api/middleware"
+)
+
+func (s *Server) buildRouter() chi.Router {
+	r := chi.NewRouter()
+
+	r.Use(chimiddleware.RequestID)
+	r.Use(middleware.Logger(s.log))
+
+	r.Get("/healthz", s.handleHealthz)
+	r.Get("/readyz", s.handleReadyz)
+
+	return r
+}
