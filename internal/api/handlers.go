@@ -2,41 +2,34 @@ package api
 
 import (
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"os"
 )
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
-		s.log.Error("encode healthz response", "err", err)
-	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	f, err := os.CreateTemp(s.cfg.DataDir, ".readyz-probe-*")
 	if err != nil {
-		writeUnavailable(w, s.log, err.Error())
+		writeUnavailable(w, err.Error())
 		return
 	}
 	f.Close()
 	os.Remove(f.Name())
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
-		s.log.Error("encode healthz response", "err", err)
-	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func writeUnavailable(w http.ResponseWriter, log *slog.Logger, reason string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusServiceUnavailable)
-	if err := json.NewEncoder(w).Encode(map[string]string{
+func writeUnavailable(w http.ResponseWriter, reason string) {
+	writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 		"status": "unavailable",
 		"reason": reason,
-	}); err != nil {
-		log.Error("encode unavailable response", "err", err)
-	}
+	})
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
 }
