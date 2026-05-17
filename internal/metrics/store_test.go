@@ -135,3 +135,121 @@ func TestMemoryStore_QueryRange_UnknownSeries_ReturnsNil(t *testing.T) {
 		t.Errorf("expected nil for unknown series, got %v", got)
 	}
 }
+
+func TestMemoryStore_SelectSeries_ByMetricName(t *testing.T) {
+	store := metrics.NewMemoryStore()
+	a := mustNewLabels(t, map[string]string{"__name__": "cpu_usage", "host": "a"})
+	b := mustNewLabels(t, map[string]string{"__name__": "mem_usage", "host": "a"})
+
+	_ = store.Append(a, 1000, 1.0)
+	_ = store.Append(b, 1000, 2.0)
+
+	sel := metrics.Selector{MetricName: "cpu_usage"}
+	got := store.SelectSeries(sel)
+	if len(got) != 1 {
+		t.Fatalf("got %d series, want 1", len(got))
+	}
+	name, _ := got[0].Labels.Get("__name__")
+	if name != "cpu_usage" {
+		t.Errorf("Labels __name__ = %q, want %q", name, "cpu_usage")
+	}
+}
+
+func TestMemoryStore_SelectSeries_ByLabelMatcher(t *testing.T) {
+	store := metrics.NewMemoryStore()
+	a := mustNewLabels(t, map[string]string{"__name__": "req", "service": "api"})
+	b := mustNewLabels(t, map[string]string{"__name__": "req", "service": "db"})
+
+	_ = store.Append(a, 1000, 1.0)
+	_ = store.Append(b, 1000, 2.0)
+
+	sel := metrics.Selector{
+		MetricName: "req",
+		Matchers:   []metrics.Matcher{{Name: "service", Value: "api"}},
+	}
+	got := store.SelectSeries(sel)
+	if len(got) != 1 {
+		t.Fatalf("got %d series, want 1", len(got))
+	}
+	svc, _ := got[0].Labels.Get("service")
+	if svc != "api" {
+		t.Errorf("service = %q, want %q", svc, "api")
+	}
+}
+
+func TestMemoryStore_SelectSeries_NoMatch_ReturnsEmpty(t *testing.T) {
+	store := metrics.NewMemoryStore()
+	labels := mustNewLabels(t, map[string]string{"__name__": "cpu_usage"})
+	_ = store.Append(labels, 1000, 1.0)
+
+	sel := metrics.Selector{MetricName: "nonexistent"}
+	got := store.SelectSeries(sel)
+	if len(got) != 0 {
+		t.Errorf("got %d series, want 0", len(got))
+	}
+}
+
+func TestMemoryStore_SelectSeries_EmptyMetricName_MatchesAll(t *testing.T) {
+	store := metrics.NewMemoryStore()
+	a := mustNewLabels(t, map[string]string{"__name__": "cpu_usage"})
+	b := mustNewLabels(t, map[string]string{"__name__": "mem_usage"})
+	_ = store.Append(a, 1000, 1.0)
+	_ = store.Append(b, 1000, 2.0)
+
+	sel := metrics.Selector{}
+	got := store.SelectSeries(sel)
+	if len(got) != 2 {
+		t.Errorf("got %d series, want 2", len(got))
+	}
+}
+
+func TestMemoryStore_QueryInstant_ReturnsLatestAtOrBefore(t *testing.T) {
+	store := metrics.NewMemoryStore()
+	labels := mustNewLabels(t, map[string]string{"__name__": "cpu_usage"})
+	_ = store.Append(labels, 1000, 1.0)
+	_ = store.Append(labels, 2000, 2.0)
+	_ = store.Append(labels, 3000, 3.0)
+
+	id := labels.Fingerprint()
+
+	s, ok := store.QueryInstant(id, 2500)
+	if !ok {
+		t.Fatal("expected sample, got none")
+	}
+	if s.TimestampMs != 2000 || s.Value != 2.0 {
+		t.Errorf("got {%d, %v}, want {2000, 2.0}", s.TimestampMs, s.Value)
+	}
+}
+
+func TestMemoryStore_QueryInstant_ExactMatch(t *testing.T) {
+	store := metrics.NewMemoryStore()
+	labels := mustNewLabels(t, map[string]string{"__name__": "cpu_usage"})
+	_ = store.Append(labels, 1000, 1.0)
+
+	s, ok := store.QueryInstant(labels.Fingerprint(), 1000)
+	if !ok {
+		t.Fatal("expected sample, got none")
+	}
+	if s.TimestampMs != 1000 || s.Value != 1.0 {
+		t.Errorf("got {%d, %v}, want {1000, 1.0}", s.TimestampMs, s.Value)
+	}
+}
+
+func TestMemoryStore_QueryInstant_BeforeFirstSample_ReturnsFalse(t *testing.T) {
+	store := metrics.NewMemoryStore()
+	labels := mustNewLabels(t, map[string]string{"__name__": "cpu_usage"})
+	_ = store.Append(labels, 1000, 1.0)
+
+	_, ok := store.QueryInstant(labels.Fingerprint(), 500)
+	if ok {
+		t.Error("expected no sample before first, got one")
+	}
+}
+
+func TestMemoryStore_QueryInstant_UnknownSeries_ReturnsFalse(t *testing.T) {
+	store := metrics.NewMemoryStore()
+	_, ok := store.QueryInstant(metrics.SeriesID(999), 1000)
+	if ok {
+		t.Error("expected false for unknown series, got true")
+	}
+}
