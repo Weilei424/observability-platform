@@ -11,6 +11,7 @@ import (
 
 	"github.com/masonwheeler/observability-platform/internal/api"
 	"github.com/masonwheeler/observability-platform/internal/config"
+	"github.com/masonwheeler/observability-platform/internal/metrics"
 )
 
 func newTestServer(t *testing.T, dataDir string) *api.Server {
@@ -21,7 +22,7 @@ func newTestServer(t *testing.T, dataDir string) *api.Server {
 		LogLevel: "info",
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	return api.New(cfg, log)
+	return api.New(cfg, log, metrics.NewMemoryStore())
 }
 
 func TestHealthz_Returns200(t *testing.T) {
