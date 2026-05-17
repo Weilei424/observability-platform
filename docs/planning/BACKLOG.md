@@ -81,16 +81,16 @@
 - [x] Integration test: repeated writes append to same series
 
 ### Phase 1.3 — In-Memory Query Engine
-- [ ] Add selector parser for `metric_name{label="value"}`
-- [ ] Add equality label matcher support
-- [ ] Add instant query execution over in-memory samples
-- [ ] Add range query execution over in-memory samples
-- [ ] Wire `GET /api/v1/query`
-- [ ] Wire `GET /api/v1/query_range`
-- [ ] Unit tests: selector parser
-- [ ] Unit tests: label matcher behavior
-- [ ] Integration test: ingest → instant query
-- [ ] Integration test: ingest → range query
+- [x] Add selector parser for `metric_name{label="value"}`
+- [x] Add equality label matcher support
+- [x] Add instant query execution over in-memory samples
+- [x] Add range query execution over in-memory samples
+- [x] Wire `GET /api/v1/query`
+- [x] Wire `GET /api/v1/query_range`
+- [x] Unit tests: selector parser
+- [x] Unit tests: label matcher behavior
+- [x] Integration test: ingest → instant query
+- [x] Integration test: ingest → range query
 
 ### Phase 1.4 — WAL Durability
 - [ ] Design WAL record format for metric samples
