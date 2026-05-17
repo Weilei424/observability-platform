@@ -16,6 +16,8 @@ func (s *Server) buildRouter() chi.Router {
 	r.Get("/readyz", s.handleReadyz)
 
 	r.Post("/api/v1/ingest/metrics", s.handleIngestMetrics)
+	r.Get("/api/v1/query", s.handleQuery)
+	r.Get("/api/v1/query_range", s.handleQueryRange)
 
 	return r
 }
