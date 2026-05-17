@@ -8,6 +8,7 @@ import (
 
 	"github.com/masonwheeler/observability-platform/internal/api"
 	"github.com/masonwheeler/observability-platform/internal/config"
+	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/observability"
 )
 
@@ -32,7 +33,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	srv := api.New(cfg, log)
+	store := metrics.NewMemoryStore()
+	srv := api.New(cfg, log, store)
 
 	log.Info("starting server",
 		slog.String("addr", cfg.HTTPAddr),
