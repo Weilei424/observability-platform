@@ -17,13 +17,14 @@ import (
 func newIngestTestServer(t *testing.T) (*api.Server, *metrics.MemoryStore) {
 	t.Helper()
 	store := metrics.NewMemoryStore()
+	engine := metrics.NewQueryEngine(store)
 	cfg := &config.Config{
 		HTTPAddr: ":8080",
 		DataDir:  t.TempDir(),
 		LogLevel: "info",
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	return api.New(cfg, log, store), store
+	return api.New(cfg, log, store, engine), store
 }
 
 func postIngest(t *testing.T, srv *api.Server, body any) *httptest.ResponseRecorder {
