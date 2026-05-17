@@ -70,15 +70,15 @@
 - [x] Unit tests: `Labels.Get` binary search, `Labels.Map` returns copy
 
 ### Phase 1.2 — Metrics Ingestion API
-- [ ] Add metrics ingestion handler: `POST /api/v1/ingest/metrics`
-- [ ] Add request DTO and validation errors
-- [ ] Add in-memory series registry
-- [ ] Add in-memory sample append path
-- [ ] Define duplicate sample behavior
-- [ ] Define out-of-order sample behavior
-- [ ] Integration test: ingest valid sample
-- [ ] Integration test: reject invalid sample
-- [ ] Integration test: repeated writes append to same series
+- [x] Add metrics ingestion handler: `POST /api/v1/ingest/metrics`
+- [x] Add request DTO and validation errors
+- [x] Add in-memory series registry
+- [x] Add in-memory sample append path
+- [x] Define duplicate sample behavior
+- [x] Define out-of-order sample behavior
+- [x] Integration test: ingest valid sample
+- [x] Integration test: reject invalid sample
+- [x] Integration test: repeated writes append to same series
 
 ### Phase 1.3 — In-Memory Query Engine
 - [ ] Add selector parser for `metric_name{label="value"}`
