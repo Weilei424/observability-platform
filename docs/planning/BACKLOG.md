@@ -58,10 +58,10 @@
 - [x] Create `internal/metrics/validation.go` — `ValidationError`, `validateLabelMap`, `ValidateSample`
 - [x] Metric name stored as `__name__` label (Prometheus convention); required on every `Labels` value
 - [x] Label normalization: sort pairs by name on construction; fingerprint is computed once and cached
-- [x] Fingerprinting: FNV-1a 64-bit over canonical string `__name__="v",label1="v1",...`
+- [x] Fingerprinting: FNV-1a 64-bit, length-prefixed binary encoding (8-byte big-endian length + field bytes, per name/value pair)
 - [x] Validate `__name__` value: `[a-zA-Z_:][a-zA-Z0-9_:]*`
 - [x] Validate label names: `[a-zA-Z_][a-zA-Z0-9_]*`; `__` prefix reserved (only `__name__` permitted)
-- [x] Validate label values: any valid UTF-8 including empty string
+- [x] Validate label values: must be valid UTF-8 (checked via `utf8.ValidString`); empty string accepted
 - [x] `ValidateSample` accepts all float64 (NaN, ±Inf) and all int64 timestamps
 - [x] Unit tests: same labels in different map order → same `SeriesID`
 - [x] Unit tests: different values / names / extra label → different `SeriesID`
