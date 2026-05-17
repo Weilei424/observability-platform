@@ -74,12 +74,20 @@ func TestLabels_InvalidMetricName_Error(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid metric name")
 	}
+	var ve *metrics.ValidationError
+	if !errors.As(err, &ve) {
+		t.Errorf("expected *ValidationError, got %T: %v", err, err)
+	}
 }
 
 func TestLabels_EmptyMetricName_Error(t *testing.T) {
 	_, err := metrics.NewLabels(map[string]string{"__name__": ""})
 	if err == nil {
 		t.Fatal("expected error for empty metric name")
+	}
+	var ve *metrics.ValidationError
+	if !errors.As(err, &ve) {
+		t.Errorf("expected *ValidationError, got %T: %v", err, err)
 	}
 }
 
@@ -97,12 +105,20 @@ func TestLabels_EmptyLabelName_Error(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty label name")
 	}
+	var ve *metrics.ValidationError
+	if !errors.As(err, &ve) {
+		t.Errorf("expected *ValidationError, got %T: %v", err, err)
+	}
 }
 
 func TestLabels_InvalidLabelName_Error(t *testing.T) {
 	_, err := metrics.NewLabels(map[string]string{"__name__": "http_requests", "123bad": "value"})
 	if err == nil {
 		t.Fatal("expected error for label name starting with a digit")
+	}
+	var ve *metrics.ValidationError
+	if !errors.As(err, &ve) {
+		t.Errorf("expected *ValidationError, got %T: %v", err, err)
 	}
 }
 
@@ -111,12 +127,20 @@ func TestLabels_LabelNameWithHyphen_Error(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for label name containing a hyphen")
 	}
+	var ve *metrics.ValidationError
+	if !errors.As(err, &ve) {
+		t.Errorf("expected *ValidationError, got %T: %v", err, err)
+	}
 }
 
 func TestLabels_ReservedDoubleUnderscorePrefix_Error(t *testing.T) {
 	_, err := metrics.NewLabels(map[string]string{"__name__": "http_requests", "__job__": "scraper"})
 	if err == nil {
 		t.Fatal("expected error for label name with __ prefix")
+	}
+	var ve *metrics.ValidationError
+	if !errors.As(err, &ve) {
+		t.Errorf("expected *ValidationError, got %T: %v", err, err)
 	}
 }
 
@@ -126,6 +150,33 @@ func TestLabels_EmptyLabelValue_Accepted(t *testing.T) {
 	_, err := metrics.NewLabels(map[string]string{"__name__": "http_requests", "service": ""})
 	if err != nil {
 		t.Errorf("unexpected error for empty label value: %v", err)
+	}
+}
+
+func TestLabels_InvalidUTF8Value_Error(t *testing.T) {
+	_, err := metrics.NewLabels(map[string]string{"__name__": "http_requests", "service": "\xff\xfe"})
+	if err == nil {
+		t.Fatal("expected error for invalid UTF-8 label value")
+	}
+	var ve *metrics.ValidationError
+	if !errors.As(err, &ve) {
+		t.Errorf("expected *ValidationError, got %T: %v", err, err)
+	}
+}
+
+// --- Fingerprint stability ---
+
+func TestLabels_Fingerprint_Stable(t *testing.T) {
+	l, _ := metrics.NewLabels(map[string]string{
+		"__name__": "http_requests",
+		"service":  "api",
+	})
+	// Computed from FNV-1a 64-bit with length-prefixed binary encoding.
+	// If this fails, the fingerprinting algorithm changed — a breaking change for
+	// any persisted SeriesIDs (WAL, blocks, indexes).
+	const want metrics.SeriesID = 9696857623413696903
+	if got := l.Fingerprint(); got != want {
+		t.Errorf("fingerprint = %d, want %d — algorithm changed, update persisted data", got, want)
 	}
 }
 
