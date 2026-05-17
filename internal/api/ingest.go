@@ -15,8 +15,8 @@ type ingestRequest struct {
 type ingestEntry struct {
 	Name        string            `json:"name"`
 	Labels      map[string]string `json:"labels"`
-	TimestampMs int64             `json:"timestamp_ms"`
-	Value       float64           `json:"value"`
+	TimestampMs *int64            `json:"timestamp_ms"`
+	Value       *float64          `json:"value"`
 }
 
 type ingestErrorItem struct {
@@ -49,6 +49,17 @@ func (s *Server) handleIngestMetrics(w http.ResponseWriter, r *http.Request) {
 	samples := make([]pending, 0, len(req.Metrics))
 
 	for i, entry := range req.Metrics {
+		var entryHasError bool
+
+		if entry.TimestampMs == nil {
+			validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: "timestamp_ms", Message: "required"})
+			entryHasError = true
+		}
+		if entry.Value == nil {
+			validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: "value", Message: "required"})
+			entryHasError = true
+		}
+
 		labelMap := make(map[string]string, len(entry.Labels)+1)
 		for k, v := range entry.Labels {
 			labelMap[k] = v
@@ -63,10 +74,24 @@ func (s *Server) handleIngestMetrics(w http.ResponseWriter, r *http.Request) {
 			} else {
 				validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: "unknown", Message: err.Error()})
 			}
+			entryHasError = true
+		}
+
+		if entryHasError {
 			continue
 		}
 
-		samples = append(samples, pending{labels: labels, timestampMs: entry.TimestampMs, value: entry.Value})
+		if err := metrics.ValidateSample(metrics.Sample{TimestampMs: *entry.TimestampMs, Value: *entry.Value}); err != nil {
+			var ve *metrics.ValidationError
+			if errors.As(err, &ve) {
+				validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: ve.Field, Message: ve.Message})
+			} else {
+				validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: "unknown", Message: err.Error()})
+			}
+			continue
+		}
+
+		samples = append(samples, pending{labels: labels, timestampMs: *entry.TimestampMs, value: *entry.Value})
 	}
 
 	if len(validationErrors) > 0 {
