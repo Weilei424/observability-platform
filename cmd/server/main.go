@@ -34,7 +34,8 @@ func main() {
 	}
 
 	store := metrics.NewMemoryStore()
-	srv := api.New(cfg, log, store)
+	engine := metrics.NewQueryEngine(store)
+	srv := api.New(cfg, log, store, engine)
 
 	log.Info("starting server",
 		slog.String("addr", cfg.HTTPAddr),
