@@ -14,13 +14,15 @@ type Server struct {
 	log      *slog.Logger
 	router   chi.Router
 	ingester metrics.Ingester
+	engine   *metrics.QueryEngine
 }
 
-func New(cfg *config.Config, log *slog.Logger, ingester metrics.Ingester) *Server {
+func New(cfg *config.Config, log *slog.Logger, ingester metrics.Ingester, engine *metrics.QueryEngine) *Server {
 	s := &Server{
 		cfg:      cfg,
 		log:      log,
 		ingester: ingester,
+		engine:   engine,
 	}
 	s.router = s.buildRouter()
 	return s
