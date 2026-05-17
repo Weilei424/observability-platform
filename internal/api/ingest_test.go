@@ -196,6 +196,58 @@ func TestIngestMetrics_RepeatedWrites_AppendToSameSeries(t *testing.T) {
 	}
 }
 
+func TestIngestMetrics_MissingTimestamp_Returns400(t *testing.T) {
+	srv, _ := newIngestTestServer(t)
+
+	rr := postIngest(t, srv, map[string]any{
+		"metrics": []any{
+			map[string]any{"name": "http_requests_total", "value": float64(1)},
+		},
+	})
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d; body: %s", rr.Code, http.StatusBadRequest, rr.Body.String())
+	}
+	var body map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	errs, ok := body["errors"].([]any)
+	if !ok || len(errs) == 0 {
+		t.Errorf("expected errors array, got: %v", body)
+	}
+	first := errs[0].(map[string]any)
+	if first["field"] != "timestamp_ms" {
+		t.Errorf("expected field=timestamp_ms, got %v", first["field"])
+	}
+}
+
+func TestIngestMetrics_MissingValue_Returns400(t *testing.T) {
+	srv, _ := newIngestTestServer(t)
+
+	rr := postIngest(t, srv, map[string]any{
+		"metrics": []any{
+			map[string]any{"name": "http_requests_total", "timestamp_ms": int64(1000)},
+		},
+	})
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d; body: %s", rr.Code, http.StatusBadRequest, rr.Body.String())
+	}
+	var body map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	errs, ok := body["errors"].([]any)
+	if !ok || len(errs) == 0 {
+		t.Errorf("expected errors array, got: %v", body)
+	}
+	first := errs[0].(map[string]any)
+	if first["field"] != "value" {
+		t.Errorf("expected field=value, got %v", first["field"])
+	}
+}
+
 func TestIngestMetrics_MalformedJSON_Returns400(t *testing.T) {
 	srv, _ := newIngestTestServer(t)
 
