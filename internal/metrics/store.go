@@ -67,6 +67,65 @@ func (s *MemoryStore) Append(labels Labels, timestampMs int64, value float64) er
 	return nil
 }
 
+// MatchedSeries is a series ID paired with its label set, returned by SelectSeries.
+type MatchedSeries struct {
+	id     SeriesID
+	Labels Labels
+}
+
+// SelectSeries returns all series that match sel. Matching requires:
+//   - sel.MetricName matches the series __name__ label (skipped when MetricName is "")
+//   - every Matcher in sel.Matchers matches the corresponding label value (AND logic)
+//
+// No label index is used — this is a full scan.
+func (s *MemoryStore) SelectSeries(sel Selector) []MatchedSeries {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var result []MatchedSeries
+	for id, ms := range s.series {
+		if sel.MetricName != "" {
+			name, _ := ms.labels.Get("__name__")
+			if name != sel.MetricName {
+				continue
+			}
+		}
+		match := true
+		for _, m := range sel.Matchers {
+			val, ok := ms.labels.Get(m.Name)
+			if !ok || val != m.Value {
+				match = false
+				break
+			}
+		}
+		if match {
+			result = append(result, MatchedSeries{id: id, Labels: ms.labels})
+		}
+	}
+	return result
+}
+
+// QueryInstant returns the latest sample with TimestampMs <= tMs for the given series.
+// Returns (Sample{}, false) if the series does not exist or has no sample at or before tMs.
+func (s *MemoryStore) QueryInstant(id SeriesID, tMs int64) (Sample, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	ms, ok := s.series[id]
+	if !ok {
+		return Sample{}, false
+	}
+
+	// Find the first index where TimestampMs > tMs; the sample before it is our answer.
+	i := sort.Search(len(ms.samples), func(i int) bool {
+		return ms.samples[i].TimestampMs > tMs
+	})
+	if i == 0 {
+		return Sample{}, false
+	}
+	return ms.samples[i-1], true
+}
+
 // QueryRange returns a copy of samples for series id where startMs <= TimestampMs <= endMs.
 func (s *MemoryStore) QueryRange(id SeriesID, startMs, endMs int64) []Sample {
 	s.mu.RLock()
