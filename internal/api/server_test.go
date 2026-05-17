@@ -22,7 +22,9 @@ func newTestServer(t *testing.T, dataDir string) *api.Server {
 		LogLevel: "info",
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	return api.New(cfg, log, metrics.NewMemoryStore())
+	store := metrics.NewMemoryStore()
+	engine := metrics.NewQueryEngine(store)
+	return api.New(cfg, log, store, engine)
 }
 
 func TestHealthz_Returns200(t *testing.T) {
