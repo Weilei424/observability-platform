@@ -15,5 +15,7 @@ func (s *Server) buildRouter() chi.Router {
 	r.Get("/healthz", s.handleHealthz)
 	r.Get("/readyz", s.handleReadyz)
 
+	r.Post("/api/v1/ingest/metrics", s.handleIngestMetrics)
+
 	return r
 }
