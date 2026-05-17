@@ -53,14 +53,21 @@
 ## Phase 1 Execution Checklist — Single-Node Metrics TSDB
 
 ### Phase 1.1 — Metrics Data Model
-- [ ] Define `MetricName`, `LabelSet`, `SeriesID`, `Sample`
-- [ ] Implement label normalization with sorted labels
-- [ ] Implement deterministic series fingerprinting
-- [ ] Validate metric names
-- [ ] Validate label names and label values
-- [ ] Validate timestamps and float64 values
-- [ ] Unit tests: same labels in different order produce same `SeriesID`
-- [ ] Unit tests: invalid names/labels/timestamps are rejected
+- [x] Create `internal/metrics/model.go` — `SeriesID` (named uint64), `Label`, `Labels` (opaque with cached fingerprint), `Sample`
+- [x] Create `internal/metrics/labels.go` — `NewLabels` constructor, FNV-1a fingerprinting, `Get`, `Map`
+- [x] Create `internal/metrics/validation.go` — `ValidationError`, `validateLabelMap`, `ValidateSample`
+- [x] Metric name stored as `__name__` label (Prometheus convention); required on every `Labels` value
+- [x] Label normalization: sort pairs by name on construction; fingerprint is computed once and cached
+- [x] Fingerprinting: FNV-1a 64-bit over canonical string `__name__="v",label1="v1",...`
+- [x] Validate `__name__` value: `[a-zA-Z_:][a-zA-Z0-9_:]*`
+- [x] Validate label names: `[a-zA-Z_][a-zA-Z0-9_]*`; `__` prefix reserved (only `__name__` permitted)
+- [x] Validate label values: any valid UTF-8 including empty string
+- [x] `ValidateSample` accepts all float64 (NaN, ±Inf) and all int64 timestamps
+- [x] Unit tests: same labels in different map order → same `SeriesID`
+- [x] Unit tests: different values / names / extra label → different `SeriesID`
+- [x] Unit tests: missing `__name__`, invalid metric name, invalid label name, reserved prefix → typed `ValidationError`
+- [x] Unit tests: empty label value, NaN, ±Inf, valid timestamp → accepted
+- [x] Unit tests: `Labels.Get` binary search, `Labels.Map` returns copy
 
 ### Phase 1.2 — Metrics Ingestion API
 - [ ] Add metrics ingestion handler: `POST /api/v1/ingest/metrics`
