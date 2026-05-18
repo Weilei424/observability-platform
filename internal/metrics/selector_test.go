@@ -155,23 +155,26 @@ func TestParseSelector_LabelValueContainingOperatorChars_Accepted(t *testing.T) 
 	}
 }
 
-func TestParseSelector_PromQLFunctionCall_ReturnsError(t *testing.T) {
+func TestParseSelector_InvalidMetricName_ReturnsError(t *testing.T) {
 	cases := []string{
-		"rate(http_requests_total[5m])",
-		"sum(cpu_usage)",
-		"avg(metric)",
+		"rate(http_requests_total[5m])", // PromQL function call
+		"sum(cpu_usage)",                // PromQL aggregation
+		"http_requests_total[5m]",       // range selector
+		"metric + other",                // binary expression
+		"1bad",                          // starts with digit
+		"metric offset 5m",              // offset modifier (space in name)
 	}
 	for _, tc := range cases {
 		_, err := metrics.ParseSelector(tc)
 		if err == nil {
-			t.Errorf("expected error for PromQL expression %q, got nil", tc)
+			t.Errorf("expected error for invalid metric name %q, got nil", tc)
 		}
 	}
 }
 
-func TestParseSelector_RangeSelector_ReturnsError(t *testing.T) {
-	_, err := metrics.ParseSelector("http_requests_total[5m]")
+func TestParseSelector_InvalidLabelName_ReturnsError(t *testing.T) {
+	_, err := metrics.ParseSelector(`metric{bad-label="x"}`)
 	if err == nil {
-		t.Error("expected error for range selector, got nil")
+		t.Error("expected error for invalid label name containing '-', got nil")
 	}
 }
