@@ -34,10 +34,17 @@ func ParseSelector(s string) (Selector, error) {
 
 	braceIdx := strings.IndexByte(s, '{')
 	if braceIdx == -1 {
-		return Selector{MetricName: strings.TrimSpace(s)}, nil
+		name := strings.TrimSpace(s)
+		if err := checkUnsupportedPromQL(name); err != nil {
+			return Selector{}, err
+		}
+		return Selector{MetricName: name}, nil
 	}
 
 	sel := Selector{MetricName: strings.TrimSpace(s[:braceIdx])}
+	if err := checkUnsupportedPromQL(sel.MetricName); err != nil {
+		return Selector{}, err
+	}
 
 	rest := s[braceIdx+1:]
 	closeIdx := strings.LastIndexByte(rest, '}')
@@ -86,6 +93,16 @@ func splitOnComma(s string) []string {
 		}
 	}
 	return append(parts, s[start:])
+}
+
+// checkUnsupportedPromQL returns an error if the metric name contains
+// characters that indicate a PromQL function call or range selector.
+// These are not supported in Phase 1.3; callers must pass a plain metric name.
+func checkUnsupportedPromQL(name string) error {
+	if strings.ContainsAny(name, "([") {
+		return fmt.Errorf("unsupported query: PromQL functions and range selectors are not supported")
+	}
+	return nil
 }
 
 // parseMatcher parses a single `label="value"` expression.
