@@ -35,15 +35,15 @@ func ParseSelector(s string) (Selector, error) {
 	braceIdx := strings.IndexByte(s, '{')
 	if braceIdx == -1 {
 		name := strings.TrimSpace(s)
-		if err := checkUnsupportedPromQL(name); err != nil {
-			return Selector{}, err
+		if !metricNameRe.MatchString(name) {
+			return Selector{}, fmt.Errorf("invalid metric name in selector: %q", name)
 		}
 		return Selector{MetricName: name}, nil
 	}
 
 	sel := Selector{MetricName: strings.TrimSpace(s[:braceIdx])}
-	if err := checkUnsupportedPromQL(sel.MetricName); err != nil {
-		return Selector{}, err
+	if sel.MetricName != "" && !metricNameRe.MatchString(sel.MetricName) {
+		return Selector{}, fmt.Errorf("invalid metric name in selector: %q", sel.MetricName)
 	}
 
 	rest := s[braceIdx+1:]
@@ -95,16 +95,6 @@ func splitOnComma(s string) []string {
 	return append(parts, s[start:])
 }
 
-// checkUnsupportedPromQL returns an error if the metric name contains
-// characters that indicate a PromQL function call or range selector.
-// These are not supported in Phase 1.3; callers must pass a plain metric name.
-func checkUnsupportedPromQL(name string) error {
-	if strings.ContainsAny(name, "([") {
-		return fmt.Errorf("unsupported query: PromQL functions and range selectors are not supported")
-	}
-	return nil
-}
-
 // parseMatcher parses a single `label="value"` expression.
 func parseMatcher(s string) (Matcher, error) {
 	eqIdx := strings.IndexByte(s, '=')
@@ -127,6 +117,9 @@ func parseMatcher(s string) (Matcher, error) {
 	name := strings.TrimSpace(s[:eqIdx])
 	if name == "" {
 		return Matcher{}, fmt.Errorf("empty label name in matcher: %s", s)
+	}
+	if !labelNameRe.MatchString(name) {
+		return Matcher{}, fmt.Errorf("invalid label name in matcher: %q", name)
 	}
 
 	raw := strings.TrimSpace(s[eqIdx+1:])
