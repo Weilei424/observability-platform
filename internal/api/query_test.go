@@ -229,3 +229,135 @@ func TestQuery_RangeQuery_InvalidSelector_Returns400(t *testing.T) {
 		t.Fatalf("status = %d, want 400", rr.Code)
 	}
 }
+
+func TestQuery_RangeQuery_InvalidStep_Returns400(t *testing.T) {
+	srv, _ := newQueryTestServer(t)
+
+	rr := getQuery(t, srv, "/api/v1/query_range?query=cpu_usage&start=1&end=3&step=0")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body: %s", rr.Code, rr.Body.String())
+	}
+	body := decodePromResponse(t, rr)
+	if body["errorType"] != "bad_data" {
+		t.Errorf("errorType = %v, want bad_data", body["errorType"])
+	}
+}
+
+func TestQuery_RangeQuery_EndBeforeStart_Returns400(t *testing.T) {
+	srv, _ := newQueryTestServer(t)
+
+	rr := getQuery(t, srv, "/api/v1/query_range?query=cpu_usage&start=5&end=1&step=1")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body: %s", rr.Code, rr.Body.String())
+	}
+	body := decodePromResponse(t, rr)
+	if body["errorType"] != "bad_data" {
+		t.Errorf("errorType = %v, want bad_data", body["errorType"])
+	}
+}
+
+func TestQuery_PromQLFunctionCall_Returns400(t *testing.T) {
+	srv, _ := newQueryTestServer(t)
+
+	u := "/api/v1/query?" + url.Values{"query": {"rate(http_requests_total[5m])"}, "time": {"1000"}}.Encode()
+	rr := getQuery(t, srv, u)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body: %s", rr.Code, rr.Body.String())
+	}
+	body := decodePromResponse(t, rr)
+	if body["errorType"] != "bad_data" {
+		t.Errorf("errorType = %v, want bad_data", body["errorType"])
+	}
+}
+
+func TestQuery_IngestThenInstantQuery_ReturnsIngestedValue(t *testing.T) {
+	srv, _ := newQueryTestServer(t)
+
+	// Ingest via HTTP POST
+	rr := postIngest(t, srv, map[string]any{
+		"metrics": []any{
+			map[string]any{
+				"name":         "http_requests_total",
+				"labels":       map[string]string{"service": "api"},
+				"timestamp_ms": int64(1000),
+				"value":        float64(42),
+			},
+		},
+	})
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("ingest status = %d, want 204; body: %s", rr.Code, rr.Body.String())
+	}
+
+	// Query via HTTP GET
+	u := "/api/v1/query?" + url.Values{
+		"query": {`http_requests_total{service="api"}`},
+		"time":  {"1"},
+	}.Encode()
+	rr = getQuery(t, srv, u)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("query status = %d, want 200; body: %s", rr.Code, rr.Body.String())
+	}
+
+	body := decodePromResponse(t, rr)
+	if body["status"] != "success" {
+		t.Fatalf("status = %v, want success", body["status"])
+	}
+	data := body["data"].(map[string]any)
+	result := data["result"].([]any)
+	if len(result) != 1 {
+		t.Fatalf("result len = %d, want 1", len(result))
+	}
+	sample := result[0].(map[string]any)
+	value := sample["value"].([]any)
+	if value[1] != "42" {
+		t.Errorf("value = %v, want \"42\"", value[1])
+	}
+}
+
+func TestQuery_IngestThenRangeQuery_ReturnsIngestedValues(t *testing.T) {
+	srv, _ := newQueryTestServer(t)
+
+	// Ingest two samples at t=1s and t=3s
+	for _, m := range []struct {
+		ts  int64
+		val float64
+	}{{1000, 10}, {3000, 30}} {
+		rr := postIngest(t, srv, map[string]any{
+			"metrics": []any{
+				map[string]any{
+					"name":         "cpu_usage",
+					"timestamp_ms": m.ts,
+					"value":        m.val,
+				},
+			},
+		})
+		if rr.Code != http.StatusNoContent {
+			t.Fatalf("ingest status = %d; body: %s", rr.Code, rr.Body.String())
+		}
+	}
+
+	// Range query: start=1, end=3, step=1 → ticks at 1000ms, 2000ms, 3000ms
+	rr := getQuery(t, srv, "/api/v1/query_range?query=cpu_usage&start=1&end=3&step=1")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("query status = %d, want 200; body: %s", rr.Code, rr.Body.String())
+	}
+
+	body := decodePromResponse(t, rr)
+	if body["status"] != "success" {
+		t.Fatalf("status = %v, want success", body["status"])
+	}
+	data := body["data"].(map[string]any)
+	result := data["result"].([]any)
+	if len(result) != 1 {
+		t.Fatalf("result len = %d, want 1", len(result))
+	}
+	values := result[0].(map[string]any)["values"].([]any)
+	if len(values) != 3 {
+		t.Fatalf("values len = %d, want 3", len(values))
+	}
+	// tick 2000ms (t=2s) carries forward value 10 from the sample at 1000ms
+	pair := values[1].([]any)
+	if pair[1] != "10" {
+		t.Errorf("values[1] = %v, want \"10\"", pair[1])
+	}
+}
