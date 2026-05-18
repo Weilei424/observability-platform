@@ -147,6 +147,15 @@ func (s *Server) handleQueryRange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if stepMs <= 0 {
+		writePromError(w, http.StatusBadRequest, "bad_data", "invalid parameter 'step': must be greater than 0")
+		return
+	}
+	if endMs < startMs {
+		writePromError(w, http.StatusBadRequest, "bad_data", "invalid parameter 'end': must be >= start")
+		return
+	}
+
 	sel, err := metrics.ParseSelector(queryStr)
 	if err != nil {
 		writePromError(w, http.StatusBadRequest, "bad_data", "invalid query: "+err.Error())
