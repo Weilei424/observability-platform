@@ -154,3 +154,24 @@ func TestParseSelector_LabelValueContainingOperatorChars_Accepted(t *testing.T) 
 		t.Errorf("unexpected matcher: %+v", sel.Matchers)
 	}
 }
+
+func TestParseSelector_PromQLFunctionCall_ReturnsError(t *testing.T) {
+	cases := []string{
+		"rate(http_requests_total[5m])",
+		"sum(cpu_usage)",
+		"avg(metric)",
+	}
+	for _, tc := range cases {
+		_, err := metrics.ParseSelector(tc)
+		if err == nil {
+			t.Errorf("expected error for PromQL expression %q, got nil", tc)
+		}
+	}
+}
+
+func TestParseSelector_RangeSelector_ReturnsError(t *testing.T) {
+	_, err := metrics.ParseSelector("http_requests_total[5m]")
+	if err == nil {
+		t.Error("expected error for range selector, got nil")
+	}
+}
