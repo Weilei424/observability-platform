@@ -54,3 +54,35 @@ func TestLoad_Defaults(t *testing.T) {
 		t.Errorf("LogLevel = %q, want %q", cfg.LogLevel, "info")
 	}
 }
+
+func TestLoad_WALDefaults(t *testing.T) {
+	t.Setenv("OBS_DATA_DIR", "data")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.WALSegmentMaxBytes != 128<<20 {
+		t.Errorf("WALSegmentMaxBytes = %d, want %d", cfg.WALSegmentMaxBytes, 128<<20)
+	}
+	if cfg.WALSyncEveryN != 1 {
+		t.Errorf("WALSyncEveryN = %d, want 1", cfg.WALSyncEveryN)
+	}
+}
+
+func TestLoad_WALEnvOverride(t *testing.T) {
+	t.Setenv("OBS_DATA_DIR", "data")
+	t.Setenv("OBS_WAL_SEGMENT_MAX_BYTES", "67108864") // 64 MiB
+	t.Setenv("OBS_WAL_SYNC_EVERY_N", "10")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.WALSegmentMaxBytes != 64<<20 {
+		t.Errorf("WALSegmentMaxBytes = %d, want %d", cfg.WALSegmentMaxBytes, 64<<20)
+	}
+	if cfg.WALSyncEveryN != 10 {
+		t.Errorf("WALSyncEveryN = %d, want 10", cfg.WALSyncEveryN)
+	}
+}
