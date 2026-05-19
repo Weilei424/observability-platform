@@ -8,9 +8,11 @@ import (
 )
 
 type Config struct {
-	HTTPAddr string
-	DataDir  string
-	LogLevel string
+	HTTPAddr           string
+	DataDir            string
+	LogLevel           string
+	WALSegmentMaxBytes int64
+	WALSyncEveryN      int
 }
 
 func Load() (*Config, error) {
@@ -19,6 +21,8 @@ func Load() (*Config, error) {
 	v.SetDefault("http_addr", ":8080")
 	v.SetDefault("data_dir", "data")
 	v.SetDefault("log_level", "info")
+	v.SetDefault("wal_segment_max_bytes", int64(128<<20))
+	v.SetDefault("wal_sync_every_n", 1)
 
 	v.SetConfigName("config")
 	v.SetConfigType("yaml")
@@ -43,9 +47,11 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
-		HTTPAddr: v.GetString("http_addr"),
-		DataDir:  dataDir,
-		LogLevel: v.GetString("log_level"),
+		HTTPAddr:           v.GetString("http_addr"),
+		DataDir:            dataDir,
+		LogLevel:           v.GetString("log_level"),
+		WALSegmentMaxBytes: v.GetInt64("wal_segment_max_bytes"),
+		WALSyncEveryN:      v.GetInt("wal_sync_every_n"),
 	}
 
 	if cfg.DataDir == "" {
