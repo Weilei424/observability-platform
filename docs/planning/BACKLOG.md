@@ -93,16 +93,16 @@
 - [x] Integration test: ingest → range query
 
 ### Phase 1.4 — WAL Durability
-- [ ] Design WAL record format for metric samples
-- [ ] Implement WAL segment writer
-- [ ] Implement WAL segment reader
-- [ ] Write WAL record before acknowledging ingestion
-- [ ] Implement WAL replay on startup
-- [ ] Handle partial trailing WAL records safely
-- [ ] Add fsync policy configuration
-- [ ] Unit tests: WAL encode/decode round trip
-- [ ] Unit tests: WAL replay restores series/samples
-- [ ] Integration test: ingest → restart → query
+- [x] Design WAL record format for metric samples
+- [x] Implement WAL segment writer
+- [x] Implement WAL segment reader
+- [x] Write WAL record before acknowledging ingestion
+- [x] Implement WAL replay on startup
+- [x] Handle partial trailing WAL records safely
+- [x] Add fsync policy configuration
+- [x] Unit tests: WAL encode/decode round trip
+- [x] Unit tests: WAL replay restores series/samples
+- [x] Integration test: ingest → restart → query
 
 ### Phase 1.5 — Phase 1 End-to-End Metrics Path
 - [ ] Add sample metrics load generator
