@@ -269,6 +269,85 @@ func TestReplay_FullyReadCorruptBodyReturnsError(t *testing.T) {
 	}
 }
 
+func TestReplay_OversizedDeclaredLengthOnFinalSegment_Discarded(t *testing.T) {
+	// A corrupted length prefix declaring a body larger than maxRecordBodyBytes
+	// must be treated as a partial trailing record on the final segment — not
+	// allocated and not panicked.
+	dir := t.TempDir()
+	w, err := Open(dir, 128<<20, 1)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := w.WriteRecord(sampleLabels("good"), 1000, 1.0); err != nil {
+		t.Fatalf("WriteRecord: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	paths, _ := segmentPaths(dir)
+	f, err := os.OpenFile(paths[len(paths)-1], os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatalf("open segment: %v", err)
+	}
+	// Declare a 4 GB body but write nothing — this would OOM if allocated.
+	_, _ = f.Write([]byte{0xff, 0xff, 0xff, 0xff})
+	f.Close()
+
+	var count int
+	if err := Replay(dir, func(_ []LabelPair, _ int64, _ float64) { count++ }); err != nil {
+		t.Fatalf("Replay returned error for oversized length on final segment: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("replayed %d records, want 1", count)
+	}
+}
+
+func TestWriteRecord_TooManyLabels_Error(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(dir, 128<<20, 1)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer w.Close()
+
+	labels := make([]LabelPair, 256)
+	for i := range labels {
+		labels[i] = LabelPair{Name: fmt.Sprintf("l%d", i), Value: "v"}
+	}
+	if err := w.WriteRecord(labels, 1000, 1.0); err == nil {
+		t.Error("expected error for >255 labels, got nil")
+	}
+}
+
+func TestWriteRecord_LabelNameTooLong_Error(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(dir, 128<<20, 1)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer w.Close()
+
+	labels := []LabelPair{{Name: strings.Repeat("a", 256), Value: "v"}}
+	if err := w.WriteRecord(labels, 1000, 1.0); err == nil {
+		t.Error("expected error for label name >255 bytes, got nil")
+	}
+}
+
+func TestWriteRecord_LabelValueTooLong_Error(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(dir, 128<<20, 1)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer w.Close()
+
+	labels := []LabelPair{{Name: "lbl", Value: strings.Repeat("v", 65536)}}
+	if err := w.WriteRecord(labels, 1000, 1.0); err == nil {
+		t.Error("expected error for label value >65535 bytes, got nil")
+	}
+}
+
 func TestReplay_EmptyDir(t *testing.T) {
 	dir := t.TempDir()
 	var count int
