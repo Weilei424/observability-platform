@@ -84,6 +84,10 @@ func (w *WAL) WriteRecord(labels []LabelPair, tsMs int64, value float64) error {
 		return fmt.Errorf("wal: writer is in broken state due to previous rotation failure")
 	}
 
+	if err := validateLabels(labels); err != nil {
+		return err
+	}
+
 	data := encodeRecord(labels, tsMs, value)
 	if _, err := w.current.Write(data); err != nil {
 		return fmt.Errorf("wal: write record: %w", err)
