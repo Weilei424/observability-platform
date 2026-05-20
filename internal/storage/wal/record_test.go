@@ -99,3 +99,17 @@ func TestEncodeDecodeRecord_EmptyNameValue(t *testing.T) {
 		t.Errorf("label[0] = {%q,%q}, want {\"\",\"\"}", got[0].Name, got[0].Value)
 	}
 }
+
+func TestDecodeRecord_TrailingBytesReturnsFalse(t *testing.T) {
+	// A valid record body with extra garbage bytes appended must be treated as
+	// corrupt — exact consumption is required so malformed records cannot slip
+	// through as valid.
+	labels := []LabelPair{{Name: "__name__", Value: "m"}}
+	encoded := encodeRecord(labels, 1000, 1.0)
+	body := encoded[4:]
+	bloated := append(body, 0xFF, 0xFF) // two trailing garbage bytes
+	_, _, _, ok := decodeRecord(bloated)
+	if ok {
+		t.Error("expected ok=false when body has trailing bytes")
+	}
+}
