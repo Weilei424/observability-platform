@@ -2,7 +2,9 @@ package metrics_test
 
 import (
 	"errors"
+	"fmt"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/masonwheeler/observability-platform/internal/metrics"
@@ -232,6 +234,63 @@ func TestLabels_Map_IsCopy(t *testing.T) {
 	v, _ := l.Get("service")
 	if v != "api" {
 		t.Error("Map() must return a copy — mutating it must not affect Labels")
+	}
+}
+
+// --- WAL encoding boundary limits ---
+
+func TestLabels_TooManyLabels_Error(t *testing.T) {
+	m := make(map[string]string, 256)
+	m["__name__"] = "m"
+	for i := 0; i < 255; i++ {
+		m[fmt.Sprintf("l%d", i)] = "v"
+	}
+	// 1 (__name__) + 255 = 256 labels total, exceeds the 255 limit.
+	_, err := metrics.NewLabels(m)
+	if err == nil {
+		t.Fatal("expected error for >255 labels")
+	}
+	var ve *metrics.ValidationError
+	if !errors.As(err, &ve) {
+		t.Errorf("expected *ValidationError, got %T: %v", err, err)
+	}
+}
+
+func TestLabels_LabelNameTooLong_Error(t *testing.T) {
+	longName := strings.Repeat("a", 256)
+	_, err := metrics.NewLabels(map[string]string{"__name__": "m", longName: "v"})
+	if err == nil {
+		t.Fatal("expected error for label name >255 bytes")
+	}
+	var ve *metrics.ValidationError
+	if !errors.As(err, &ve) {
+		t.Errorf("expected *ValidationError, got %T: %v", err, err)
+	}
+}
+
+func TestLabels_LabelValueTooLong_Error(t *testing.T) {
+	longValue := strings.Repeat("v", 65536)
+	_, err := metrics.NewLabels(map[string]string{"__name__": "m", "lbl": longValue})
+	if err == nil {
+		t.Fatal("expected error for label value >65535 bytes")
+	}
+	var ve *metrics.ValidationError
+	if !errors.As(err, &ve) {
+		t.Errorf("expected *ValidationError, got %T: %v", err, err)
+	}
+}
+
+func TestLabels_MetricNameTooLong_Error(t *testing.T) {
+	// Metric names must be valid identifiers; build one exactly at the limit then
+	// one byte over. Use 'a' repeated — valid identifier chars.
+	longName := strings.Repeat("a", 65536)
+	_, err := metrics.NewLabels(map[string]string{"__name__": longName})
+	if err == nil {
+		t.Fatal("expected error for metric name >65535 bytes")
+	}
+	var ve *metrics.ValidationError
+	if !errors.As(err, &ve) {
+		t.Errorf("expected *ValidationError, got %T: %v", err, err)
 	}
 }
 
