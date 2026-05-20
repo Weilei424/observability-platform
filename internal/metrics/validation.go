@@ -35,6 +35,9 @@ func validateLabelMap(m map[string]string) error {
 	if !metricNameRe.MatchString(name) {
 		return &ValidationError{Field: "__name__", Message: fmt.Sprintf("invalid metric name %q", name)}
 	}
+	if len(name) > 65535 {
+		return &ValidationError{Field: "__name__", Message: "metric name exceeds 65535-byte limit"}
+	}
 	for k, v := range m {
 		if k == "__name__" {
 			continue
