@@ -105,12 +105,12 @@
 - [x] Integration test: ingest → restart → query
 
 ### Phase 1.5 — Phase 1 End-to-End Metrics Path
-- [ ] Add sample metrics load generator
-- [ ] Add smoke script for ingest/query/restart
-- [ ] Add README section for local metrics demo
-- [ ] Verify: backend can ingest metrics and query them before restart
-- [ ] Verify: backend can query metrics after restart
-- [ ] Verify: Phase 1 DoD is reflected in `BACKLOG.md`
+- [x] Add sample metrics load generator
+- [x] Add smoke script for ingest/query/restart
+- [x] Add README section for local metrics demo
+- [x] Verify: backend can ingest metrics and query them before restart
+- [x] Verify: backend can query metrics after restart
+- [x] Verify: Phase 1 DoD is reflected in `BACKLOG.md`
 
 ---
 
