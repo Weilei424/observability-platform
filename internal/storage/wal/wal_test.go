@@ -229,6 +229,46 @@ func TestReplay_PartialTrailingRecord(t *testing.T) {
 	}
 }
 
+func TestReplay_FullyReadCorruptBodyReturnsError(t *testing.T) {
+	// A record whose declared length matches the bytes present but whose body
+	// fails to decode must always return an error — even on the final segment.
+	// Only I/O truncation (io.ErrUnexpectedEOF) is tolerated; decode failures
+	// of fully-read bytes are always corrupt.
+	dir := t.TempDir()
+	w, err := Open(dir, 128<<20, 1)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := w.WriteRecord(sampleLabels("good"), 1000, 1.0); err != nil {
+		t.Fatalf("WriteRecord: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Append a record whose length prefix exactly matches the body length, but
+	// the body bytes are garbage (wrong type byte → decodeRecord returns ok=false).
+	paths, _ := segmentPaths(dir)
+	f, err := os.OpenFile(paths[len(paths)-1], os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatalf("open segment: %v", err)
+	}
+	garbage := make([]byte, 20)
+	garbage[0] = 0x99 // unknown record type — decodeRecord will return ok=false
+	var lenBuf [4]byte
+	lenBuf[0] = 0
+	lenBuf[1] = 0
+	lenBuf[2] = 0
+	lenBuf[3] = byte(len(garbage))
+	_, _ = f.Write(lenBuf[:])
+	_, _ = f.Write(garbage)
+	f.Close()
+
+	if err := Replay(dir, func(_ []LabelPair, _ int64, _ float64) {}); err == nil {
+		t.Error("expected Replay to return error for fully-read corrupt body on final segment")
+	}
+}
+
 func TestReplay_EmptyDir(t *testing.T) {
 	dir := t.TempDir()
 	var count int
