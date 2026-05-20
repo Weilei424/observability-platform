@@ -70,6 +70,9 @@ func parseFloatSeconds(name, s string) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("invalid parameter '%s': %s", name, s)
 	}
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0, fmt.Errorf("invalid parameter '%s': %s", name, s)
+	}
 	return int64(math.Round(f * 1000)), nil
 }
 
