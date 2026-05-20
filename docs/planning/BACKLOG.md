@@ -106,7 +106,7 @@
 
 ### Phase 1.5 — Phase 1 End-to-End Metrics Path
 - [x] Add sample metrics load generator
-- [x] Add smoke script for ingest/query/restart
+- [x] Add E2E test for ingest/query/WAL restart path (in-process via httptest; real-process smoke script deferred)
 - [x] Add README section for local metrics demo
 - [x] Verify: backend can ingest metrics and query them before restart
 - [x] Verify: backend can query metrics after restart
