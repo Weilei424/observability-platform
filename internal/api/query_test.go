@@ -314,6 +314,34 @@ func TestQuery_IngestThenInstantQuery_ReturnsIngestedValue(t *testing.T) {
 	}
 }
 
+func TestQuery_NonFiniteTimeParam_Returns400(t *testing.T) {
+	srv, _ := newQueryTestServer(t)
+
+	cases := []struct {
+		name string
+		url  string
+	}{
+		{"instant NaN", "/api/v1/query?query=cpu_usage&time=NaN"},
+		{"instant +Inf", "/api/v1/query?query=cpu_usage&time=%2BInf"},
+		{"instant -Inf", "/api/v1/query?query=cpu_usage&time=-Inf"},
+		{"range start NaN", "/api/v1/query_range?query=cpu_usage&start=NaN&end=3&step=1"},
+		{"range end +Inf", "/api/v1/query_range?query=cpu_usage&start=1&end=%2BInf&step=1"},
+		{"range step +Inf", "/api/v1/query_range?query=cpu_usage&start=1&end=3&step=%2BInf"},
+	}
+
+	for _, tc := range cases {
+		rr := getQuery(t, srv, tc.url)
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400; body: %s", tc.name, rr.Code, rr.Body.String())
+			continue
+		}
+		body := decodePromResponse(t, rr)
+		if body["errorType"] != "bad_data" {
+			t.Errorf("%s: errorType = %v, want bad_data", tc.name, body["errorType"])
+		}
+	}
+}
+
 func TestQuery_IngestThenRangeQuery_ReturnsIngestedValues(t *testing.T) {
 	srv, _ := newQueryTestServer(t)
 
