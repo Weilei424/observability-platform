@@ -40,6 +40,36 @@ make test
 make lint
 ```
 
+## Local Metrics Demo
+
+**1. Start the backend:**
+```bash
+make run
+```
+
+**2. In a second terminal, start the load generator:**
+```bash
+go run examples/load-generator/main.go --rate 2 --duration 30
+```
+
+**3. Query ingested metrics:**
+```bash
+# Instant query — all http_requests_total series
+curl 'http://localhost:8080/api/v1/query?query=http_requests_total'
+
+# Range query — request duration over the last 60 seconds
+# Linux:
+curl "http://localhost:8080/api/v1/query_range?query=http_request_duration_seconds&start=$(date -d '60 seconds ago' +%s)&end=$(date +%s)&step=15"
+# macOS:
+curl "http://localhost:8080/api/v1/query_range?query=http_request_duration_seconds&start=$(date -v-60S +%s)&end=$(date +%s)&step=15"
+```
+
+**4. Restart the backend (Ctrl+C in terminal 1, then `make run`) and re-query to confirm WAL replay:**
+```bash
+curl 'http://localhost:8080/api/v1/query?query=http_requests_total'
+# Same two series should appear — data recovered from WAL
+```
+
 ## Planning Docs
 
 - [`docs/planning/IMPLEMENTATION_PLAN.md`](docs/planning/IMPLEMENTATION_PLAN.md) — phase roadmap with goals and DoD
