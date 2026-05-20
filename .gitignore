@@ -29,6 +29,7 @@ go.work.sum
 
 # Runtime files
 server
+load-generator
 
 # Editor/IDE
 # .idea/
