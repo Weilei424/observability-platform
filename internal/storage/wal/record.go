@@ -104,7 +104,9 @@ func decodeRecord(b []byte) (labels []LabelPair, tsMs int64, value float64, ok b
 		labels = append(labels, LabelPair{Name: name, Value: val})
 	}
 
-	if pos+16 > len(b) {
+	if pos+16 != len(b) {
+		// Require exact consumption: too few bytes means truncation, trailing
+		// bytes mean a malformed record — both are corrupt.
 		return nil, 0, 0, false
 	}
 	tsMs = int64(binary.BigEndian.Uint64(b[pos : pos+8]))
