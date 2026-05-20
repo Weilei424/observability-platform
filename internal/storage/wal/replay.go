@@ -50,6 +50,17 @@ func replaySegment(path string, isLast bool, fn func([]LabelPair, int64, float64
 		}
 
 		bodyLen := binary.BigEndian.Uint32(lenBuf[:])
+		// Guard against a corrupted length prefix that would cause a multi-GB
+		// allocation. No valid record can exceed maxRecordBodyBytes; a larger
+		// declared length on the final segment is treated as a partial trailing
+		// record rather than allocated.
+		if bodyLen > maxRecordBodyBytes {
+			if isLast {
+				slog.Warn("wal: oversized declared length discarded", "segment", path, "declared", bodyLen)
+				return nil
+			}
+			return fmt.Errorf("wal replay: declared body length %d exceeds maximum in %s", bodyLen, path)
+		}
 		body := make([]byte, bodyLen)
 		if _, err := io.ReadFull(f, body); err != nil {
 			if err == io.ErrUnexpectedEOF && isLast {
