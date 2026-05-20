@@ -156,7 +156,7 @@ Development is **single-node first**. Distributed mode only begins after ingesti
 **Scope:**
 - Add sample load generator for metrics.
 - Add basic docs for local metrics ingestion and query.
-- Add smoke test script for ingest/query/restart.
+- Add in-process E2E test covering ingest → query → WAL restart → query (via httptest; exercises real WAL, store, and HTTP handlers but not the compiled binary).
 
 **DoD:**
 - A user can run the backend, ingest metrics, query metrics, restart, and query again.
