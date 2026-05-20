@@ -8,6 +8,11 @@ import (
 
 const recordTypeSample byte = 0x01
 
+// maxRecordBodyBytes is the theoretical maximum body size given encoding limits:
+// 255 labels × (1-byte name length + 255-byte name + 2-byte value length + 65535-byte value)
+// + 2 bytes (type + label count) + 16 bytes (timestamp + value).
+const maxRecordBodyBytes uint32 = 255*(1+255+2+65535) + 2 + 16 // ≈ 16.8 MB
+
 // LabelPair is a single name/value label stored in a WAL record.
 type LabelPair struct {
 	Name  string
@@ -20,8 +25,27 @@ type RecordWriter interface {
 	WriteRecord(labels []LabelPair, tsMs int64, value float64) error
 }
 
+// validateLabels returns an error if labels violate WAL encoding limits.
+// This is called by WriteRecord before encoding so the WAL never panics or
+// silently truncates data.
+func validateLabels(labels []LabelPair) error {
+	if len(labels) > 255 {
+		return fmt.Errorf("wal: label count %d exceeds 1-byte limit (255)", len(labels))
+	}
+	for _, lp := range labels {
+		if len(lp.Name) > 255 {
+			return fmt.Errorf("wal: label name %q length %d exceeds 1-byte limit (255)", lp.Name, len(lp.Name))
+		}
+		if len(lp.Value) > 65535 {
+			return fmt.Errorf("wal: label value for %q length %d exceeds 2-byte limit (65535)", lp.Name, len(lp.Value))
+		}
+	}
+	return nil
+}
+
 // encodeRecord serializes a sample record including the 4-byte length prefix.
 // Format: [4-byte body len][type byte][label count][labels...][8-byte tsMs][8-byte value]
+// Callers must validate labels with validateLabels before calling.
 func encodeRecord(labels []LabelPair, tsMs int64, value float64) []byte {
 	bodyLen := 2 // type byte + label count byte
 	for _, lp := range labels {
@@ -32,10 +56,6 @@ func encodeRecord(labels []LabelPair, tsMs int64, value float64) []byte {
 	buf := make([]byte, 4+bodyLen)
 	binary.BigEndian.PutUint32(buf[0:4], uint32(bodyLen))
 
-	if len(labels) > 255 {
-		panic(fmt.Sprintf("wal: encodeRecord: label count %d exceeds 1-byte limit (255)", len(labels)))
-	}
-
 	pos := 4
 	buf[pos] = recordTypeSample
 	pos++
@@ -43,9 +63,6 @@ func encodeRecord(labels []LabelPair, tsMs int64, value float64) []byte {
 	pos++
 
 	for _, lp := range labels {
-		if len(lp.Name) > 255 {
-			panic(fmt.Sprintf("wal: encodeRecord: label name %q length %d exceeds 1-byte limit (255)", lp.Name, len(lp.Name)))
-		}
 		buf[pos] = byte(len(lp.Name))
 		pos++
 		copy(buf[pos:], lp.Name)
