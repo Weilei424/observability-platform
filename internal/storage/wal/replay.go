@@ -61,10 +61,9 @@ func replaySegment(path string, isLast bool, fn func([]LabelPair, int64, float64
 
 		labels, tsMs, value, ok := decodeRecord(body)
 		if !ok {
-			if isLast {
-				slog.Warn("wal: undecoded record discarded", "segment", path)
-				return nil
-			}
+			// A fully-read body that fails to decode is always corrupt — not a
+			// partial trailing record. Tolerate only I/O truncation (above), never
+			// decode failures.
 			return fmt.Errorf("wal replay: corrupt record in %s", path)
 		}
 
