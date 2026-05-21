@@ -60,9 +60,14 @@ func (r promResponse) MarshalJSON() ([]byte, error) {
 		m["error"] = r.Error
 	}
 
-	// Include warnings for success responses (always, even if empty slice)
+	// Include warnings for success responses, normalizing nil to [] so callers
+	// that skip writePromSuccess still produce a valid Prometheus envelope.
 	if r.Status == "success" {
-		m["warnings"] = r.Warnings
+		warnings := r.Warnings
+		if warnings == nil {
+			warnings = []string{}
+		}
+		m["warnings"] = warnings
 	}
 
 	return json.Marshal(m)
