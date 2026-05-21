@@ -127,7 +127,7 @@
 ### Phase 2.2 — Prometheus Instant and Range Query Endpoints
 - [ ] Ensure `GET /api/v1/query` supports Prometheus-compatible query params
 - [ ] Ensure `GET /api/v1/query_range` supports `start`, `end`, `step`, `query`
-- [ ] Add parameter validation for invalid time ranges and step values
+- [x] Add parameter validation for invalid time ranges and step values (step=0, end<start, NaN/±Inf — completed in Phase 1)
 - [ ] Integration test: instant query response shape
 - [ ] Integration test: range query response shape
 - [ ] Verify Grafana can issue query requests to the backend
