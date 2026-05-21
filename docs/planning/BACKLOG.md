@@ -117,12 +117,12 @@
 ## Phase 2 Execution Checklist — Grafana-Compatible Metrics API
 
 ### Phase 2.1 — Prometheus Response Envelope
-- [ ] Implement Prometheus-compatible success response envelope
-- [ ] Implement Prometheus-compatible error response envelope
-- [ ] Format matrix/vector/scalar response values correctly
-- [ ] Unit tests: instant vector response serialization
-- [ ] Unit tests: range matrix response serialization
-- [ ] Unit tests: error response serialization
+- [x] Implement Prometheus-compatible success response envelope
+- [x] Implement Prometheus-compatible error response envelope
+- [x] Format matrix/vector/scalar response values correctly
+- [x] Unit tests: instant vector response serialization
+- [x] Unit tests: range matrix response serialization
+- [x] Unit tests: error response serialization
 
 ### Phase 2.2 — Prometheus Instant and Range Query Endpoints
 - [ ] Ensure `GET /api/v1/query` supports Prometheus-compatible query params
