@@ -10,58 +10,6 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 )
 
-type promResponse struct {
-	Status    string `json:"status"`
-	Data      any    `json:"data,omitempty"`
-	ErrorType string `json:"errorType,omitempty"`
-	Error     string `json:"error,omitempty"`
-}
-
-type promVectorData struct {
-	ResultType string       `json:"resultType"`
-	Result     []promSample `json:"result"`
-}
-
-type promMatrixData struct {
-	ResultType string       `json:"resultType"`
-	Result     []promSeries `json:"result"`
-}
-
-type promSample struct {
-	Metric map[string]string `json:"metric"`
-	Value  [2]any            `json:"value"`
-}
-
-type promSeries struct {
-	Metric map[string]string `json:"metric"`
-	Values [][2]any          `json:"values"`
-}
-
-func writePromError(w http.ResponseWriter, status int, errorType, errMsg string) {
-	writeJSON(w, status, promResponse{
-		Status:    "error",
-		ErrorType: errorType,
-		Error:     errMsg,
-	})
-}
-
-func msToPromTimestamp(ms int64) float64 {
-	return float64(ms) / 1000.0
-}
-
-func formatPromValue(v float64) string {
-	switch {
-	case math.IsInf(v, 1):
-		return "+Inf"
-	case math.IsInf(v, -1):
-		return "-Inf"
-	case math.IsNaN(v):
-		return "NaN"
-	default:
-		return strconv.FormatFloat(v, 'f', -1, 64)
-	}
-}
-
 func parseFloatSeconds(name, s string) (int64, error) {
 	if s == "" {
 		return 0, fmt.Errorf("missing required parameter '%s'", name)
@@ -117,10 +65,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, http.StatusOK, promResponse{
-		Status: "success",
-		Data:   promVectorData{ResultType: "vector", Result: result},
-	})
+	writePromSuccess(w, promVectorData{ResultType: "vector", Result: result})
 }
 
 func (s *Server) handleQueryRange(w http.ResponseWriter, r *http.Request) {
@@ -183,8 +128,5 @@ func (s *Server) handleQueryRange(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, http.StatusOK, promResponse{
-		Status: "success",
-		Data:   promMatrixData{ResultType: "matrix", Result: result},
-	})
+	writePromSuccess(w, promMatrixData{ResultType: "matrix", Result: result})
 }
