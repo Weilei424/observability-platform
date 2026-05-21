@@ -256,6 +256,37 @@ func TestPromResponse_SuccessWarnings(t *testing.T) {
 	}
 }
 
+func TestPromResponse_SuccessNilWarningsNormalized(t *testing.T) {
+	// Directly constructed promResponse without going through writePromSuccess —
+	// MarshalJSON must still produce "warnings":[] not "warnings":null.
+	resp := promResponse{
+		Status: "success",
+		Data:   promVectorData{ResultType: "vector", Result: []promSample{}},
+		// Warnings intentionally left nil
+	}
+
+	b, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	warnings, ok := got["warnings"]
+	if !ok {
+		t.Fatal("warnings field missing from success response with nil Warnings")
+	}
+	wList, ok := warnings.([]any)
+	if !ok {
+		t.Fatalf("warnings is not []any (got %T) — nil was not normalized to []", warnings)
+	}
+	if len(wList) != 0 {
+		t.Errorf("warnings = %v, want []", wList)
+	}
+}
+
 func TestWritePromError_SetsStatusCode(t *testing.T) {
 	w := httptest.NewRecorder()
 	writePromError(w, http.StatusBadRequest, "bad_data", "missing required parameter 'query'")
