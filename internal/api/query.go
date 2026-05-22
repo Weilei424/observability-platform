@@ -51,14 +51,30 @@ func parseDurationParam(name, s string) (int64, error) {
 	return ms, nil
 }
 
+// promDurationUnit maps a unit string to its rank (larger = longer) and millisecond multiplier.
+// Units must appear in strictly decreasing rank order: y > w > d > h > m > s > ms.
+var promDurationUnit = map[string]struct {
+	rank int
+	mult int64
+}{
+	"y":  {7, 365 * 24 * 3600 * 1000},
+	"w":  {6, 7 * 24 * 3600 * 1000},
+	"d":  {5, 24 * 3600 * 1000},
+	"h":  {4, 3600 * 1000},
+	"m":  {3, 60 * 1000},
+	"s":  {2, 1000},
+	"ms": {1, 1},
+}
+
 // parsePromDuration parses a Prometheus duration string like "15s", "1m", "1h30m".
-// Units: ms, s, m, h, d, w, y.
+// Units must appear in strictly decreasing order (longest-to-shortest) with no repeats.
 func parsePromDuration(s string) (int64, error) {
 	if s == "" {
 		return 0, fmt.Errorf("empty duration")
 	}
 	var total int64
 	remaining := s
+	lastRank := len(promDurationUnit) + 1
 	for remaining != "" {
 		i := 0
 		for i < len(remaining) && remaining[i] >= '0' && remaining[i] <= '9' {
@@ -82,26 +98,15 @@ func parsePromDuration(s string) (int64, error) {
 			unit = string(remaining[0])
 		}
 		remaining = remaining[len(unit):]
-		var mult int64
-		switch unit {
-		case "ms":
-			mult = 1
-		case "s":
-			mult = 1000
-		case "m":
-			mult = 60 * 1000
-		case "h":
-			mult = 3600 * 1000
-		case "d":
-			mult = 24 * 3600 * 1000
-		case "w":
-			mult = 7 * 24 * 3600 * 1000
-		case "y":
-			mult = 365 * 24 * 3600 * 1000
-		default:
+		u, ok := promDurationUnit[unit]
+		if !ok {
 			return 0, fmt.Errorf("unknown unit %q in %q", unit, s)
 		}
-		total += n * mult
+		if u.rank >= lastRank {
+			return 0, fmt.Errorf("unit %q out of order or repeated in %q", unit, s)
+		}
+		lastRank = u.rank
+		total += n * u.mult
 	}
 	return total, nil
 }
