@@ -10,18 +10,100 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 )
 
-func parseFloatSeconds(name, s string) (int64, error) {
+// parseTimeParam parses a Prometheus time parameter (time, start, end).
+// Accepts Unix timestamp as float seconds or RFC3339/RFC3339Nano.
+func parseTimeParam(name, s string) (int64, error) {
 	if s == "" {
 		return 0, fmt.Errorf("missing required parameter '%s'", name)
 	}
 	f, err := strconv.ParseFloat(s, 64)
+	if err == nil {
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return 0, fmt.Errorf("invalid parameter '%s': %s", name, s)
+		}
+		return int64(math.Round(f * 1000)), nil
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.UnixMilli(), nil
+		}
+	}
+	return 0, fmt.Errorf("invalid parameter '%s': %s", name, s)
+}
+
+// parseDurationParam parses a Prometheus step parameter.
+// Accepts float seconds or Prometheus duration strings (15s, 1m, 1h30m, etc.).
+func parseDurationParam(name, s string) (int64, error) {
+	if s == "" {
+		return 0, fmt.Errorf("missing required parameter '%s'", name)
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err == nil {
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return 0, fmt.Errorf("invalid parameter '%s': %s", name, s)
+		}
+		return int64(math.Round(f * 1000)), nil
+	}
+	ms, err := parsePromDuration(s)
 	if err != nil {
 		return 0, fmt.Errorf("invalid parameter '%s': %s", name, s)
 	}
-	if math.IsNaN(f) || math.IsInf(f, 0) {
-		return 0, fmt.Errorf("invalid parameter '%s': %s", name, s)
+	return ms, nil
+}
+
+// parsePromDuration parses a Prometheus duration string like "15s", "1m", "1h30m".
+// Units: ms, s, m, h, d, w, y.
+func parsePromDuration(s string) (int64, error) {
+	if s == "" {
+		return 0, fmt.Errorf("empty duration")
 	}
-	return int64(math.Round(f * 1000)), nil
+	var total int64
+	remaining := s
+	for remaining != "" {
+		i := 0
+		for i < len(remaining) && remaining[i] >= '0' && remaining[i] <= '9' {
+			i++
+		}
+		if i == 0 {
+			return 0, fmt.Errorf("expected digits in %q", s)
+		}
+		n, err := strconv.ParseInt(remaining[:i], 10, 64)
+		if err != nil {
+			return 0, err
+		}
+		remaining = remaining[i:]
+		if remaining == "" {
+			return 0, fmt.Errorf("missing unit in %q", s)
+		}
+		var unit string
+		if len(remaining) >= 2 && remaining[:2] == "ms" {
+			unit = "ms"
+		} else {
+			unit = string(remaining[0])
+		}
+		remaining = remaining[len(unit):]
+		var mult int64
+		switch unit {
+		case "ms":
+			mult = 1
+		case "s":
+			mult = 1000
+		case "m":
+			mult = 60 * 1000
+		case "h":
+			mult = 3600 * 1000
+		case "d":
+			mult = 24 * 3600 * 1000
+		case "w":
+			mult = 7 * 24 * 3600 * 1000
+		case "y":
+			mult = 365 * 24 * 3600 * 1000
+		default:
+			return 0, fmt.Errorf("unknown unit %q in %q", unit, s)
+		}
+		total += n * mult
+	}
+	return total, nil
 }
 
 func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
@@ -42,7 +124,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		tMs = time.Now().UnixMilli()
 	} else {
 		var err error
-		tMs, err = parseFloatSeconds("time", raw)
+		tMs, err = parseTimeParam("time", raw)
 		if err != nil {
 			writePromError(w, http.StatusBadRequest, "bad_data", err.Error())
 			return
@@ -85,19 +167,19 @@ func (s *Server) handleQueryRange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	startMs, err := parseFloatSeconds("start", q.Get("start"))
+	startMs, err := parseTimeParam("start", q.Get("start"))
 	if err != nil {
 		writePromError(w, http.StatusBadRequest, "bad_data", err.Error())
 		return
 	}
 
-	endMs, err := parseFloatSeconds("end", q.Get("end"))
+	endMs, err := parseTimeParam("end", q.Get("end"))
 	if err != nil {
 		writePromError(w, http.StatusBadRequest, "bad_data", err.Error())
 		return
 	}
 
-	stepMs, err := parseFloatSeconds("step", q.Get("step"))
+	stepMs, err := parseDurationParam("step", q.Get("step"))
 	if err != nil {
 		writePromError(w, http.StatusBadRequest, "bad_data", err.Error())
 		return
