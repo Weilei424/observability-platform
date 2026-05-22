@@ -125,12 +125,13 @@
 - [x] Unit tests: error response serialization
 
 ### Phase 2.2 — Prometheus Instant and Range Query Endpoints
-- [ ] Ensure `GET /api/v1/query` supports Prometheus-compatible query params
-- [ ] Ensure `GET /api/v1/query_range` supports `start`, `end`, `step`, `query`
+- [x] Add POST support for `GET /api/v1/query` and `GET /api/v1/query_range` (register both GET and POST; use `r.Form` after `r.ParseForm()` in handlers)
+- [x] Confirm `GET /api/v1/query` supports all Prometheus-compatible query params (`query`, `time`)
+- [x] Confirm `GET /api/v1/query_range` supports all Prometheus-compatible query params (`query`, `start`, `end`, `step`)
 - [x] Add parameter validation for invalid time ranges and step values (step=0, end<start, NaN/±Inf — completed in Phase 1)
-- [ ] Integration test: instant query response shape
-- [ ] Integration test: range query response shape
-- [ ] Verify Grafana can issue query requests to the backend
+- [x] Integration test: instant query response shape — assert full Prometheus wire format (envelope fields, float-seconds timestamps, string values)
+- [x] Integration test: range query response shape — assert full Prometheus wire format (matrix envelope, values as `[float64, string]` pairs)
+- [x] Verify Grafana can issue query requests to the backend — `TestGrafanaStylePOSTQuery` exercises POST with `application/x-www-form-urlencoded` body
 
 ### Phase 2.3 — Prometheus Metadata Endpoints
 - [ ] Implement `GET /api/v1/labels`
