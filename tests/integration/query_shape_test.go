@@ -207,6 +207,70 @@ func TestRangeQueryResponseShape(t *testing.T) {
 	}
 }
 
+func TestGrafanaStylePOSTInstantQuery(t *testing.T) {
+	dataDir := t.TempDir()
+	walDir := filepath.Join(dataDir, "metrics", "wal")
+	if err := os.MkdirAll(walDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	srv, w := newWALServer(t, dataDir, walDir)
+	defer w.Close()
+
+	// Ingest one sample at t=1s
+	body, _ := json.Marshal(map[string]any{
+		"metrics": []any{
+			map[string]any{
+				"name":         "grafana_post_instant_metric",
+				"timestamp_ms": int64(1000),
+				"value":        float64(77),
+			},
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/ingest/metrics", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("ingest: got %d; body: %s", rr.Code, rr.Body.String())
+	}
+
+	// POST /api/v1/query with URL-encoded form body (Grafana datasource style)
+	form := url.Values{
+		"query": {"grafana_post_instant_metric"},
+		"time":  {"1"},
+	}
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/query",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("POST query: got %d; body: %s", rr.Code, rr.Body.String())
+	}
+
+	var envelope struct {
+		Status string `json:"status"`
+		Data   struct {
+			ResultType string `json:"resultType"`
+			Result     []struct {
+				Values [][]json.RawMessage `json:"values"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("unmarshal: %v; body: %s", err, rr.Body.String())
+	}
+	if envelope.Status != "success" {
+		t.Errorf("status = %q, want success", envelope.Status)
+	}
+	if envelope.Data.ResultType != "vector" {
+		t.Errorf("resultType = %q, want vector", envelope.Data.ResultType)
+	}
+	if len(envelope.Data.Result) == 0 {
+		t.Fatal("result is empty, want at least one series")
+	}
+}
+
 func TestGrafanaStylePOSTQuery(t *testing.T) {
 	dataDir := t.TempDir()
 	walDir := filepath.Join(dataDir, "metrics", "wal")
