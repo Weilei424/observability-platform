@@ -342,6 +342,91 @@ func TestQuery_NonFiniteTimeParam_Returns400(t *testing.T) {
 	}
 }
 
+func TestQuery_RFC3339TimeParam_AcceptedOnInstantQuery(t *testing.T) {
+	srv, store := newQueryTestServer(t)
+
+	labels, _ := metrics.NewLabels(map[string]string{"__name__": "cpu_usage"})
+	// Sample at Unix 1000ms = 1970-01-01T00:00:01Z
+	_ = store.Append(labels, 1000, 7.0)
+
+	// time as RFC3339
+	u := "/api/v1/query?" + url.Values{"query": {"cpu_usage"}, "time": {"1970-01-01T00:00:01Z"}}.Encode()
+	rr := getQuery(t, srv, u)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rr.Code, rr.Body.String())
+	}
+	body := decodePromResponse(t, rr)
+	if body["status"] != "success" {
+		t.Fatalf("status = %v, want success", body["status"])
+	}
+	data := body["data"].(map[string]any)
+	result := data["result"].([]any)
+	if len(result) != 1 {
+		t.Fatalf("result len = %d, want 1", len(result))
+	}
+	sample := result[0].(map[string]any)
+	value := sample["value"].([]any)
+	if value[1] != "7" {
+		t.Errorf("value = %v, want \"7\"", value[1])
+	}
+}
+
+func TestQuery_RFC3339StartEnd_AcceptedOnRangeQuery(t *testing.T) {
+	srv, store := newQueryTestServer(t)
+
+	labels, _ := metrics.NewLabels(map[string]string{"__name__": "cpu_usage"})
+	_ = store.Append(labels, 1000, 5.0)
+
+	u := "/api/v1/query_range?" + url.Values{
+		"query": {"cpu_usage"},
+		"start": {"1970-01-01T00:00:01Z"},
+		"end":   {"1970-01-01T00:00:01Z"},
+		"step":  {"1"},
+	}.Encode()
+	rr := getQuery(t, srv, u)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rr.Code, rr.Body.String())
+	}
+	body := decodePromResponse(t, rr)
+	if body["status"] != "success" {
+		t.Fatalf("status = %v, want success", body["status"])
+	}
+}
+
+func TestQuery_DurationStep_AcceptedOnRangeQuery(t *testing.T) {
+	srv, store := newQueryTestServer(t)
+
+	labels, _ := metrics.NewLabels(map[string]string{"__name__": "cpu_usage"})
+	_ = store.Append(labels, 1000, 1.0)
+	_ = store.Append(labels, 16000, 2.0)
+
+	// step=15s should be parsed as 15000ms
+	u := "/api/v1/query_range?" + url.Values{
+		"query": {"cpu_usage"},
+		"start": {"1"},
+		"end":   {"16"},
+		"step":  {"15s"},
+	}.Encode()
+	rr := getQuery(t, srv, u)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rr.Code, rr.Body.String())
+	}
+	body := decodePromResponse(t, rr)
+	if body["status"] != "success" {
+		t.Fatalf("status = %v, want success", body["status"])
+	}
+	data := body["data"].(map[string]any)
+	result := data["result"].([]any)
+	if len(result) != 1 {
+		t.Fatalf("result len = %d, want 1", len(result))
+	}
+	// step=15s over [1s,16s] → ticks at 1s and 16s
+	values := result[0].(map[string]any)["values"].([]any)
+	if len(values) != 2 {
+		t.Fatalf("values len = %d, want 2 (ticks at 1s and 16s)", len(values))
+	}
+}
+
 func TestQuery_IngestThenRangeQuery_ReturnsIngestedValues(t *testing.T) {
 	srv, _ := newQueryTestServer(t)
 
