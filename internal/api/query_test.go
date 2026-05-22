@@ -393,6 +393,35 @@ func TestQuery_RFC3339StartEnd_AcceptedOnRangeQuery(t *testing.T) {
 	}
 }
 
+func TestQuery_DurationStep_OutOfOrderUnits_Returns400(t *testing.T) {
+	srv, _ := newQueryTestServer(t)
+
+	cases := []string{
+		"1m1h",   // m before h — out of order
+		"1h1h",   // repeated unit
+		"1s1s",   // repeated unit
+		"1ms1s",  // ms before s — out of order
+		"1m1m1s", // repeated m
+	}
+	for _, step := range cases {
+		u := "/api/v1/query_range?" + url.Values{
+			"query": {"cpu_usage"},
+			"start": {"1"},
+			"end":   {"60"},
+			"step":  {step},
+		}.Encode()
+		rr := getQuery(t, srv, u)
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("step=%q: status = %d, want 400; body: %s", step, rr.Code, rr.Body.String())
+			continue
+		}
+		body := decodePromResponse(t, rr)
+		if body["errorType"] != "bad_data" {
+			t.Errorf("step=%q: errorType = %v, want bad_data", step, body["errorType"])
+		}
+	}
+}
+
 func TestQuery_DurationStep_AcceptedOnRangeQuery(t *testing.T) {
 	srv, store := newQueryTestServer(t)
 
