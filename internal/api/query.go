@@ -25,7 +25,11 @@ func parseFloatSeconds(name, s string) (int64, error) {
 }
 
 func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
+	if err := r.ParseForm(); err != nil {
+		writePromError(w, http.StatusBadRequest, "bad_data", "invalid request body")
+		return
+	}
+	q := r.Form
 
 	queryStr := q.Get("query")
 	if queryStr == "" {
@@ -69,7 +73,11 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleQueryRange(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
+	if err := r.ParseForm(); err != nil {
+		writePromError(w, http.StatusBadRequest, "bad_data", "invalid request body")
+		return
+	}
+	q := r.Form
 
 	queryStr := q.Get("query")
 	if queryStr == "" {
