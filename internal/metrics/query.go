@@ -3,7 +3,6 @@ package metrics
 import (
 	"fmt"
 	"sort"
-	"strings"
 )
 
 // QueryEngine executes instant and range queries over a MemoryStore.
@@ -128,10 +127,10 @@ func (e *QueryEngine) LabelValues(name string) []string {
 
 // Series returns the label sets for all series matching any of the given
 // selectors. Results are deduplicated by series fingerprint and sorted by
-// __name__ then remaining label names (lexicographic) for UI stability.
-// Returns a non-nil empty slice when no series match. An empty selectors slice
-// returns a non-nil empty result; callers are responsible for enforcing a
-// minimum selector count.
+// __name__ then remaining label pairs (name then value, lexicographic) for
+// stable UI output. Returns a non-nil empty slice when no series match. An
+// empty selectors slice returns a non-nil empty result; callers are
+// responsible for enforcing a minimum selector count.
 func (e *QueryEngine) Series(selectors []Selector) []Labels {
 	seen := make(map[SeriesID]Labels)
 	for _, sel := range selectors {
@@ -142,33 +141,52 @@ func (e *QueryEngine) Series(selectors []Selector) []Labels {
 			}
 		}
 	}
-	// Build a canonical sort key for each series before sorting so the
-	// comparator allocates once per series rather than once per comparison.
-	// Key format: "__name__ value \x00 name=value \x00 name=value ..."
-	// Labels.pairs is sorted by name, so iterating it directly gives a
-	// deterministic total order even when two series have different label sets.
+	// Cache __name__ per entry to avoid repeated Get calls during sort.
+	// Pairs are compared directly (no string encoding) so label values
+	// containing any byte sequence cannot produce key collisions.
 	type entry struct {
-		labels  Labels
-		sortKey string
+		labels Labels
+		name   string
 	}
 	entries := make([]entry, 0, len(seen))
 	for _, labels := range seen {
-		var sb strings.Builder
 		name, _ := labels.Get("__name__")
-		sb.WriteString(name)
-		for _, p := range labels.pairs {
-			if p.Name == "__name__" {
-				continue
-			}
-			sb.WriteByte('\x00')
-			sb.WriteString(p.Name)
-			sb.WriteByte('=')
-			sb.WriteString(p.Value)
-		}
-		entries = append(entries, entry{labels: labels, sortKey: sb.String()})
+		entries = append(entries, entry{labels: labels, name: name})
 	}
 	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].sortKey < entries[j].sortKey
+		if entries[i].name != entries[j].name {
+			return entries[i].name < entries[j].name
+		}
+		// Compare remaining label pairs in sorted order (Labels.pairs is sorted
+		// by name). Advance past __name__ on each side independently, since its
+		// position depends on what other labels are present.
+		pi, pj := entries[i].labels.pairs, entries[j].labels.pairs
+		ai, aj := 0, 0
+		for {
+			for ai < len(pi) && pi[ai].Name == "__name__" {
+				ai++
+			}
+			for aj < len(pj) && pj[aj].Name == "__name__" {
+				aj++
+			}
+			if ai >= len(pi) && aj >= len(pj) {
+				return false // equal
+			}
+			if ai >= len(pi) {
+				return true // i has fewer labels
+			}
+			if aj >= len(pj) {
+				return false // j has fewer labels
+			}
+			if pi[ai].Name != pj[aj].Name {
+				return pi[ai].Name < pj[aj].Name
+			}
+			if pi[ai].Value != pj[aj].Value {
+				return pi[ai].Value < pj[aj].Value
+			}
+			ai++
+			aj++
+		}
 	})
 	result := make([]Labels, len(entries))
 	for i, e := range entries {
