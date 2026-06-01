@@ -69,3 +69,14 @@ func fingerprint(pairs []Label) SeriesID {
 	}
 	return SeriesID(h.Sum64())
 }
+
+// newOutputLabels builds a Labels for aggregation output. Unlike NewLabels,
+// __name__ is not required — aggregated results do not carry a metric name.
+func newOutputLabels(m map[string]string) Labels {
+	pairs := make([]Label, 0, len(m))
+	for k, v := range m {
+		pairs = append(pairs, Label{Name: k, Value: v})
+	}
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].Name < pairs[j].Name })
+	return Labels{pairs: pairs, fp: fingerprint(pairs)}
+}
