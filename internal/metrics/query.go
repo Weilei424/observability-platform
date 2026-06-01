@@ -127,9 +127,10 @@ func (e *QueryEngine) LabelValues(name string) []string {
 
 // Series returns the label sets for all series matching any of the given
 // selectors. Results are deduplicated by series fingerprint and sorted by
-// __name__ then fingerprint for deterministic output. Returns a non-nil empty
-// slice when no series match. An empty selectors slice returns a non-nil empty
-// result; callers are responsible for enforcing a minimum selector count.
+// __name__ then remaining label names (lexicographic) for UI stability.
+// Returns a non-nil empty slice when no series match. An empty selectors slice
+// returns a non-nil empty result; callers are responsible for enforcing a
+// minimum selector count.
 func (e *QueryEngine) Series(selectors []Selector) []Labels {
 	seen := make(map[SeriesID]Labels)
 	for _, sel := range selectors {
@@ -150,7 +151,20 @@ func (e *QueryEngine) Series(selectors []Selector) []Labels {
 		if ni != nj {
 			return ni < nj
 		}
-		return result[i].Fingerprint() < result[j].Fingerprint()
+		mi, mj := result[i].Map(), result[j].Map()
+		var keys []string
+		for k := range mi {
+			if k != "__name__" {
+				keys = append(keys, k)
+			}
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if mi[k] != mj[k] {
+				return mi[k] < mj[k]
+			}
+		}
+		return false
 	})
 	return result
 }
