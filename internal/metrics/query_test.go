@@ -344,6 +344,26 @@ func TestQueryEngine_Series_SecondarySortByLabelName(t *testing.T) {
 	}
 }
 
+func TestQueryEngine_Series_SecondarySortByDifferentLabelNames(t *testing.T) {
+	engine, store := newEngineWithSamples(t)
+
+	// Same __name__, different label names — "host" < "region", so the series
+	// with host label must come first regardless of map iteration order.
+	la := mustNewLabels(t, map[string]string{"__name__": "cpu_usage", "region": "a"})
+	lb := mustNewLabels(t, map[string]string{"__name__": "cpu_usage", "host": "a"})
+	_ = store.Append(la, 1000, 1.0)
+	_ = store.Append(lb, 1000, 2.0)
+
+	result := engine.Series([]metrics.Selector{{MetricName: "cpu_usage"}})
+	if len(result) != 2 {
+		t.Fatalf("Series() len = %d, want 2", len(result))
+	}
+	_, hasHost := result[0].Get("host")
+	if !hasHost {
+		t.Errorf("result[0] should be the series with host label (host < region), got %v", result[0].Map())
+	}
+}
+
 func TestQueryEngine_Series_NoMatchingSelector_ReturnsNonNilEmpty(t *testing.T) {
 	engine, store := newEngineWithSamples(t)
 
