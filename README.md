@@ -70,6 +70,23 @@ curl 'http://localhost:8080/api/v1/query?query=http_requests_total'
 # Same two series should appear — data recovered from WAL
 ```
 
+## Supported Query Syntax
+
+The query API accepts a PromQL subset. Unsupported forms return `400 bad_data`.
+
+| Form | Example | Status |
+|---|---|---|
+| Bare metric name | `http_requests_total` | Supported |
+| Label selector | `http_requests_total{job="api"}` | Supported |
+| `rate(selector[duration])` | `rate(http_requests_total[5m])` | Supported |
+| `sum(expr)` | `sum(http_requests_total)` | Supported |
+| `sum by (label,...)(expr)` | `sum by (job)(http_requests_total)` | Supported |
+| Any other function | `avg(...)`, `histogram_quantile(...)` | Returns 400 |
+| Arithmetic operators | `a + b`, `a / b` | Returns 400 |
+| Subqueries | `rate(...)[5m:1m]` | Returns 400 |
+
+Duration units accepted: `ms`, `s`, `m`, `h`, `d`, `w`, `y`.
+
 ## Planning Docs
 
 - [`docs/planning/IMPLEMENTATION_PLAN.md`](docs/planning/IMPLEMENTATION_PLAN.md) — phase roadmap with goals and DoD
