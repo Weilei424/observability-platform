@@ -3,6 +3,7 @@ package metrics
 import (
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // QueryEngine executes instant and range queries over a MemoryStore.
@@ -141,30 +142,37 @@ func (e *QueryEngine) Series(selectors []Selector) []Labels {
 			}
 		}
 	}
-	result := make([]Labels, 0, len(seen))
-	for _, labels := range seen {
-		result = append(result, labels)
+	// Build a canonical sort key for each series before sorting so the
+	// comparator allocates once per series rather than once per comparison.
+	// Key format: "__name__ value \x00 name=value \x00 name=value ..."
+	// Labels.pairs is sorted by name, so iterating it directly gives a
+	// deterministic total order even when two series have different label sets.
+	type entry struct {
+		labels  Labels
+		sortKey string
 	}
-	sort.Slice(result, func(i, j int) bool {
-		ni, _ := result[i].Get("__name__")
-		nj, _ := result[j].Get("__name__")
-		if ni != nj {
-			return ni < nj
-		}
-		mi, mj := result[i].Map(), result[j].Map()
-		var keys []string
-		for k := range mi {
-			if k != "__name__" {
-				keys = append(keys, k)
+	entries := make([]entry, 0, len(seen))
+	for _, labels := range seen {
+		var sb strings.Builder
+		name, _ := labels.Get("__name__")
+		sb.WriteString(name)
+		for _, p := range labels.pairs {
+			if p.Name == "__name__" {
+				continue
 			}
+			sb.WriteByte('\x00')
+			sb.WriteString(p.Name)
+			sb.WriteByte('=')
+			sb.WriteString(p.Value)
 		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			if mi[k] != mj[k] {
-				return mi[k] < mj[k]
-			}
-		}
-		return false
+		entries = append(entries, entry{labels: labels, sortKey: sb.String()})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].sortKey < entries[j].sortKey
 	})
+	result := make([]Labels, len(entries))
+	for i, e := range entries {
+		result[i] = e.labels
+	}
 	return result
 }
