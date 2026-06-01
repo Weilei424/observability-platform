@@ -256,17 +256,25 @@ func TestQuery_RangeQuery_EndBeforeStart_Returns400(t *testing.T) {
 	}
 }
 
-func TestQuery_PromQLFunctionCall_Returns400(t *testing.T) {
+func TestQuery_RateInstantQuery_EmptyStore_ReturnsEmptyVector(t *testing.T) {
 	srv, _ := newQueryTestServer(t)
 
-	u := "/api/v1/query?" + url.Values{"query": {"rate(http_requests_total[5m])"}, "time": {"1000"}}.Encode()
+	u := "/api/v1/query?" + url.Values{
+		"query": {"rate(http_requests_total[5m])"},
+		"time":  {"1000"},
+	}.Encode()
 	rr := getQuery(t, srv, u)
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400; body: %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rr.Code, rr.Body.String())
 	}
 	body := decodePromResponse(t, rr)
-	if body["errorType"] != "bad_data" {
-		t.Errorf("errorType = %v, want bad_data", body["errorType"])
+	if body["status"] != "success" {
+		t.Fatalf("status = %v, want success", body["status"])
+	}
+	data := body["data"].(map[string]any)
+	result := data["result"].([]any)
+	if len(result) != 0 {
+		t.Errorf("result len = %d, want 0 (no data)", len(result))
 	}
 }
 
@@ -501,5 +509,145 @@ func TestQuery_IngestThenRangeQuery_ReturnsIngestedValues(t *testing.T) {
 	pair := values[1].([]any)
 	if pair[1] != "10" {
 		t.Errorf("values[1] = %v, want \"10\"", pair[1])
+	}
+}
+
+func TestQuery_RateInstantQuery_ReturnsCorrectRate(t *testing.T) {
+	srv, store := newQueryTestServer(t)
+
+	labels, _ := metrics.NewLabels(map[string]string{"__name__": "requests_total"})
+	// value 0 at t=0, value 60 at t=60s → rate = 1.0/sec
+	_ = store.Append(labels, 0, 0.0)
+	_ = store.Append(labels, 60000, 60.0)
+
+	u := "/api/v1/query?" + url.Values{
+		"query": {"rate(requests_total[60s])"},
+		"time":  {"60"},
+	}.Encode()
+	rr := getQuery(t, srv, u)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rr.Code, rr.Body.String())
+	}
+	body := decodePromResponse(t, rr)
+	if body["status"] != "success" {
+		t.Fatalf("status = %v, want success", body["status"])
+	}
+	data := body["data"].(map[string]any)
+	if data["resultType"] != "vector" {
+		t.Errorf("resultType = %v, want vector", data["resultType"])
+	}
+	result := data["result"].([]any)
+	if len(result) != 1 {
+		t.Fatalf("result len = %d, want 1", len(result))
+	}
+	value := result[0].(map[string]any)["value"].([]any)
+	if value[1] != "1" {
+		t.Errorf("rate = %v, want \"1\"", value[1])
+	}
+}
+
+func TestQuery_RateRangeQuery_ReturnsMatrixWithRatePerTick(t *testing.T) {
+	srv, store := newQueryTestServer(t)
+
+	labels, _ := metrics.NewLabels(map[string]string{"__name__": "requests_total"})
+	_ = store.Append(labels, 0, 0.0)
+	_ = store.Append(labels, 30000, 30.0)
+	_ = store.Append(labels, 60000, 60.0)
+	_ = store.Append(labels, 90000, 90.0)
+
+	// rate(requests_total[60s]) over [60s, 90s] step 30s
+	// tick 60s: [0s,60s] → 60/60=1.0; tick 90s: [30s,90s] → 60/60=1.0
+	u := "/api/v1/query_range?" + url.Values{
+		"query": {"rate(requests_total[60s])"},
+		"start": {"60"},
+		"end":   {"90"},
+		"step":  {"30"},
+	}.Encode()
+	rr := getQuery(t, srv, u)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rr.Code, rr.Body.String())
+	}
+	body := decodePromResponse(t, rr)
+	if body["status"] != "success" {
+		t.Fatalf("status = %v, want success", body["status"])
+	}
+	data := body["data"].(map[string]any)
+	if data["resultType"] != "matrix" {
+		t.Errorf("resultType = %v, want matrix", data["resultType"])
+	}
+	result := data["result"].([]any)
+	if len(result) != 1 {
+		t.Fatalf("result len = %d, want 1", len(result))
+	}
+	values := result[0].(map[string]any)["values"].([]any)
+	if len(values) != 2 {
+		t.Fatalf("values len = %d, want 2 (ticks at 60s and 90s)", len(values))
+	}
+	for i, v := range values {
+		pair := v.([]any)
+		if pair[1] != "1" {
+			t.Errorf("values[%d] rate = %v, want \"1\"", i, pair[1])
+		}
+	}
+}
+
+func TestQuery_SumByRangeQuery_ReturnsGroupedMatrix(t *testing.T) {
+	srv, store := newQueryTestServer(t)
+
+	la, _ := metrics.NewLabels(map[string]string{"__name__": "requests_total", "service": "api"})
+	lb, _ := metrics.NewLabels(map[string]string{"__name__": "requests_total", "service": "db"})
+	_ = store.Append(la, 1000, 10.0)
+	_ = store.Append(lb, 1000, 5.0)
+	_ = store.Append(la, 2000, 20.0)
+	_ = store.Append(lb, 2000, 8.0)
+
+	u := "/api/v1/query_range?" + url.Values{
+		"query": {"sum by (service)(requests_total)"},
+		"start": {"1"},
+		"end":   {"2"},
+		"step":  {"1"},
+	}.Encode()
+	rr := getQuery(t, srv, u)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rr.Code, rr.Body.String())
+	}
+	body := decodePromResponse(t, rr)
+	if body["status"] != "success" {
+		t.Fatalf("status = %v, want success", body["status"])
+	}
+	data := body["data"].(map[string]any)
+	if data["resultType"] != "matrix" {
+		t.Errorf("resultType = %v, want matrix", data["resultType"])
+	}
+	result := data["result"].([]any)
+	if len(result) != 2 {
+		t.Fatalf("result len = %d, want 2 (api and db groups)", len(result))
+	}
+	// Each group's metric map should contain service but not __name__
+	for _, r := range result {
+		metric := r.(map[string]any)["metric"].(map[string]any)
+		if _, hasName := metric["__name__"]; hasName {
+			t.Errorf("output metric should not contain __name__, got %v", metric)
+		}
+		if _, hasSvc := metric["service"]; !hasSvc {
+			t.Errorf("output metric should contain service label, got %v", metric)
+		}
+	}
+}
+
+func TestQuery_UnknownFunction_Returns400WithBadData(t *testing.T) {
+	srv, _ := newQueryTestServer(t)
+
+	u := "/api/v1/query?" + url.Values{
+		"query": {"avg(cpu_usage)"},
+		"time":  {"1000"},
+	}.Encode()
+	rr := getQuery(t, srv, u)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body: %s", rr.Code, rr.Body.String())
+	}
+	body := decodePromResponse(t, rr)
+	if body["errorType"] != "bad_data" {
+		t.Errorf("errorType = %v, want bad_data", body["errorType"])
 	}
 }
