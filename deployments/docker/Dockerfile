@@ -7,12 +7,13 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy source and build a statically linked binary.
+# Copy source and build both binaries.
 COPY . .
-RUN CGO_ENABLED=0 go build -o /server ./cmd/server
+RUN CGO_ENABLED=0 go build -o /server ./cmd/server && \
+    CGO_ENABLED=0 go build -o /loadgen ./examples/load-generator
 
-# Stage 2: minimal runtime image
-FROM gcr.io/distroless/static-debian12
+# Stage 2: backend runtime image
+FROM gcr.io/distroless/static-debian12 AS backend
 
 # Run as nonroot (uid 65532 is the distroless convention).
 USER 65532:65532
@@ -21,3 +22,12 @@ COPY --from=builder /server /server
 
 EXPOSE 8080
 ENTRYPOINT ["/server"]
+
+# Stage 3: load generator runtime image
+FROM gcr.io/distroless/static-debian12 AS loadgen
+
+USER 65532:65532
+
+COPY --from=builder /loadgen /loadgen
+
+ENTRYPOINT ["/loadgen"]
