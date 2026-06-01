@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"encoding/binary"
 	"fmt"
 	"sort"
 	"strings"
@@ -167,18 +168,24 @@ func aggregateRange(series []RangeSeries, by []string) []RangeSeries {
 	return result
 }
 
-// groupKey returns a null-byte-separated key for the values of labels named by `by`.
-// Absent labels contribute an empty string. Null bytes cannot appear in label values
-// (UTF-8 validation on ingestion), so there are no collisions between groups.
+// groupKey returns an unambiguous key for the values of labels named by `by`.
+// Each value is encoded as a 4-byte big-endian length followed by the value bytes.
+// Absent labels contribute an empty string (length 0, zero bytes).
+// Length-prefix encoding ensures distinct tuples always produce distinct keys,
+// regardless of what bytes appear in label values.
 func groupKey(labels Labels, by []string) string {
 	if len(by) == 0 {
 		return ""
 	}
-	parts := make([]string, len(by))
-	for i, name := range by {
-		parts[i], _ = labels.Get(name)
+	var b strings.Builder
+	var buf [4]byte
+	for _, name := range by {
+		val, _ := labels.Get(name)
+		binary.BigEndian.PutUint32(buf[:], uint32(len(val)))
+		b.Write(buf[:])
+		b.WriteString(val)
 	}
-	return strings.Join(parts, "\x00")
+	return b.String()
 }
 
 // sortPoints sorts SamplePoints by TimestampMs ascending.
