@@ -182,3 +182,29 @@ func TestParseExpr_Sum_UnclosedParen_ReturnsError(t *testing.T) {
 		t.Fatal("expected error for unclosed paren, got nil")
 	}
 }
+
+func TestParseExpr_RateAsMetricName_ReturnsSelectorExpr(t *testing.T) {
+	// "rate" without parentheses must be treated as a metric selector, not a function call.
+	for _, input := range []string{"rate", `rate{job="api"}`} {
+		expr, err := metrics.ParseExpr(input)
+		if err != nil {
+			t.Fatalf("ParseExpr(%q): unexpected error: %v", input, err)
+		}
+		if _, ok := expr.(metrics.SelectorExpr); !ok {
+			t.Errorf("ParseExpr(%q): got %T, want SelectorExpr", input, expr)
+		}
+	}
+}
+
+func TestParseExpr_SumAsMetricName_ReturnsSelectorExpr(t *testing.T) {
+	// "sum" without parentheses or "by" must be treated as a metric selector, not a function call.
+	for _, input := range []string{"sum", `sum{job="api"}`} {
+		expr, err := metrics.ParseExpr(input)
+		if err != nil {
+			t.Fatalf("ParseExpr(%q): unexpected error: %v", input, err)
+		}
+		if _, ok := expr.(metrics.SelectorExpr); !ok {
+			t.Errorf("ParseExpr(%q): got %T, want SelectorExpr", input, expr)
+		}
+	}
+}
