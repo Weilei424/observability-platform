@@ -1,6 +1,9 @@
 package metrics
 
-import "fmt"
+import (
+	"fmt"
+	"sort"
+)
 
 // QueryEngine executes instant and range queries over a MemoryStore.
 type QueryEngine struct {
@@ -82,4 +85,72 @@ func (e *QueryEngine) RangeQuery(sel Selector, startMs, endMs, stepMs int64) ([]
 		result = append(result, RangeSeries{Labels: ms.Labels, Points: points})
 	}
 	return result, nil
+}
+
+// LabelNames returns a sorted, deduplicated list of all label names present
+// across all series in the store. Returns a non-nil empty slice when no series
+// exist.
+func (e *QueryEngine) LabelNames() []string {
+	all := e.store.SelectSeries(Selector{})
+	seen := make(map[string]struct{})
+	for _, ms := range all {
+		for name := range ms.Labels.Map() {
+			seen[name] = struct{}{}
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// LabelValues returns a sorted, deduplicated list of all values for the given
+// label name across all series. Returns a non-nil empty slice when the label
+// name is not present in any series.
+func (e *QueryEngine) LabelValues(name string) []string {
+	all := e.store.SelectSeries(Selector{})
+	seen := make(map[string]struct{})
+	for _, ms := range all {
+		if val, ok := ms.Labels.Get(name); ok {
+			seen[val] = struct{}{}
+		}
+	}
+	values := make([]string, 0, len(seen))
+	for val := range seen {
+		values = append(values, val)
+	}
+	sort.Strings(values)
+	return values
+}
+
+// Series returns the label sets for all series matching any of the given
+// selectors. Results are deduplicated by series fingerprint and sorted by
+// __name__ then fingerprint for deterministic output. Returns a non-nil empty
+// slice when no series match. An empty selectors slice returns a non-nil empty
+// result; callers are responsible for enforcing a minimum selector count.
+func (e *QueryEngine) Series(selectors []Selector) []Labels {
+	seen := make(map[SeriesID]Labels)
+	for _, sel := range selectors {
+		for _, ms := range e.store.SelectSeries(sel) {
+			id := ms.Labels.Fingerprint()
+			if _, exists := seen[id]; !exists {
+				seen[id] = ms.Labels
+			}
+		}
+	}
+	result := make([]Labels, 0, len(seen))
+	for _, labels := range seen {
+		result = append(result, labels)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		ni, _ := result[i].Get("__name__")
+		nj, _ := result[j].Get("__name__")
+		if ni != nj {
+			return ni < nj
+		}
+		return result[i].Fingerprint() < result[j].Fingerprint()
+	})
+	return result
 }
