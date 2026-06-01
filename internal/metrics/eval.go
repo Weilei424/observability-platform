@@ -111,9 +111,7 @@ func aggregateInstant(samples []InstantSample, by []string, tMs int64) []Instant
 		if _, ok := groupLabels[key]; !ok {
 			lm := make(map[string]string, len(by))
 			for _, name := range by {
-				if val, ok2 := s.Labels.Get(name); ok2 {
-					lm[name] = val
-				}
+				lm[name], _ = s.Labels.Get(name) // absent labels → ""
 			}
 			groupLabels[key] = lm
 		}
@@ -145,9 +143,7 @@ func aggregateRange(series []RangeSeries, by []string) []RangeSeries {
 			groupTicks[key] = make(map[int64]float64)
 			lm := make(map[string]string, len(by))
 			for _, name := range by {
-				if val, ok2 := rs.Labels.Get(name); ok2 {
-					lm[name] = val
-				}
+				lm[name], _ = rs.Labels.Get(name) // absent labels → ""
 			}
 			groupLabels[key] = lm
 		}
