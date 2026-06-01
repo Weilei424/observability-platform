@@ -32,9 +32,34 @@ func ParseExpr(s string) (Expr, error) {
 
 	switch word {
 	case "rate":
-		return parseRateExpr(s)
+		// Only treat as a function call if '(' immediately follows the word.
+		// rate{job="api"} is a valid metric selector, not a function call.
+		rest := strings.TrimSpace(s[i:])
+		if len(rest) > 0 && rest[0] == '(' {
+			return parseRateExpr(s)
+		}
+		sel, err := ParseSelector(s)
+		if err != nil {
+			return nil, err
+		}
+		return SelectorExpr{Selector: sel}, nil
 	case "sum":
-		return parseSumExpr(s)
+		// sum(expr) and sum by (...)(expr) are function calls.
+		// sum{job="api"} and bare sum are selectors.
+		rest := strings.TrimSpace(s[i:])
+		isFuncCall := len(rest) > 0 && rest[0] == '('
+		if !isFuncCall && strings.HasPrefix(rest, "by") {
+			byRest := rest[len("by"):]
+			isFuncCall = len(byRest) == 0 || byRest[0] == '(' || byRest[0] == ' ' || byRest[0] == '\t'
+		}
+		if isFuncCall {
+			return parseSumExpr(s)
+		}
+		sel, err := ParseSelector(s)
+		if err != nil {
+			return nil, err
+		}
+		return SelectorExpr{Selector: sel}, nil
 	case "":
 		// Starts with '(' or '{' — treat as selector
 		sel, err := ParseSelector(s)
