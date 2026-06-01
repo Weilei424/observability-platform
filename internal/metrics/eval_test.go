@@ -391,6 +391,44 @@ func TestEvalInstant_SumBy_AbsentLabelEmittedAsEmptyString(t *testing.T) {
 	}
 }
 
+func TestEvalRange_SumBy_AbsentLabelEmittedAsEmptyString(t *testing.T) {
+	engine, store := newEngineWithSamples(t)
+
+	la := mustNewLabels(t, map[string]string{"__name__": "req", "env": "prod"})
+	lb := mustNewLabels(t, map[string]string{"__name__": "req"})
+	_ = store.Append(la, 1000, 3.0)
+	_ = store.Append(lb, 1000, 7.0)
+
+	expr := metrics.SumExpr{
+		Inner: metrics.SelectorExpr{Selector: metrics.Selector{MetricName: "req"}},
+		By:    []string{"env"},
+	}
+	result, err := engine.EvalRange(expr, 1000, 1000, 1000)
+	if err != nil {
+		t.Fatalf("EvalRange: %v", err)
+	}
+	if len(result) != 2 {
+		t.Fatalf("len = %d, want 2 (prod group and absent group)", len(result))
+	}
+	byEnv := make(map[string]float64)
+	for _, rs := range result {
+		env, _ := rs.Labels.Get("env")
+		if len(rs.Points) != 1 {
+			t.Fatalf("env=%q: points = %d, want 1", env, len(rs.Points))
+		}
+		byEnv[env] = rs.Points[0].Value
+		if _, ok := rs.Labels.Map()["env"]; !ok {
+			t.Errorf("output label map missing 'env' key: %v", rs.Labels.Map())
+		}
+	}
+	if byEnv["prod"] != 3.0 {
+		t.Errorf("prod sum = %v, want 3.0", byEnv["prod"])
+	}
+	if byEnv[""] != 7.0 {
+		t.Errorf("absent-label sum = %v, want 7.0", byEnv[""])
+	}
+}
+
 func TestEvalInstant_SumOfRate_ComposesCorrectly(t *testing.T) {
 	engine, store := newEngineWithSamples(t)
 
