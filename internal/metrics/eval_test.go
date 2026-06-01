@@ -457,3 +457,27 @@ func TestEvalInstant_SumOfRate_ComposesCorrectly(t *testing.T) {
 		t.Errorf("sum(rate) = %v, want 2.0", result[0].Value)
 	}
 }
+
+func TestEvalInstant_SumBy_NulByteInValue_NoGroupCollision(t *testing.T) {
+	// ("x", "y\x00z") and ("x\x00y", "z") produce the same NUL-joined string
+	// "x\x00y\x00z" — a collision under the old separator-based key.
+	// Length-prefix encoding must keep them in separate groups.
+	engine, store := newEngineWithSamples(t)
+
+	la := mustNewLabels(t, map[string]string{"__name__": "req", "l1": "x", "l2": "y\x00z"})
+	lb := mustNewLabels(t, map[string]string{"__name__": "req", "l1": "x\x00y", "l2": "z"})
+	_ = store.Append(la, 1000, 3.0)
+	_ = store.Append(lb, 1000, 7.0)
+
+	expr := metrics.SumExpr{
+		Inner: metrics.SelectorExpr{Selector: metrics.Selector{MetricName: "req"}},
+		By:    []string{"l1", "l2"},
+	}
+	result, err := engine.EvalInstant(expr, 1000)
+	if err != nil {
+		t.Fatalf("EvalInstant: %v", err)
+	}
+	if len(result) != 2 {
+		t.Fatalf("len = %d, want 2 distinct groups; NUL in label value caused key collision", len(result))
+	}
+}
