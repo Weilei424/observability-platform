@@ -144,15 +144,16 @@
 - [x] Integration test: series discovery with match selector (`TestMetadata_Series_ReturnsMatchingSeriesLabelSets`)
 
 ### Phase 2.4 — Minimal Query Functions
-- [ ] Support raw selector query
-- [ ] Support `rate(metric[window])`
-- [ ] Support `sum(metric)`
-- [ ] Support `sum by (label)(metric)`
-- [ ] Return explicit error for unsupported functions
-- [ ] Unit tests: rate over counter samples
-- [ ] Unit tests: sum across series
-- [ ] Unit tests: grouped sum by label
-- [ ] Unit tests: unsupported function error
+- [ ] Create `internal/metrics/duration.go` — export `ParsePromDuration` (move from `internal/api/query.go`)
+- [ ] Update `internal/api/query.go` — `parseDurationParam` calls `metrics.ParsePromDuration`; remove local `promDurationUnit` and `parsePromDuration`
+- [ ] Create `internal/metrics/expr.go` — `Expr` interface, `SelectorExpr`, `RateExpr`, `SumExpr` node types
+- [ ] Add `newOutputLabels` to `internal/metrics/labels.go` — construct aggregation output labels without requiring `__name__`
+- [ ] Create `internal/metrics/expr_parser.go` — `ParseExpr` with bracket-matching recursive descent; `parseRateExpr`, `parseSumExpr`, `parseLabelList`, `extractFirstParen`
+- [ ] Create `internal/metrics/expr_parser_test.go` — unit tests for `ParseExpr`: bare selector, rate, sum, sum-by single label, sum-by multiple labels, sum(rate(...)), unknown function, malformed input
+- [x] Create `internal/metrics/eval.go` — `EvalInstant` and `EvalRange` on `QueryEngine`; `rateInstant`, `rateRange`, `aggregateInstant`, `aggregateRange`, `groupKey`, `sortPoints`
+- [x] Create `internal/metrics/eval_test.go` — unit tests for rate (≥2 samples, <2 samples, per-tick re-evaluation), sum (ungrouped, grouped by single label, grouped by multiple labels), sum(rate(...)) composition
+- [ ] Modify `internal/api/query.go` — `handleQuery` and `handleQueryRange` use `metrics.ParseExpr` / `engine.EvalInstant` / `engine.EvalRange` instead of `ParseSelector` / `InstantQuery` / `RangeQuery`
+- [ ] Modify `internal/api/query_test.go` — replace stale `TestQuery_PromQLFunctionCall_Returns400` with empty-vector test; add HTTP integration tests for rate instant, rate range, sum-by range, unknown function → 400
 
 ### Phase 2.5 — Grafana Metrics Dashboard Demo
 - [ ] Add Grafana datasource provisioning for Prometheus-compatible endpoint
