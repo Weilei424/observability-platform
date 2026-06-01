@@ -160,3 +160,182 @@ func TestQueryEngine_RangeQuery_EndBeforeStart_ReturnsError(t *testing.T) {
 		t.Error("expected error for end < start, got nil")
 	}
 }
+
+func TestQueryEngine_LabelNames_ReturnsSortedUniqueNames(t *testing.T) {
+	engine, store := newEngineWithSamples(t)
+
+	la := mustNewLabels(t, map[string]string{"__name__": "cpu_usage", "host": "a"})
+	lb := mustNewLabels(t, map[string]string{"__name__": "mem_usage", "region": "us"})
+	_ = store.Append(la, 1000, 1.0)
+	_ = store.Append(lb, 1000, 2.0)
+
+	names := engine.LabelNames()
+	want := []string{"__name__", "host", "region"}
+	if len(names) != len(want) {
+		t.Fatalf("LabelNames() = %v, want %v", names, want)
+	}
+	for i, w := range want {
+		if names[i] != w {
+			t.Errorf("LabelNames()[%d] = %q, want %q", i, names[i], w)
+		}
+	}
+}
+
+func TestQueryEngine_LabelNames_DeduplicatesAcrossSeries(t *testing.T) {
+	engine, store := newEngineWithSamples(t)
+
+	la := mustNewLabels(t, map[string]string{"__name__": "cpu_usage", "host": "a"})
+	lb := mustNewLabels(t, map[string]string{"__name__": "mem_usage", "host": "b"})
+	_ = store.Append(la, 1000, 1.0)
+	_ = store.Append(lb, 1000, 2.0)
+
+	names := engine.LabelNames()
+	// host appears in both series — must appear only once
+	count := 0
+	for _, n := range names {
+		if n == "host" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("host appears %d times in LabelNames(), want 1", count)
+	}
+}
+
+func TestQueryEngine_LabelNames_EmptyStore_ReturnsNonNilEmpty(t *testing.T) {
+	engine, _ := newEngineWithSamples(t)
+
+	names := engine.LabelNames()
+	if names == nil {
+		t.Error("LabelNames() returned nil, want non-nil empty slice")
+	}
+	if len(names) != 0 {
+		t.Errorf("LabelNames() = %v, want []", names)
+	}
+}
+
+func TestQueryEngine_LabelValues_ReturnsSortedUniqueValues(t *testing.T) {
+	engine, store := newEngineWithSamples(t)
+
+	la := mustNewLabels(t, map[string]string{"__name__": "cpu_usage", "host": "b"})
+	lb := mustNewLabels(t, map[string]string{"__name__": "mem_usage", "host": "a"})
+	_ = store.Append(la, 1000, 1.0)
+	_ = store.Append(lb, 1000, 2.0)
+
+	vals := engine.LabelValues("host")
+	want := []string{"a", "b"}
+	if len(vals) != len(want) {
+		t.Fatalf("LabelValues(\"host\") = %v, want %v", vals, want)
+	}
+	for i, w := range want {
+		if vals[i] != w {
+			t.Errorf("LabelValues(\"host\")[%d] = %q, want %q", i, vals[i], w)
+		}
+	}
+}
+
+func TestQueryEngine_LabelValues_MetricNameLabel_ReturnsMetricNames(t *testing.T) {
+	engine, store := newEngineWithSamples(t)
+
+	la := mustNewLabels(t, map[string]string{"__name__": "cpu_usage"})
+	lb := mustNewLabels(t, map[string]string{"__name__": "mem_usage"})
+	_ = store.Append(la, 1000, 1.0)
+	_ = store.Append(lb, 1000, 2.0)
+
+	vals := engine.LabelValues("__name__")
+	want := []string{"cpu_usage", "mem_usage"}
+	if len(vals) != len(want) {
+		t.Fatalf("LabelValues(\"__name__\") = %v, want %v", vals, want)
+	}
+	for i, w := range want {
+		if vals[i] != w {
+			t.Errorf("LabelValues(\"__name__\")[%d] = %q, want %q", i, vals[i], w)
+		}
+	}
+}
+
+func TestQueryEngine_LabelValues_NonexistentLabel_ReturnsNonNilEmpty(t *testing.T) {
+	engine, store := newEngineWithSamples(t)
+
+	la := mustNewLabels(t, map[string]string{"__name__": "cpu_usage"})
+	_ = store.Append(la, 1000, 1.0)
+
+	vals := engine.LabelValues("nonexistent")
+	if vals == nil {
+		t.Error("LabelValues returned nil, want non-nil empty slice")
+	}
+	if len(vals) != 0 {
+		t.Errorf("LabelValues(\"nonexistent\") = %v, want []", vals)
+	}
+}
+
+func TestQueryEngine_Series_ReturnsMatchingLabelSets(t *testing.T) {
+	engine, store := newEngineWithSamples(t)
+
+	la := mustNewLabels(t, map[string]string{"__name__": "cpu_usage", "host": "a"})
+	lb := mustNewLabels(t, map[string]string{"__name__": "mem_usage", "host": "b"})
+	_ = store.Append(la, 1000, 1.0)
+	_ = store.Append(lb, 1000, 2.0)
+
+	result := engine.Series([]metrics.Selector{{MetricName: "cpu_usage"}})
+	if len(result) != 1 {
+		t.Fatalf("Series() len = %d, want 1", len(result))
+	}
+	name, ok := result[0].Get("__name__")
+	if !ok || name != "cpu_usage" {
+		t.Errorf("result[0].__name__ = %q, want cpu_usage", name)
+	}
+}
+
+func TestQueryEngine_Series_UnionAcrossSelectors_Deduplicated(t *testing.T) {
+	engine, store := newEngineWithSamples(t)
+
+	la := mustNewLabels(t, map[string]string{"__name__": "cpu_usage", "host": "a"})
+	_ = store.Append(la, 1000, 1.0)
+
+	// Two different selectors that both match the same series.
+	// Deduplication must be by fingerprint, not by selector identity.
+	result := engine.Series([]metrics.Selector{
+		{MetricName: "cpu_usage"},
+		{MetricName: "cpu_usage", Matchers: []metrics.Matcher{{Name: "host", Value: "a"}}},
+	})
+	if len(result) != 1 {
+		t.Errorf("Series() len = %d, want 1 (deduplicated by fingerprint)", len(result))
+	}
+}
+
+func TestQueryEngine_Series_SortedByMetricName(t *testing.T) {
+	engine, store := newEngineWithSamples(t)
+
+	la := mustNewLabels(t, map[string]string{"__name__": "z_metric"})
+	lb := mustNewLabels(t, map[string]string{"__name__": "a_metric"})
+	_ = store.Append(la, 1000, 1.0)
+	_ = store.Append(lb, 1000, 2.0)
+
+	result := engine.Series([]metrics.Selector{
+		{MetricName: "z_metric"},
+		{MetricName: "a_metric"},
+	})
+	if len(result) != 2 {
+		t.Fatalf("Series() len = %d, want 2", len(result))
+	}
+	firstName, _ := result[0].Get("__name__")
+	if firstName != "a_metric" {
+		t.Errorf("result[0].__name__ = %q, want a_metric (sorted)", firstName)
+	}
+}
+
+func TestQueryEngine_Series_NoMatchingSelector_ReturnsNonNilEmpty(t *testing.T) {
+	engine, store := newEngineWithSamples(t)
+
+	la := mustNewLabels(t, map[string]string{"__name__": "cpu_usage"})
+	_ = store.Append(la, 1000, 1.0)
+
+	result := engine.Series([]metrics.Selector{{MetricName: "nonexistent"}})
+	if result == nil {
+		t.Error("Series() returned nil, want non-nil empty slice")
+	}
+	if len(result) != 0 {
+		t.Errorf("Series() = %v, want []", result)
+	}
+}
