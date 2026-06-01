@@ -352,6 +352,45 @@ func TestEvalRange_SumBy_GroupsPerTick(t *testing.T) {
 	}
 }
 
+func TestEvalInstant_SumBy_AbsentLabelEmittedAsEmptyString(t *testing.T) {
+	// Series missing a by-label must be grouped under "" for that label,
+	// and the output label map must include the label with value "".
+	engine, store := newEngineWithSamples(t)
+
+	// la has env; lb does not.
+	la := mustNewLabels(t, map[string]string{"__name__": "req", "env": "prod"})
+	lb := mustNewLabels(t, map[string]string{"__name__": "req"})
+	_ = store.Append(la, 1000, 3.0)
+	_ = store.Append(lb, 1000, 7.0)
+
+	expr := metrics.SumExpr{
+		Inner: metrics.SelectorExpr{Selector: metrics.Selector{MetricName: "req"}},
+		By:    []string{"env"},
+	}
+	result, err := engine.EvalInstant(expr, 1000)
+	if err != nil {
+		t.Fatalf("EvalInstant: %v", err)
+	}
+	if len(result) != 2 {
+		t.Fatalf("len = %d, want 2 (prod group and absent group)", len(result))
+	}
+	byEnv := make(map[string]float64)
+	for _, r := range result {
+		env, _ := r.Labels.Get("env")
+		byEnv[env] = r.Value
+		// All output series must carry the "env" label (possibly "").
+		if _, ok := r.Labels.Map()["env"]; !ok {
+			t.Errorf("output label map missing 'env' key: %v", r.Labels.Map())
+		}
+	}
+	if byEnv["prod"] != 3.0 {
+		t.Errorf("prod sum = %v, want 3.0", byEnv["prod"])
+	}
+	if byEnv[""] != 7.0 {
+		t.Errorf("absent-label sum = %v, want 7.0", byEnv[""])
+	}
+}
+
 func TestEvalInstant_SumOfRate_ComposesCorrectly(t *testing.T) {
 	engine, store := newEngineWithSamples(t)
 
