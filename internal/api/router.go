@@ -20,6 +20,12 @@ func (s *Server) buildRouter() chi.Router {
 	r.Post("/api/v1/query", s.handleQuery)
 	r.Get("/api/v1/query_range", s.handleQueryRange)
 	r.Post("/api/v1/query_range", s.handleQueryRange)
+	r.Get("/api/v1/labels", s.handleLabels)
+	r.Post("/api/v1/labels", s.handleLabels)
+	r.Get("/api/v1/label/{name}/values", s.handleLabelValues)
+	r.Post("/api/v1/label/{name}/values", s.handleLabelValues)
+	r.Get("/api/v1/series", s.handleSeries)
+	r.Post("/api/v1/series", s.handleSeries)
 
 	return r
 }
