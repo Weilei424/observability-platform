@@ -3,6 +3,7 @@ services:
     build:
       context: ../../
       dockerfile: deployments/docker/Dockerfile
+      target: backend
     ports:
       - "8080:8080"
     environment:
@@ -15,10 +16,23 @@ services:
     image: grafana/grafana:11.1.0
     ports:
       - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
     volumes:
       - obs-grafana-data:/var/lib/grafana
       - ../../observability/grafana/datasources:/etc/grafana/provisioning/datasources
       - ../../observability/grafana/dashboards:/etc/grafana/provisioning/dashboards
+
+  load-generator:
+    build:
+      context: ../../
+      dockerfile: deployments/docker/Dockerfile
+      target: loadgen
+    environment:
+      OBS_BACKEND_ADDR: http://backend:8080
+    depends_on:
+      - backend
+    restart: on-failure
 
 volumes:
   obs-data:
