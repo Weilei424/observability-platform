@@ -1,4 +1,4 @@
-.PHONY: build test lint run local-up local-down help
+.PHONY: build test lint run local-up local-down smoke help
 
 ## build: Compile the backend binary
 build:
@@ -27,6 +27,10 @@ local-up:
 ## local-down: Stop and remove Docker containers
 local-down:
 	docker compose -f deployments/docker/docker-compose.yml down
+
+## smoke: Run API smoke test against a running backend (set BACKEND_ADDR to override localhost:8080)
+smoke:
+	bash tests/e2e/smoke.sh
 
 ## help: Show available make targets
 help:
