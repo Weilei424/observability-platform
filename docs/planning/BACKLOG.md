@@ -156,13 +156,19 @@
 - [x] Modify `internal/api/query_test.go` — replace stale `TestQuery_PromQLFunctionCall_Returns400` with empty-vector test; add HTTP integration tests for rate instant, rate range, sum-by range, unknown function → 400
 
 ### Phase 2.5 — Grafana Metrics Dashboard Demo
-- [ ] Add Grafana datasource provisioning for Prometheus-compatible endpoint
-- [ ] Add metrics dashboard JSON
-- [ ] Add sample app or load generator metrics
-- [ ] Add Docker Compose wiring for dashboard provisioning
-- [ ] Verify: Grafana datasource connects successfully
-- [ ] Verify: dashboard displays live metrics
-- [ ] Add docs/screenshots placeholder path for demo evidence
+- [x] Create `tests/e2e/smoke.sh` — API smoke test for all 5 dashboard queries
+- [x] Enrich `examples/load-generator/main.go` — add `http_errors_total`, `active_connections`, method label on duration, `OBS_BACKEND_ADDR` env var
+- [x] Add `loadgen` build target to `deployments/docker/Dockerfile`
+- [x] Add `load-generator` service to `deployments/docker/docker-compose.yml`
+- [x] Create `observability/grafana/datasources/prometheus.yml` — provision Prometheus datasource (uid: obs-prometheus)
+- [x] Create `observability/grafana/dashboards/dashboards.yml` — dashboard provider config
+- [x] Create `observability/grafana/dashboards/metrics.json` — 5-panel dashboard (Request Rate, Error Rate, Total RPS, Duration, Active Connections)
+- [x] Add `smoke` target to `Makefile`
+- [x] Create `docs/runbooks/grafana-demo.md` — manual test steps
+- [ ] Verify: `make local-up` starts all three services
+- [ ] Verify: Grafana datasource "Save & test" returns success
+- [ ] Verify: all 5 dashboard panels show live data
+- [ ] Verify: `make smoke` exits 0
 
 ---
 
