@@ -134,14 +134,14 @@
 - [x] Verify Grafana can issue query requests to the backend — `TestGrafanaStylePOSTQuery` exercises POST with `application/x-www-form-urlencoded` body
 
 ### Phase 2.3 — Prometheus Metadata Endpoints
-- [ ] Implement `GET /api/v1/labels`
-- [ ] Implement `GET /api/v1/label/{name}/values`
-- [ ] Implement `GET /api/v1/label/__name__/values`
-- [ ] Implement `GET /api/v1/series`
-- [ ] Integration test: list metric names
-- [ ] Integration test: list label names
-- [ ] Integration test: list label values
-- [ ] Integration test: series discovery with match selector
+- [x] Implement `GET /api/v1/labels` (also POST; `handleLabels` in `internal/api/metadata.go`)
+- [x] Implement `GET /api/v1/label/{name}/values` (also POST; `handleLabelValues`)
+- [x] Implement `GET /api/v1/label/__name__/values` (covered by `{name}` wildcard route)
+- [x] Implement `GET /api/v1/series` (also POST; `handleSeries` with match[] dedup)
+- [x] Integration test: list metric names (`TestMetadata_LabelValues_ReturnsMetricNames`)
+- [x] Integration test: list label names (`TestMetadata_Labels_ReturnsSortedLabelNames`)
+- [x] Integration test: list label values (`TestMetadata_LabelValues_ExistingLabel_ReturnsSortedValues`)
+- [x] Integration test: series discovery with match selector (`TestMetadata_Series_ReturnsMatchingSeriesLabelSets`)
 
 ### Phase 2.4 — Minimal Query Functions
 - [ ] Support raw selector query
