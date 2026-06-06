@@ -165,10 +165,10 @@
 - [x] Create `observability/grafana/dashboards/metrics.json` — 5-panel dashboard (Request Rate, Error Rate, Total RPS, Duration, Active Connections)
 - [x] Add `smoke` target to `Makefile`
 - [x] Create `docs/runbooks/grafana-demo.md` — manual test steps
-- [ ] Verify: `make local-up` starts all three services
-- [ ] Verify: Grafana datasource "Save & test" returns success
-- [ ] Verify: all 5 dashboard panels show live data
-- [ ] Verify: `make smoke` exits 0
+- [x] Verify: `make local-up` starts all three services
+- [x] Verify: Grafana datasource "Save & test" returns success
+- [x] Verify: all 5 dashboard panels show live data
+- [x] Verify: `make smoke` exits 0
 
 ---
 
