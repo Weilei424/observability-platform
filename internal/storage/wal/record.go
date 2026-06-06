@@ -23,6 +23,7 @@ type LabelPair struct {
 // WALStore depends on this interface so tests can inject a fake.
 type RecordWriter interface {
 	WriteRecord(labels []LabelPair, tsMs int64, value float64) error
+	SegmentIndex() int
 }
 
 // validateLabels returns an error if labels violate WAL encoding limits.
