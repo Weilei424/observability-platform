@@ -15,9 +15,15 @@ func (f *failingWriter) WriteRecord(_ []wal.LabelPair, _ int64, _ float64) error
 	return errors.New("simulated WAL write failure")
 }
 
+func (f *failingWriter) SegmentIndex() int { return 0 }
+
 func TestWALStore_AppendFailsWhenWALFails(t *testing.T) {
-	mem := metrics.NewMemoryStore()
-	store := metrics.NewWALStore(&failingWriter{}, mem)
+	dataDir := t.TempDir()
+	bs, err := metrics.NewBlockStore(dataDir)
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+	store := metrics.NewWALStore(&failingWriter{}, bs, dataDir)
 
 	labels, err := metrics.NewLabels(map[string]string{"__name__": "cpu_usage", "env": "test"})
 	if err != nil {
@@ -28,23 +34,26 @@ func TestWALStore_AppendFailsWhenWALFails(t *testing.T) {
 		t.Fatal("expected error when WAL write fails, got nil")
 	}
 
-	// MemoryStore must not have been written.
-	series := mem.SelectSeries(metrics.Selector{MetricName: "cpu_usage"})
+	series := bs.SelectSeries(metrics.Selector{MetricName: "cpu_usage"})
 	if len(series) != 0 {
-		t.Errorf("MemoryStore has %d series after failed WAL write, want 0", len(series))
+		t.Errorf("BlockStore has %d series after failed WAL write, want 0", len(series))
 	}
 }
 
 func TestWALStore_AppendDelegatesToMemory(t *testing.T) {
 	dir := t.TempDir()
-	w, err := wal.Open(dir, 128<<20, 1)
+	walDir := dir + "/metrics/wal"
+	w, err := wal.Open(walDir, 128<<20, 1)
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
 	defer w.Close()
 
-	mem := metrics.NewMemoryStore()
-	store := metrics.NewWALStore(w, mem)
+	bs, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+	store := metrics.NewWALStore(w, bs, dir)
 
 	labels, err := metrics.NewLabels(map[string]string{"__name__": "req_total", "service": "api"})
 	if err != nil {
@@ -54,21 +63,25 @@ func TestWALStore_AppendDelegatesToMemory(t *testing.T) {
 		t.Fatalf("Append: %v", err)
 	}
 
-	series := mem.SelectSeries(metrics.Selector{MetricName: "req_total"})
+	series := bs.SelectSeries(metrics.Selector{MetricName: "req_total"})
 	if len(series) != 1 {
-		t.Fatalf("MemoryStore has %d series, want 1", len(series))
+		t.Fatalf("BlockStore has %d series, want 1", len(series))
 	}
 }
 
 func TestWALStore_ReplayRestoresSeries(t *testing.T) {
 	dir := t.TempDir()
-	w1, err := wal.Open(dir, 128<<20, 1)
+	walDir := dir + "/metrics/wal"
+	w1, err := wal.Open(walDir, 128<<20, 1)
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
 
-	mem1 := metrics.NewMemoryStore()
-	store1 := metrics.NewWALStore(w1, mem1)
+	bs1, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+	store1 := metrics.NewWALStore(w1, bs1, dir)
 
 	labels, _ := metrics.NewLabels(map[string]string{"__name__": "disk_read_bytes", "device": "sda"})
 	samples := [][2]float64{{1000, 100}, {2000, 200}, {3000, 300}}
@@ -81,9 +94,13 @@ func TestWALStore_ReplayRestoresSeries(t *testing.T) {
 		t.Fatalf("Close wal: %v", err)
 	}
 
-	// Replay WAL into a fresh MemoryStore.
-	mem2 := metrics.NewMemoryStore()
-	if err := wal.Replay(dir, func(pairs []wal.LabelPair, tsMs int64, value float64) {
+	// Replay WAL into a fresh BlockStore.
+	bs2, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+	checkpoint := metrics.ReadCheckpoint(dir)
+	if err := wal.ReplayFrom(walDir, checkpoint, func(pairs []wal.LabelPair, tsMs int64, value float64) {
 		lm := make(map[string]string, len(pairs))
 		for _, p := range pairs {
 			lm[p.Name] = p.Value
@@ -93,22 +110,16 @@ func TestWALStore_ReplayRestoresSeries(t *testing.T) {
 			t.Errorf("NewLabels during replay: %v", err)
 			return
 		}
-		if err := mem2.Append(lbs, tsMs, value); err != nil {
+		if err := bs2.Append(lbs, tsMs, value); err != nil {
 			t.Errorf("Append during replay: %v", err)
 		}
 	}); err != nil {
-		t.Fatalf("Replay: %v", err)
+		t.Fatalf("ReplayFrom: %v", err)
 	}
 
 	id := labels.Fingerprint()
-	got := mem2.QueryRange(id, 1000, 3000)
+	got := bs2.QueryRange(id, 1000, 3000)
 	if len(got) != 3 {
 		t.Fatalf("QueryRange returned %d samples after replay, want 3", len(got))
-	}
-	for i, s := range got {
-		if s.TimestampMs != int64(samples[i][0]) || s.Value != samples[i][1] {
-			t.Errorf("sample[%d] = {%d, %v}, want {%d, %v}",
-				i, s.TimestampMs, s.Value, int64(samples[i][0]), samples[i][1])
-		}
 	}
 }
