@@ -1,7 +1,9 @@
 package chunk
 
 import (
+	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"math/bits"
@@ -35,9 +37,45 @@ func NewChunk() *Chunk {
 	return &Chunk{lastLeading: 0xff} // 0xff = sentinel: no previous XOR block
 }
 
+// Bytes serializes the chunk to a byte slice suitable for persistence.
+// Format: [8]minTs | [8]maxTs | [2]numSamples | encoded bitstream.
+// The deserialized chunk is sealed (read-only); call FromBytes to reconstruct it.
+func (c *Chunk) Bytes() []byte {
+	data := c.bw.bytes()
+	out := make([]byte, 18+len(data))
+	binary.BigEndian.PutUint64(out[0:8], uint64(c.minTs))
+	binary.BigEndian.PutUint64(out[8:16], uint64(c.maxTs))
+	binary.BigEndian.PutUint16(out[16:18], c.numSamples)
+	copy(out[18:], data)
+	return out
+}
+
+// FromBytes reconstructs a sealed, read-only Chunk from data produced by Bytes.
+// Returns an error if data is too short to contain a valid header.
+func FromBytes(data []byte) (*Chunk, error) {
+	if len(data) < 18 {
+		return nil, fmt.Errorf("chunk.FromBytes: data too short (%d bytes)", len(data))
+	}
+	minTs := int64(binary.BigEndian.Uint64(data[0:8]))
+	maxTs := int64(binary.BigEndian.Uint64(data[8:16]))
+	numSamples := binary.BigEndian.Uint16(data[16:18])
+	payload := make([]byte, len(data)-18)
+	copy(payload, data[18:])
+	return &Chunk{
+		minTs:       minTs,
+		maxTs:       maxTs,
+		numSamples:  numSamples,
+		sealed:      true,
+		bw:          bitsWriter{buf: payload},
+		lastLeading: 0xff,
+	}, nil
+}
+
 // Append encodes tsMs and val into the chunk.
 // Returns ErrChunkFull immediately if the chunk is already sealed.
-// After storing the sample, seals the chunk if count or time-span threshold is reached.
+// The threshold-crossing sample is written before sealing: the chunk is sealed
+// after storing the sample that first meets the count or time-span threshold.
+// Subsequent appends return ErrChunkFull. This matches Prometheus head chunk behavior.
 func (c *Chunk) Append(tsMs int64, val float64) error {
 	if c.sealed {
 		return ErrChunkFull
