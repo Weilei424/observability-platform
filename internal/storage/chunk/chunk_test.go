@@ -314,6 +314,42 @@ func TestChunk_FromBytes_TooShort(t *testing.T) {
 	}
 }
 
+func TestChunk_FromBytes_ZeroSamplesNonEmptyPayload(t *testing.T) {
+	// numSamples=0 header with a non-empty payload is corrupt.
+	data := make([]byte, 18+4) // header-only + 4 garbage bytes
+	// minTs=0, maxTs=0, numSamples=0 (all zeros already), payload=[0,0,0,0]
+	_, err := chunk.FromBytes(data)
+	if err == nil {
+		t.Error("expected error for numSamples=0 with non-empty payload, got nil")
+	}
+}
+
+func TestChunk_FromBytes_ZeroSamplesNonZeroMinMax(t *testing.T) {
+	// numSamples=0 header with non-zero minTs is corrupt.
+	data := make([]byte, 18) // header only, no payload
+	// Set minTs=1000 but numSamples=0
+	data[7] = 0xe8 // big-endian 1000 in last byte of uint64
+	_, err := chunk.FromBytes(data)
+	if err == nil {
+		t.Error("expected error for numSamples=0 with non-zero minTs, got nil")
+	}
+}
+
+func TestChunk_FromBytes_ZeroSamplesValid(t *testing.T) {
+	// numSamples=0, minTs=0, maxTs=0, empty payload — this is a valid empty chunk.
+	data := make([]byte, 18)
+	c, err := chunk.FromBytes(data)
+	if err != nil {
+		t.Fatalf("unexpected error for valid empty chunk: %v", err)
+	}
+	if c.NumSamples() != 0 {
+		t.Errorf("NumSamples() = %d, want 0", c.NumSamples())
+	}
+	if c.Iterator().Next() {
+		t.Error("Next() = true on empty deserialized chunk")
+	}
+}
+
 func TestChunk_FromBytes_CorruptPayload(t *testing.T) {
 	// Build a valid header declaring 5 samples but supply a zeroed payload.
 	// The eager decoder must return an error rather than silently succeeding.
