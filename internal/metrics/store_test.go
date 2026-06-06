@@ -253,3 +253,106 @@ func TestMemoryStore_QueryInstant_UnknownSeries_ReturnsFalse(t *testing.T) {
 		t.Error("expected false for unknown series, got true")
 	}
 }
+
+func TestMemoryStore_ChunkBoundary_TwoChunksCreated(t *testing.T) {
+	store := metrics.NewMemoryStore()
+	labels := mustNewLabels(t, map[string]string{"__name__": "cpu_usage"})
+
+	// 121 samples → first chunk seals at 120, second chunk gets 1 sample
+	for i := 0; i < 121; i++ {
+		if err := store.Append(labels, int64(i*1000), float64(i)); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+	}
+
+	if n := store.ChunkCount(labels.Fingerprint()); n != 2 {
+		t.Errorf("ChunkCount = %d, want 2", n)
+	}
+}
+
+func TestMemoryStore_ChunkBoundary_AllSamplesQueryable(t *testing.T) {
+	store := metrics.NewMemoryStore()
+	labels := mustNewLabels(t, map[string]string{"__name__": "cpu_usage"})
+
+	for i := 0; i < 121; i++ {
+		_ = store.Append(labels, int64(i*1000), float64(i))
+	}
+
+	got := store.QueryRange(labels.Fingerprint(), 0, 121000)
+	if len(got) != 121 {
+		t.Fatalf("QueryRange returned %d samples, want 121", len(got))
+	}
+	for i, s := range got {
+		if s.TimestampMs != int64(i*1000) || s.Value != float64(i) {
+			t.Errorf("sample %d: got (%d, %f), want (%d, %f)",
+				i, s.TimestampMs, s.Value, int64(i*1000), float64(i))
+		}
+	}
+}
+
+func TestMemoryStore_QueryInstantAcrossChunks(t *testing.T) {
+	store := metrics.NewMemoryStore()
+	labels := mustNewLabels(t, map[string]string{"__name__": "cpu_usage"})
+
+	// Fill first chunk (120 samples, ts 0..119000)
+	for i := 0; i < 120; i++ {
+		_ = store.Append(labels, int64(i*1000), float64(i))
+	}
+	// Second chunk: one sample far in the future
+	_ = store.Append(labels, 200000, 999.0)
+
+	// Query from second chunk
+	s, ok := store.QueryInstant(labels.Fingerprint(), 200000)
+	if !ok {
+		t.Fatal("QueryInstant in second chunk: no sample found")
+	}
+	if s.TimestampMs != 200000 || s.Value != 999.0 {
+		t.Errorf("got (%d, %f), want (200000, 999.0)", s.TimestampMs, s.Value)
+	}
+
+	// Query from first chunk
+	s, ok = store.QueryInstant(labels.Fingerprint(), 50000)
+	if !ok {
+		t.Fatal("QueryInstant in first chunk: no sample found")
+	}
+	if s.TimestampMs != 50000 || s.Value != 50.0 {
+		t.Errorf("got (%d, %f), want (50000, 50.0)", s.TimestampMs, s.Value)
+	}
+}
+
+func TestMemoryStore_DuplicateTimestamp_AcrossChunkBoundary(t *testing.T) {
+	store := metrics.NewMemoryStore()
+	labels := mustNewLabels(t, map[string]string{"__name__": "cpu_usage"})
+
+	// Fill chunk 0 to 119 samples, then append ts=119000 again as sample 120
+	// (seals chunk 0), then append ts=119000 a third time into chunk 1.
+	for i := 0; i < 119; i++ {
+		_ = store.Append(labels, int64(i*1000), float64(i))
+	}
+	// Sample 119 seals chunk 0
+	_ = store.Append(labels, 119000, 119.0)
+	// Duplicate ts=119000 goes into chunk 1 — this value should win
+	_ = store.Append(labels, 119000, 999.0)
+
+	if n := store.ChunkCount(labels.Fingerprint()); n != 2 {
+		t.Fatalf("expected 2 chunks, got %d", n)
+	}
+
+	// QueryRange: only one sample should appear at ts=119000, with value 999.0 (last-write-wins)
+	got := store.QueryRange(labels.Fingerprint(), 119000, 119000)
+	if len(got) != 1 {
+		t.Fatalf("QueryRange returned %d samples, want 1", len(got))
+	}
+	if got[0].Value != 999.0 {
+		t.Errorf("value = %f, want 999.0 (last-write-wins)", got[0].Value)
+	}
+
+	// QueryInstant: should also return 999.0
+	s, ok := store.QueryInstant(labels.Fingerprint(), 119000)
+	if !ok {
+		t.Fatal("QueryInstant: no sample found")
+	}
+	if s.Value != 999.0 {
+		t.Errorf("QueryInstant value = %f, want 999.0", s.Value)
+	}
+}
