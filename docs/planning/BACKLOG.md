@@ -183,6 +183,7 @@
 - [x] Unit tests: chunk boundary behavior (seal-by-count, seal-by-time)
 - [x] Unit tests: compression round trip (varied values, constant, monotonic, NaN/Inf, irregular)
 - [x] Unit tests: query samples from chunk (cross-chunk QueryRange, QueryInstant, duplicate-ts across boundary)
+- [x] Add `Bytes()` / `FromBytes()` serialization API with eager decode validation (Phase 3.2 persistence contract)
 
 ### Phase 3.2 — Immutable Time Blocks
 - [ ] Define block directory layout
