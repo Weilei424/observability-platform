@@ -30,9 +30,10 @@ This is not a dashboard UI project. Grafana is the UI. The backend observability
 # Run locally
 make run
 
-# Start backend + Grafana in Docker
+# Start backend + Grafana + load generator in Docker
 make local-up   # backend: http://localhost:8080  grafana: http://localhost:3000
 make local-down
+make smoke      # API-level smoke test (requires backend running)
 
 # Development
 make build
@@ -40,7 +41,15 @@ make test
 make lint
 ```
 
-## Local Metrics Demo
+## Grafana Demo
+
+```bash
+make local-up
+```
+
+Opens `http://localhost:3000` (admin / admin). The provisioned **Observability Platform Metrics** dashboard shows live data from the load generator within ~15 seconds of startup. See [`docs/runbooks/grafana-demo.md`](docs/runbooks/grafana-demo.md) for the full walkthrough.
+
+## Local Metrics Demo (without Docker)
 
 **1. Start the backend:**
 ```bash
@@ -54,14 +63,14 @@ go run examples/load-generator/main.go --rate 2 --duration 30
 
 **3. Query ingested metrics:**
 ```bash
-# Instant query — all http_requests_total series
-curl 'http://localhost:8080/api/v1/query?query=http_requests_total'
+# Instant query — request rate by method
+curl 'http://localhost:8080/api/v1/query?query=sum+by+(method)(rate(http_requests_total[1m]))'
 
-# Range query — request duration over the last 60 seconds
-# Linux:
+# Range query — request duration over the last 60 seconds (Linux)
 curl "http://localhost:8080/api/v1/query_range?query=http_request_duration_seconds&start=$(date -d '60 seconds ago' +%s)&end=$(date +%s)&step=15"
-# macOS:
-curl "http://localhost:8080/api/v1/query_range?query=http_request_duration_seconds&start=$(date -v-60S +%s)&end=$(date +%s)&step=15"
+
+# Instant query — active connections gauge
+curl 'http://localhost:8080/api/v1/query?query=active_connections'
 ```
 
 **4. Restart the backend (Ctrl+C in terminal 1, then `make run`) and re-query to confirm WAL replay:**
