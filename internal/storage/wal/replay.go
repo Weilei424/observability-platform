@@ -6,6 +6,9 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 )
 
 // Replay reads all WAL segments in dir in ascending numeric order, invoking fn
@@ -14,12 +17,29 @@ import (
 // shutdown. Records in non-final segments must be complete; a corrupt body
 // there returns an error.
 func Replay(dir string, fn func(labels []LabelPair, tsMs int64, value float64)) error {
+	return ReplayFrom(dir, 0, fn)
+}
+
+// ReplayFrom replays only WAL segments with a numeric index strictly greater
+// than afterSegment. Use afterSegment=0 to replay all segments.
+func ReplayFrom(dir string, afterSegment int, fn func(labels []LabelPair, tsMs int64, value float64)) error {
 	paths, err := segmentPaths(dir)
 	if err != nil {
 		return fmt.Errorf("wal replay: list segments: %w", err)
 	}
-	for i, path := range paths {
-		if err := replaySegment(path, i == len(paths)-1, fn); err != nil {
+	var filtered []string
+	for _, p := range paths {
+		base := strings.TrimSuffix(filepath.Base(p), ".wal")
+		idx, e := strconv.Atoi(base)
+		if e != nil {
+			continue
+		}
+		if idx > afterSegment {
+			filtered = append(filtered, p)
+		}
+	}
+	for i, path := range filtered {
+		if err := replaySegment(path, i == len(filtered)-1, fn); err != nil {
 			return err
 		}
 	}
@@ -37,7 +57,6 @@ func replaySegment(path string, isLast bool, fn func([]LabelPair, int64, float64
 		var lenBuf [4]byte
 		if _, err := io.ReadFull(f, lenBuf[:]); err != nil {
 			if err == io.EOF {
-				// Clean end of segment — no partial record.
 				return nil
 			}
 			if err == io.ErrUnexpectedEOF {
@@ -72,12 +91,8 @@ func replaySegment(path string, isLast bool, fn func([]LabelPair, int64, float64
 
 		labels, tsMs, value, ok := decodeRecord(body)
 		if !ok {
-			// A fully-read body that fails to decode is always corrupt — not a
-			// partial trailing record. Tolerate only I/O truncation (above), never
-			// decode failures.
 			return fmt.Errorf("wal replay: corrupt record in %s", path)
 		}
-
 		fn(labels, tsMs, value)
 	}
 }
