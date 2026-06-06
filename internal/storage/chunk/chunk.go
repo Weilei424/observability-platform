@@ -71,6 +71,16 @@ func FromBytes(data []byte) (*Chunk, error) {
 		bw:          bitsWriter{buf: payload},
 		lastLeading: 0xff,
 	}
+	// An empty chunk must have zero min/max and no payload bytes.
+	if numSamples == 0 {
+		if minTs != 0 || maxTs != 0 {
+			return nil, fmt.Errorf("chunk.FromBytes: numSamples=0 but header min/max are non-zero (%d/%d)", minTs, maxTs)
+		}
+		if len(payload) != 0 {
+			return nil, fmt.Errorf("chunk.FromBytes: numSamples=0 but payload is non-empty (%d bytes)", len(payload))
+		}
+		return c, nil
+	}
 	// Eagerly decode all samples to catch corrupt payloads before returning.
 	if numSamples > 0 {
 		it := c.Iterator()
