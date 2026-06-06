@@ -113,6 +113,12 @@ func FromBytes(data []byte) (*Chunk, error) {
 			return nil, fmt.Errorf("chunk.FromBytes: header min/max (%d/%d) does not match decoded (%d/%d)",
 				minTs, maxTs, gotMin, gotMax)
 		}
+		// All declared samples decoded; any unread full bytes are trailing garbage.
+		// Remaining bits in the current partial byte are zero-padding from bitsWriter and are harmless.
+		if it.br.pos < len(it.br.buf) {
+			return nil, fmt.Errorf("chunk.FromBytes: %d trailing bytes after %d decoded samples",
+				len(it.br.buf)-it.br.pos, numSamples)
+		}
 	}
 	return c, nil
 }
