@@ -51,7 +51,9 @@ func (c *Chunk) Bytes() []byte {
 }
 
 // FromBytes reconstructs a sealed, read-only Chunk from data produced by Bytes.
-// Returns an error if data is too short to contain a valid header.
+// It eagerly decodes all declared samples to catch corrupt payloads and validates
+// that the decoded min/max timestamps match the header. Returns an error on any
+// decode failure or metadata inconsistency.
 func FromBytes(data []byte) (*Chunk, error) {
 	if len(data) < 18 {
 		return nil, fmt.Errorf("chunk.FromBytes: data too short (%d bytes)", len(data))
@@ -61,14 +63,48 @@ func FromBytes(data []byte) (*Chunk, error) {
 	numSamples := binary.BigEndian.Uint16(data[16:18])
 	payload := make([]byte, len(data)-18)
 	copy(payload, data[18:])
-	return &Chunk{
+	c := &Chunk{
 		minTs:       minTs,
 		maxTs:       maxTs,
 		numSamples:  numSamples,
 		sealed:      true,
 		bw:          bitsWriter{buf: payload},
 		lastLeading: 0xff,
-	}, nil
+	}
+	// Eagerly decode all samples to catch corrupt payloads before returning.
+	if numSamples > 0 {
+		it := c.Iterator()
+		var gotMin, gotMax int64
+		first := true
+		n := 0
+		for it.Next() {
+			ts, _ := it.At()
+			if first {
+				gotMin = ts
+				gotMax = ts
+				first = false
+			} else {
+				if ts < gotMin {
+					gotMin = ts
+				}
+				if ts > gotMax {
+					gotMax = ts
+				}
+			}
+			n++
+		}
+		if err := it.Err(); err != nil {
+			return nil, fmt.Errorf("chunk.FromBytes: decode error at sample %d: %w", n, err)
+		}
+		if n != int(numSamples) {
+			return nil, fmt.Errorf("chunk.FromBytes: decoded %d samples, header declared %d", n, numSamples)
+		}
+		if gotMin != minTs || gotMax != maxTs {
+			return nil, fmt.Errorf("chunk.FromBytes: header min/max (%d/%d) does not match decoded (%d/%d)",
+				minTs, maxTs, gotMin, gotMax)
+		}
+	}
+	return c, nil
 }
 
 // Append encodes tsMs and val into the chunk.
