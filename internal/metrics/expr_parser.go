@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -72,6 +73,10 @@ func ParseExpr(s string) (Expr, error) {
 		rest := strings.TrimSpace(s[i:])
 		if len(rest) > 0 && rest[0] == '(' {
 			return nil, fmt.Errorf("unsupported query function: %q", word)
+		}
+		// Try arithmetic scalar (e.g. "1+1" sent by the Grafana datasource health check).
+		if v, ok := tryParseArithmetic(s); ok {
+			return ScalarExpr{Value: v}, nil
 		}
 		// Otherwise it's a selector (metric name with optional label set).
 		sel, err := ParseSelector(s)
@@ -189,6 +194,48 @@ func extractFirstParen(s string) (content, remaining string, err error) {
 		}
 	}
 	return "", "", fmt.Errorf("unclosed '('")
+}
+
+// tryParseArithmetic evaluates simple numeric literals and binary arithmetic (e.g. "1+1").
+// Returns (value, true) on success, (0, false) if the string is not a numeric expression.
+func tryParseArithmetic(s string) (float64, bool) {
+	s = strings.TrimSpace(s)
+	if v, err := strconv.ParseFloat(s, 64); err == nil {
+		return v, true
+	}
+	// Single binary operation: <number> op <number>, where op is +, -, *, /.
+	// Skip the first character so a leading sign (e.g. "-1") is not mistaken for a binary minus.
+	for _, op := range []byte{'+', '-', '*', '/'} {
+		idx := strings.IndexByte(s[1:], op)
+		if idx < 0 {
+			continue
+		}
+		idx++ // adjust to index within s
+		left := strings.TrimSpace(s[:idx])
+		right := strings.TrimSpace(s[idx+1:])
+		if left == "" || right == "" {
+			continue
+		}
+		lv, lerr := strconv.ParseFloat(left, 64)
+		rv, rerr := strconv.ParseFloat(right, 64)
+		if lerr != nil || rerr != nil {
+			continue
+		}
+		switch op {
+		case '+':
+			return lv + rv, true
+		case '-':
+			return lv - rv, true
+		case '*':
+			return lv * rv, true
+		case '/':
+			if rv == 0 {
+				return lv / rv, true // returns +Inf or -Inf, consistent with IEEE 754
+			}
+			return lv / rv, true
+		}
+	}
+	return 0, false
 }
 
 // parseLabelList parses a comma-separated list of label names.

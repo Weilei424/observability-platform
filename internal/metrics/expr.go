@@ -21,6 +21,10 @@ type SumExpr struct {
 	By    []string
 }
 
+// ScalarExpr is a constant numeric value (e.g. "1+1" from the Grafana health check).
+type ScalarExpr struct{ Value float64 }
+
 func (SelectorExpr) exprNode() {}
 func (RateExpr) exprNode()     {}
 func (SumExpr) exprNode()      {}
+func (ScalarExpr) exprNode()   {}

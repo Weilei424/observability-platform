@@ -20,6 +20,8 @@ func (e *QueryEngine) EvalInstant(expr Expr, tMs int64) ([]InstantSample, error)
 			return nil, err
 		}
 		return aggregateInstant(inner, x.By, tMs), nil
+	case ScalarExpr:
+		return []InstantSample{{Labels: newOutputLabels(nil), TimestampMs: tMs, Value: x.Value}}, nil
 	default:
 		return nil, fmt.Errorf("unknown expression type %T", expr)
 	}
@@ -44,9 +46,22 @@ func (e *QueryEngine) EvalRange(expr Expr, startMs, endMs, stepMs int64) ([]Rang
 			return nil, err
 		}
 		return aggregateRange(inner, x.By), nil
+	case ScalarExpr:
+		points := scalarPoints(x.Value, startMs, endMs, stepMs)
+		sortPoints(points)
+		return []RangeSeries{{Labels: newOutputLabels(nil), Points: points}}, nil
 	default:
 		return nil, fmt.Errorf("unknown expression type %T", expr)
 	}
+}
+
+// scalarPoints generates step-aligned points for a constant scalar value.
+func scalarPoints(v float64, startMs, endMs, stepMs int64) []SamplePoint {
+	var points []SamplePoint
+	for t := startMs; t <= endMs; t += stepMs {
+		points = append(points, SamplePoint{TimestampMs: t, Value: v})
+	}
+	return points
 }
 
 func (e *QueryEngine) rateInstant(x RateExpr, tMs int64) ([]InstantSample, error) {
