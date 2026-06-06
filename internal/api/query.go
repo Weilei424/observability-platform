@@ -88,6 +88,17 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Scalar expressions (e.g. "1+1" from the Grafana datasource health check) must use
+	// resultType:"scalar" per the Prometheus HTTP API spec.
+	if _, ok := expr.(metrics.ScalarExpr); ok && len(samples) == 1 {
+		s := samples[0]
+		writePromSuccess(w, promScalarData{
+			ResultType: "scalar",
+			Result:     [2]any{msToPromTimestamp(s.TimestampMs), formatPromValue(s.Value)},
+		})
+		return
+	}
+
 	result := make([]promSample, len(samples))
 	for i, sample := range samples {
 		result[i] = promSample{
