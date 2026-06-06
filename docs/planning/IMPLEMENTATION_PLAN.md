@@ -258,15 +258,16 @@ Development is **single-node first**. Distributed mode only begins after ingesti
 
 **Scope:**
 - Define chunk format for series samples.
-- Add chunk append logic.
-- Add chunk encoding/decoding.
-- Add compression with Snappy or Zstd.
+- Add chunk append logic (seal at 120 samples or 2-hour time span).
+- Implement Gorilla/XOR encoding (delta-of-delta timestamps + XOR value compression), pure Go.
+- Add `Bytes()` / `FromBytes()` serialization API for Phase 3.2 block persistence.
 - Track min/max timestamp per chunk.
 
 **DoD:**
 - Samples are grouped into chunks by size/time threshold.
-- Chunks can be encoded, compressed, decoded, and queried.
-- Tests cover chunk boundaries, empty chunks, and compression round-trip.
+- Chunks encode and decode with exact value fidelity (Gorilla/XOR).
+- Chunks serialize to/from bytes (stable contract for block writer).
+- Tests cover chunk boundaries, empty chunks, and encoding round-trips.
 
 ### Phase 3.2 — Immutable Time Blocks
 
