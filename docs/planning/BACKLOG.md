@@ -175,14 +175,14 @@
 ## Phase 3 Execution Checklist — Metrics Storage Engine Improvements
 
 ### Phase 3.1 — Chunked Sample Storage
-- [ ] Define metric chunk format
-- [ ] Implement chunk append behavior
-- [ ] Implement chunk encoding/decoding
-- [ ] Add Snappy or Zstd compression
-- [ ] Track min/max timestamp per chunk
-- [ ] Unit tests: chunk boundary behavior
-- [ ] Unit tests: compression round trip
-- [ ] Unit tests: query samples from chunk
+- [x] Define metric chunk format (`internal/storage/chunk/chunk.go` — Gorilla/XOR encoding)
+- [x] Implement chunk append behavior (seal at 120 samples or 2-hour span)
+- [x] Implement chunk encoding/decoding (delta-of-delta timestamps + XOR values, pure Go)
+- [x] Track min/max timestamp per chunk
+- [x] Replace flat `[]Sample` in MemoryStore with `[]*chunk.Chunk` per series
+- [x] Unit tests: chunk boundary behavior (seal-by-count, seal-by-time)
+- [x] Unit tests: compression round trip (varied values, constant, monotonic, NaN/Inf, irregular)
+- [x] Unit tests: query samples from chunk (cross-chunk QueryRange, QueryInstant, duplicate-ts across boundary)
 
 ### Phase 3.2 — Immutable Time Blocks
 - [ ] Define block directory layout
