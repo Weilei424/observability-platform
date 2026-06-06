@@ -10,7 +10,8 @@ RUN go mod download
 # Copy source and build both binaries.
 COPY . .
 RUN CGO_ENABLED=0 go build -o /server ./cmd/server && \
-    CGO_ENABLED=0 go build -o /loadgen ./examples/load-generator
+    CGO_ENABLED=0 go build -o /loadgen ./examples/load-generator && \
+    mkdir -p /data
 
 # Stage 2: backend runtime image
 FROM gcr.io/distroless/static-debian12 AS backend
@@ -19,6 +20,7 @@ FROM gcr.io/distroless/static-debian12 AS backend
 USER 65532:65532
 
 COPY --from=builder /server /server
+COPY --from=builder --chown=65532:65532 /data /data
 
 EXPOSE 8080
 ENTRYPOINT ["/server"]
