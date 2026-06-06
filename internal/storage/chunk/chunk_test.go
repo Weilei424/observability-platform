@@ -314,6 +314,57 @@ func TestChunk_FromBytes_TooShort(t *testing.T) {
 	}
 }
 
+func TestChunk_FromBytes_CorruptPayload(t *testing.T) {
+	// Build a valid header declaring 5 samples but supply a zeroed payload.
+	// The eager decoder must return an error rather than silently succeeding.
+	data := make([]byte, 18+4) // header + 4 bytes of garbage (zeros)
+	// minTs = 1000, maxTs = 5000, numSamples = 5
+	putUint64BE := func(b []byte, v uint64) { b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7] = byte(v>>56), byte(v>>48), byte(v>>40), byte(v>>32), byte(v>>24), byte(v>>16), byte(v>>8), byte(v) }
+	putUint64BE(data[0:8], 1000)
+	putUint64BE(data[8:16], 5000)
+	data[16], data[17] = 0, 5 // numSamples = 5
+	// payload is all zeros — too short to encode 5 samples
+	_, err := chunk.FromBytes(data)
+	if err == nil {
+		t.Error("expected error for corrupt payload, got nil")
+	}
+}
+
+func TestChunk_FromBytes_WrongSampleCount(t *testing.T) {
+	// Serialize a 3-sample chunk, then doctor the numSamples header field to 5.
+	c := chunk.NewChunk()
+	for i := 0; i < 3; i++ {
+		if err := c.Append(int64((i+1)*1000), float64(i)); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+	}
+	data := c.Bytes()
+	data[16], data[17] = 0, 5 // claim 5 samples when only 3 are encoded
+	_, err := chunk.FromBytes(data)
+	if err == nil {
+		t.Error("expected error for mismatched sample count, got nil")
+	}
+}
+
+func TestChunk_FromBytes_WrongMinMax(t *testing.T) {
+	// Serialize a real chunk, then corrupt the minTs header field.
+	c := chunk.NewChunk()
+	for i := 0; i < 3; i++ {
+		if err := c.Append(int64((i+1)*1000), float64(i)); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+	}
+	data := c.Bytes()
+	// Overwrite minTs with an obviously wrong value (0 instead of 1000)
+	for i := 0; i < 8; i++ {
+		data[i] = 0
+	}
+	_, err := chunk.FromBytes(data)
+	if err == nil {
+		t.Error("expected error for wrong minTs in header, got nil")
+	}
+}
+
 func TestChunk_BytesFromBytes_SealedByCount(t *testing.T) {
 	c := chunk.NewChunk()
 	for i := 0; i < 120; i++ {
