@@ -17,6 +17,18 @@ check_success() {
     fi
 }
 
+# Like check_success but also verifies the result is non-empty (catches rate() returning empty vector).
+check_nonempty_success() {
+    local label="$1" body="$2"
+    if ! echo "$body" | grep -q '"status":"success"'; then
+        log_fail "$label — not success: $body"
+    elif echo "$body" | grep -q '"result":\[\]'; then
+        log_fail "$label — empty result (no data in rate window)"
+    else
+        log_pass "$label"
+    fi
+}
+
 echo "=== Phase 2.5 smoke test: $BACKEND ==="
 
 # ---- Inject samples ------------------------------------------------
@@ -24,7 +36,7 @@ echo ""
 echo "-- Injecting samples --"
 
 NOW_MS=$(( $(date +%s) * 1000 ))
-PREV_MS=$(( NOW_MS - 120000 ))   # 2 minutes ago — required for rate() to have >=2 points
+PREV_MS=$(( NOW_MS - 50000 ))    # 50 seconds ago — both samples within the [1m] rate window
 
 PAYLOAD=$(cat <<EOF
 {
@@ -67,19 +79,19 @@ BODY=$(curl -s -G "$BACKEND/api/v1/query_range" \
     --data-urlencode "start=$START_S" \
     --data-urlencode "end=$NOW_S" \
     --data-urlencode "step=30" || echo '{"status":"curl-error"}')
-check_success "Panel 1 — sum by (method)(rate(http_requests_total[1m]))" "$BODY"
+check_nonempty_success "Panel 1 — sum by (method)(rate(http_requests_total[1m]))" "$BODY"
 
 # Panel 2: Error Rate (instant query)
 BODY=$(curl -s -G "$BACKEND/api/v1/query" \
     --data-urlencode "query=rate(http_errors_total[1m])" \
     --data-urlencode "time=$NOW_S" || echo '{"status":"curl-error"}')
-check_success "Panel 2 — rate(http_errors_total[1m])" "$BODY"
+check_nonempty_success "Panel 2 — rate(http_errors_total[1m])" "$BODY"
 
 # Panel 3: Total RPS (instant query)
 BODY=$(curl -s -G "$BACKEND/api/v1/query" \
     --data-urlencode "query=sum(rate(http_requests_total[1m]))" \
     --data-urlencode "time=$NOW_S" || echo '{"status":"curl-error"}')
-check_success "Panel 3 — sum(rate(http_requests_total[1m]))" "$BODY"
+check_nonempty_success "Panel 3 — sum(rate(http_requests_total[1m]))" "$BODY"
 
 # Panel 4: Request Duration (instant query)
 BODY=$(curl -s -G "$BACKEND/api/v1/query" \
