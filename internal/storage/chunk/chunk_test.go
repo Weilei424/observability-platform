@@ -252,3 +252,96 @@ func TestChunk_EmptyChunk(t *testing.T) {
 		t.Error("Next() = true on empty chunk")
 	}
 }
+
+// --- serialization tests ---
+
+func TestChunk_BytesFromBytes_RoundTrip(t *testing.T) {
+	c := chunk.NewChunk()
+	type sample struct {
+		ts  int64
+		val float64
+	}
+	want := []sample{
+		{1000, 1.1}, {2000, 2.2}, {3000, 3.3}, {4000, 4.4}, {5000, 5.5},
+	}
+	for _, s := range want {
+		if err := c.Append(s.ts, s.val); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+
+	data := c.Bytes()
+	c2, err := chunk.FromBytes(data)
+	if err != nil {
+		t.Fatalf("FromBytes: %v", err)
+	}
+
+	if c2.NumSamples() != len(want) {
+		t.Errorf("NumSamples() = %d, want %d", c2.NumSamples(), len(want))
+	}
+	if c2.MinTs() != want[0].ts {
+		t.Errorf("MinTs() = %d, want %d", c2.MinTs(), want[0].ts)
+	}
+	if c2.MaxTs() != want[len(want)-1].ts {
+		t.Errorf("MaxTs() = %d, want %d", c2.MaxTs(), want[len(want)-1].ts)
+	}
+	if !c2.Sealed() {
+		t.Error("FromBytes chunk should be sealed")
+	}
+
+	it := c2.Iterator()
+	for i, s := range want {
+		if !it.Next() {
+			t.Fatalf("sample %d: Next() = false", i)
+		}
+		gotTs, gotVal := it.At()
+		if gotTs != s.ts || gotVal != s.val {
+			t.Errorf("sample %d: got (%d, %f), want (%d, %f)", i, gotTs, gotVal, s.ts, s.val)
+		}
+	}
+	if it.Next() {
+		t.Error("Next() = true after all samples exhausted")
+	}
+	if err := it.Err(); err != nil {
+		t.Errorf("iterator error: %v", err)
+	}
+}
+
+func TestChunk_FromBytes_TooShort(t *testing.T) {
+	_, err := chunk.FromBytes([]byte{0x00, 0x01})
+	if err == nil {
+		t.Error("expected error for truncated data, got nil")
+	}
+}
+
+func TestChunk_BytesFromBytes_SealedByCount(t *testing.T) {
+	c := chunk.NewChunk()
+	for i := 0; i < 120; i++ {
+		if err := c.Append(int64(i*1000), float64(i)); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+	}
+	if !c.Sealed() {
+		t.Fatal("chunk should be sealed after 120 samples")
+	}
+
+	data := c.Bytes()
+	c2, err := chunk.FromBytes(data)
+	if err != nil {
+		t.Fatalf("FromBytes: %v", err)
+	}
+	if c2.NumSamples() != 120 {
+		t.Errorf("NumSamples() = %d, want 120", c2.NumSamples())
+	}
+	it := c2.Iterator()
+	n := 0
+	for it.Next() {
+		n++
+	}
+	if n != 120 {
+		t.Errorf("iterated %d samples, want 120", n)
+	}
+	if err := it.Err(); err != nil {
+		t.Errorf("iterator error: %v", err)
+	}
+}
