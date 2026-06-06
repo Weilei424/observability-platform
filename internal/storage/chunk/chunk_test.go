@@ -401,6 +401,22 @@ func TestChunk_FromBytes_WrongMinMax(t *testing.T) {
 	}
 }
 
+func TestChunk_FromBytes_TrailingGarbage(t *testing.T) {
+	// A valid serialized chunk with extra bytes appended must be rejected.
+	c := chunk.NewChunk()
+	for i := 0; i < 5; i++ {
+		if err := c.Append(int64((i+1)*1000), float64(i)); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+	}
+	data := c.Bytes()
+	data = append(data, 0x00, 0xff) // trailing garbage
+	_, err := chunk.FromBytes(data)
+	if err == nil {
+		t.Error("expected error for trailing garbage bytes, got nil")
+	}
+}
+
 func TestChunk_BytesFromBytes_SealedByCount(t *testing.T) {
 	c := chunk.NewChunk()
 	for i := 0; i < 120; i++ {
