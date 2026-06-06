@@ -82,7 +82,8 @@ The query API accepts a PromQL subset. Unsupported forms return `400 bad_data`.
 | `sum(expr)` | `sum(http_requests_total)` | Supported |
 | `sum by (label,...)(expr)` | `sum by (job)(http_requests_total)` | Supported |
 | Any other function | `avg(...)`, `histogram_quantile(...)` | Returns 400 |
-| Arithmetic operators | `a + b`, `a / b` | Returns 400 |
+| Numeric scalar arithmetic | `1+1`, `10/4` | Supported (returns `scalar`) |
+| Metric arithmetic | `a + b`, `a / b` | Returns 400 |
 | Subqueries | `rate(...)[5m:1m]` | Returns 400 |
 
 Duration units accepted: `ms`, `s`, `m`, `h`, `d`, `w`, `y`.
