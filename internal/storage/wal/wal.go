@@ -125,6 +125,13 @@ func (w *WAL) Sync() error {
 	return w.current.Sync()
 }
 
+// SegmentIndex returns the index of the currently active WAL segment.
+func (w *WAL) SegmentIndex() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.segIndex
+}
+
 // Close syncs and closes the current segment.
 func (w *WAL) Close() error {
 	w.mu.Lock()
