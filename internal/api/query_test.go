@@ -651,3 +651,37 @@ func TestQuery_UnknownFunction_Returns400WithBadData(t *testing.T) {
 		t.Errorf("errorType = %v, want bad_data", body["errorType"])
 	}
 }
+
+func TestQuery_ScalarArithmetic_ReturnsScalarResultType(t *testing.T) {
+	srv, _ := newQueryTestServer(t)
+
+	u := "/api/v1/query?" + url.Values{
+		"query": {"1+1"},
+		"time":  {"1000"},
+	}.Encode()
+	rr := getQuery(t, srv, u)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rr.Code, rr.Body.String())
+	}
+	body := decodePromResponse(t, rr)
+	data, ok := body["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("data field missing or wrong type: %v", body)
+	}
+	if data["resultType"] != "scalar" {
+		t.Errorf("resultType = %v, want scalar", data["resultType"])
+	}
+	result, ok := data["result"].([2]any)
+	if !ok {
+		// JSON unmarshals [ts, "2"] as []any
+		raw, ok2 := data["result"].([]any)
+		if !ok2 || len(raw) != 2 {
+			t.Fatalf("result = %v, want [timestamp, value]", data["result"])
+		}
+		if raw[1] != "2" {
+			t.Errorf("scalar value = %v, want \"2\"", raw[1])
+		}
+		return
+	}
+	_ = result
+}
