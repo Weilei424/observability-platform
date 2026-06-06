@@ -45,6 +45,44 @@ func TestEvalRange_SelectorExpr_DelegatesToRangeQuery(t *testing.T) {
 	}
 }
 
+func TestEvalInstant_ScalarExpr_ReturnsSingleSample(t *testing.T) {
+	engine, _ := newEngineWithSamples(t)
+	expr := metrics.ScalarExpr{Value: 2.0}
+	result, err := engine.EvalInstant(expr, 5000)
+	if err != nil {
+		t.Fatalf("EvalInstant: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("len = %d, want 1", len(result))
+	}
+	if result[0].Value != 2.0 {
+		t.Errorf("Value = %v, want 2.0", result[0].Value)
+	}
+	if result[0].TimestampMs != 5000 {
+		t.Errorf("TimestampMs = %d, want 5000", result[0].TimestampMs)
+	}
+}
+
+func TestEvalRange_ScalarExpr_ReturnsPointPerStep(t *testing.T) {
+	engine, _ := newEngineWithSamples(t)
+	expr := metrics.ScalarExpr{Value: 42.0}
+	result, err := engine.EvalRange(expr, 0, 2000, 1000)
+	if err != nil {
+		t.Fatalf("EvalRange: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("series = %d, want 1", len(result))
+	}
+	if len(result[0].Points) != 3 { // ticks at 0, 1000, 2000
+		t.Errorf("points = %d, want 3", len(result[0].Points))
+	}
+	for _, p := range result[0].Points {
+		if p.Value != 42.0 {
+			t.Errorf("point value = %v, want 42.0", p.Value)
+		}
+	}
+}
+
 func TestEvalRange_ZeroStep_ReturnsError(t *testing.T) {
 	engine, _ := newEngineWithSamples(t)
 	expr := metrics.SelectorExpr{Selector: metrics.Selector{MetricName: "cpu_usage"}}

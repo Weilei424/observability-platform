@@ -196,6 +196,34 @@ func TestParseExpr_RateAsMetricName_ReturnsSelectorExpr(t *testing.T) {
 	}
 }
 
+func TestParseExpr_ArithmeticScalar_ReturnsScalarExpr(t *testing.T) {
+	cases := []struct {
+		input string
+		want  float64
+	}{
+		{"1+1", 2},
+		{"10-3", 7},
+		{"3*4", 12},
+		{"10/4", 2.5},
+		{"42", 42},
+	}
+	for _, tc := range cases {
+		expr, err := metrics.ParseExpr(tc.input)
+		if err != nil {
+			t.Errorf("ParseExpr(%q): unexpected error: %v", tc.input, err)
+			continue
+		}
+		got, ok := expr.(metrics.ScalarExpr)
+		if !ok {
+			t.Errorf("ParseExpr(%q): got %T, want ScalarExpr", tc.input, expr)
+			continue
+		}
+		if got.Value != tc.want {
+			t.Errorf("ParseExpr(%q).Value = %v, want %v", tc.input, got.Value, tc.want)
+		}
+	}
+}
+
 func TestParseExpr_SumAsMetricName_ReturnsSelectorExpr(t *testing.T) {
 	// "sum" without parentheses or "by" must be treated as a metric selector, not a function call.
 	for _, input := range []string{"sum", `sum{job="api"}`} {
