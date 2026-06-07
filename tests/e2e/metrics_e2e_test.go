@@ -22,8 +22,14 @@ import (
 // Caller must close the returned *wal.WAL when done.
 func newTestServer(t *testing.T, dataDir, walDir string) (*api.Server, *wal.WAL) {
 	t.Helper()
-	mem := metrics.NewMemoryStore()
-	if err := wal.Replay(walDir, func(pairs []wal.LabelPair, tsMs int64, value float64) {
+
+	blockStore, err := metrics.NewBlockStore(dataDir)
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+
+	checkpoint := metrics.ReadCheckpoint(dataDir)
+	if err := wal.ReplayFrom(walDir, checkpoint, func(pairs []wal.LabelPair, tsMs int64, value float64) {
 		lm := make(map[string]string, len(pairs))
 		for _, p := range pairs {
 			lm[p.Name] = p.Value
@@ -33,20 +39,21 @@ func newTestServer(t *testing.T, dataDir, walDir string) (*api.Server, *wal.WAL)
 			t.Errorf("replay NewLabels: %v", err)
 			return
 		}
-		if err := mem.Append(labels, tsMs, value); err != nil {
+		if err := blockStore.Append(labels, tsMs, value); err != nil {
 			t.Errorf("replay Append: %v", err)
 		}
 	}); err != nil {
-		t.Fatalf("wal.Replay: %v", err)
+		t.Fatalf("wal.ReplayFrom: %v", err)
 	}
+
 	w, err := wal.Open(walDir, 128<<20, 1)
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
 	cfg := &config.Config{HTTPAddr: ":0", DataDir: dataDir, LogLevel: "info"}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	store := metrics.NewWALStore(w, mem)
-	engine := metrics.NewQueryEngine(mem)
+	store := metrics.NewWALStore(w, blockStore, dataDir)
+	engine := metrics.NewQueryEngine(blockStore)
 	return api.New(cfg, log, store, engine), w
 }
 
