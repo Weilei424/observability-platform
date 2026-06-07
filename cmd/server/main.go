@@ -37,14 +37,22 @@ func main() {
 
 	walDir := filepath.Join(cfg.DataDir, "metrics", "wal")
 
-	mem := metrics.NewMemoryStore()
+	// 1. Load persisted blocks and prepare temp directory.
+	blockStore, err := metrics.NewBlockStore(cfg.DataDir)
+	if err != nil {
+		log.Error("failed to open block store", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
 
-	// Replay existing segments BEFORE opening the WAL for writes.
-	// wal.Open always creates a new segment at maxIdx+1; if Open ran first,
-	// the previous active segment (which may have a partial trailing record)
-	// would become non-final and cause Replay to error instead of tolerating it.
+	// 2. Read checkpoint — skip WAL segments already covered by blocks.
+	checkpoint := metrics.ReadCheckpoint(cfg.DataDir)
+	log.Info("WAL checkpoint", slog.Int("after_segment", checkpoint))
+
+	// 3. Replay WAL segments after the checkpoint into the block store.
+	// Replay BEFORE opening the WAL for writes (wal.Open creates a new segment
+	// at maxIdx+1; replaying after would make the previous last segment non-final).
 	var replayCount int
-	if err := wal.Replay(walDir, func(pairs []wal.LabelPair, tsMs int64, value float64) {
+	if err := wal.ReplayFrom(walDir, checkpoint, func(pairs []wal.LabelPair, tsMs int64, value float64) {
 		lm := make(map[string]string, len(pairs))
 		for _, p := range pairs {
 			lm[p.Name] = p.Value
@@ -54,7 +62,7 @@ func main() {
 			log.Warn("WAL replay: skipping record with invalid labels", slog.String("error", err.Error()))
 			return
 		}
-		if err := mem.Append(labels, tsMs, value); err != nil {
+		if err := blockStore.Append(labels, tsMs, value); err != nil {
 			log.Warn("WAL replay: failed to append sample", slog.String("error", err.Error()))
 			return
 		}
@@ -65,14 +73,15 @@ func main() {
 	}
 	log.Info("WAL replay complete", slog.Int("samples_restored", replayCount))
 
+	// 4. Open WAL for new writes.
 	w, err := wal.Open(walDir, cfg.WALSegmentMaxBytes, cfg.WALSyncEveryN)
 	if err != nil {
 		log.Error("failed to open WAL", slog.String("wal_dir", walDir), slog.String("error", err.Error()))
 		os.Exit(1)
 	}
 
-	store := metrics.NewWALStore(w, mem)
-	engine := metrics.NewQueryEngine(mem)
+	store := metrics.NewWALStore(w, blockStore, cfg.DataDir)
+	engine := metrics.NewQueryEngine(blockStore)
 	srv := api.New(cfg, log, store, engine)
 
 	log.Info("starting server",
