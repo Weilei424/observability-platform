@@ -203,3 +203,54 @@ func (s *MemoryStore) ChunkCount(id SeriesID) int {
 	}
 	return len(ms.chunks)
 }
+
+// SeriesChunks is a snapshot of one series and its sealed chunks, used
+// to transfer data from MemoryStore to a block writer.
+type SeriesChunks struct {
+	ID     SeriesID
+	Labels Labels
+	Chunks []*chunk.Chunk
+}
+
+// SealedChunksSnapshot returns a snapshot of all sealed chunks across all series.
+// The returned chunks are immutable (sealed) and safe to read without holding the lock.
+// Returns nil if no sealed chunks exist.
+func (s *MemoryStore) SealedChunksSnapshot() []SeriesChunks {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var result []SeriesChunks
+	for id, ms := range s.series {
+		var sealed []*chunk.Chunk
+		for _, c := range ms.chunks {
+			if c.Sealed() {
+				sealed = append(sealed, c)
+			}
+		}
+		if len(sealed) > 0 {
+			result = append(result, SeriesChunks{
+				ID:     id,
+				Labels: ms.labels,
+				Chunks: sealed,
+			})
+		}
+	}
+	return result
+}
+
+// DiscardSealedChunks removes all sealed chunks from every series, retaining
+// only the unsealed head chunk. Call this only after sealed chunks have been
+// safely written to a block.
+func (s *MemoryStore) DiscardSealedChunks() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, ms := range s.series {
+		var head []*chunk.Chunk
+		for _, c := range ms.chunks {
+			if !c.Sealed() {
+				head = append(head, c)
+			}
+		}
+		ms.chunks = head
+		s.series[id] = ms
+	}
+}
