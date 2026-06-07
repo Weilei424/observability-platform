@@ -5,13 +5,21 @@ import (
 	"sort"
 )
 
-// QueryEngine executes instant and range queries over a MemoryStore.
+// queryStore is the read interface QueryEngine depends on.
+// Both *MemoryStore and *BlockStore implement it.
+type queryStore interface {
+	SelectSeries(sel Selector) []MatchedSeries
+	QueryInstant(id SeriesID, tMs int64) (Sample, bool)
+	QueryRange(id SeriesID, startMs, endMs int64) []Sample
+}
+
+// QueryEngine executes instant and range queries over a queryStore.
 type QueryEngine struct {
-	store *MemoryStore
+	store queryStore
 }
 
 // NewQueryEngine returns a QueryEngine backed by store.
-func NewQueryEngine(store *MemoryStore) *QueryEngine {
+func NewQueryEngine(store queryStore) *QueryEngine {
 	return &QueryEngine{store: store}
 }
 
