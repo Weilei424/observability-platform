@@ -186,14 +186,32 @@
 - [x] Add `Bytes()` / `FromBytes()` serialization API with eager decode validation (Phase 3.2 persistence contract)
 
 ### Phase 3.2 — Immutable Time Blocks
-- [ ] Define block directory layout
-- [ ] Define `meta.json` schema
-- [ ] Implement block writer
-- [ ] Implement block reader
-- [ ] Implement atomic block write with temp directory + rename
-- [ ] Flush in-memory chunks into blocks
-- [ ] Query from persisted blocks
-- [ ] Integration test: ingest → flush → restart → query persisted block
+
+**`internal/storage/block/` package**
+- [ ] Add `Meta` struct and JSON marshal/unmarshal (`internal/storage/block/meta.go`)
+- [ ] Add `LabelPair`, `SeriesEntry`, `ChunkRef` types (`internal/storage/block/reader.go`)
+- [ ] Add `Writer` with `AddSeries`, `Commit` (atomic temp-dir + rename), `Abort` (`internal/storage/block/writer.go`)
+- [ ] Add `Reader` with `OpenReader`, `Series`, `ReadChunk` (lazy `ReadAt`), `Close` (`internal/storage/block/reader.go`)
+- [ ] Unit test: Writer/Reader round-trip (2 series, 3 chunks each — meta, index, chunks files valid)
+- [ ] Unit test: `Abort` removes temp dir
+- [ ] Unit test: `Commit` atomic rename — block not visible in `blocks/` until rename completes
+- [ ] Unit test: `OpenReader` returns error on missing `meta.json`
+- [ ] Unit test: `ReadChunk` returns error on corrupt payload (propagated from `chunk.FromBytes`)
+
+**`internal/metrics/` integration**
+- [ ] Add `BlockStore` wrapping `*MemoryStore` + `[]*block.Reader` (`internal/metrics/blockstore.go`)
+- [ ] `BlockStore.FlushBlock`: snapshot sealed chunks (under read lock), no-op if none, write block outside lock, drain memory and register reader (under write lock), abort on failure
+- [ ] `BlockStore.QueryRange` / `QueryInstant` / `SelectSeries` fan out to memory + all block readers; deduplicate by timestamp (memory wins)
+- [ ] Update `WalStore` to wrap `*BlockStore` instead of `*MemoryStore`; update `NewWalStore` signature
+- [ ] Add `WalStore.FlushBlock`: record current WAL segment, call `BlockStore.FlushBlock`, write `checkpoint` file, delete WAL segments ≤ checkpointed segment
+- [ ] Implement checkpoint file read/write (`data/metrics/checkpoint` — decimal WAL segment number)
+- [ ] Update startup sequence: load blocks → read checkpoint (default 0) → replay WAL segments with number > checkpoint
+- [ ] Clean up orphaned directories in `data/metrics/tmp/` on startup
+- [ ] Unit test: `FlushBlock` drains sealed chunks; `MemoryStore` retains only head chunk; block reader registered
+- [ ] Unit test: `QueryRange` returns samples from both block and memory across full time range
+- [ ] Unit test: duplicate timestamps across block and memory are deduplicated in query result
+- [ ] Unit test: `SelectSeries` includes series from persisted block
+- [ ] Integration test: ingest → `WalStore.FlushBlock` → new `WalStore` from same dataDir → `QueryRange` returns all flushed samples (`TestBlockPersistence_IngestFlushRestartQuery`)
 
 ### Phase 3.3 — Label Index
 - [ ] Implement metric name → series IDs index
@@ -207,6 +225,7 @@
 - [ ] Benchmark: indexed lookup vs full scan
 
 ### Phase 3.4 — Compaction and Retention
+- [ ] Implement automatic flush trigger (background goroutine; flush when WAL exceeds size threshold or sealed chunks exceed age/count threshold)
 - [ ] Implement block compactor
 - [ ] Merge adjacent compatible blocks
 - [ ] Preserve index correctness after compaction
