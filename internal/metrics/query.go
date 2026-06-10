@@ -9,8 +9,8 @@ import (
 // Both *MemoryStore and *BlockStore implement it.
 type queryStore interface {
 	SelectSeries(sel Selector) []MatchedSeries
-	QueryInstant(id SeriesID, tMs int64) (Sample, bool)
-	QueryRange(id SeriesID, startMs, endMs int64) []Sample
+	QueryInstant(id SeriesID, tMs int64) (Sample, bool, error)
+	QueryRange(id SeriesID, startMs, endMs int64) ([]Sample, error)
 }
 
 // QueryEngine executes instant and range queries over a queryStore.
@@ -48,7 +48,10 @@ func (e *QueryEngine) InstantQuery(sel Selector, tMs int64) ([]InstantSample, er
 	matched := e.store.SelectSeries(sel)
 	result := make([]InstantSample, 0, len(matched))
 	for _, ms := range matched {
-		sample, ok := e.store.QueryInstant(ms.Labels.Fingerprint(), tMs)
+		sample, ok, err := e.store.QueryInstant(ms.Labels.Fingerprint(), tMs)
+		if err != nil {
+			return nil, err
+		}
 		if !ok {
 			continue
 		}
@@ -81,7 +84,10 @@ func (e *QueryEngine) RangeQuery(sel Selector, startMs, endMs, stepMs int64) ([]
 		var points []SamplePoint
 		id := ms.Labels.Fingerprint()
 		for t := startMs; t <= endMs; t += stepMs {
-			sample, ok := e.store.QueryInstant(id, t)
+			sample, ok, err := e.store.QueryInstant(id, t)
+			if err != nil {
+				return nil, err
+			}
 			if !ok {
 				continue
 			}
