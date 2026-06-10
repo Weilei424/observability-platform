@@ -177,12 +177,22 @@ func (bs *BlockStore) QueryInstant(id SeriesID, tMs int64) (Sample, bool, error)
 // non-nil empty slice if the series is known but has no in-range samples.
 // Returns an error if any block chunk cannot be read.
 func (bs *BlockStore) QueryRange(id SeriesID, startMs, endMs int64) ([]Sample, error) {
+	// Read memory before snapshotting the block list. This closes the window
+	// where sealed chunks are discarded from memory but the new block reader
+	// hasn't been captured yet: FlushBlock always registers the reader before
+	// discarding (see FlushBlock), so if memory is empty the reader is already
+	// present and the subsequent block snapshot will include it.
+	memResult, err := bs.mem.QueryRange(id, startMs, endMs)
+	if err != nil {
+		return nil, err
+	}
+
 	bs.mu.RLock()
 	readers := bs.blocks
 	bs.mu.RUnlock()
 
-	// Collect block samples first; memory samples appended after so that
-	// stable sort + dedup (keep last) favours memory for equal timestamps.
+	// Collect block samples; memory samples appended after so that stable sort
+	// + dedup (keep last) still favours memory for equal timestamps.
 	var result []Sample
 	seriesFoundInBlock := false
 	for _, r := range readers {
@@ -211,11 +221,6 @@ func (bs *BlockStore) QueryRange(id SeriesID, startMs, endMs int64) ([]Sample, e
 		}
 	}
 
-	// Append memory samples (already sorted and deduped by MemoryStore).
-	memResult, err := bs.mem.QueryRange(id, startMs, endMs)
-	if err != nil {
-		return nil, err
-	}
 	result = append(result, memResult...)
 
 	// Ensure non-nil for known series with no in-range samples.
