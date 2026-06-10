@@ -76,8 +76,14 @@ func TestIngestMetrics_ValidBatch_AllSamplesStored(t *testing.T) {
 		t.Errorf("status = %d, want %d", rr.Code, http.StatusNoContent)
 	}
 
-	gotA := store.QueryRange(labelsA.Fingerprint(), 0, 2000)
-	gotB := store.QueryRange(labelsB.Fingerprint(), 0, 2000)
+	gotA, err := store.QueryRange(labelsA.Fingerprint(), 0, 2000)
+	if err != nil {
+		t.Fatalf("QueryRange A: %v", err)
+	}
+	gotB, err := store.QueryRange(labelsB.Fingerprint(), 0, 2000)
+	if err != nil {
+		t.Fatalf("QueryRange B: %v", err)
+	}
 
 	if len(gotA) != 1 || gotA[0].Value != 0.5 {
 		t.Errorf("series A: unexpected samples %v", gotA)
@@ -166,7 +172,10 @@ func TestIngestMetrics_MixedBatch_NoSamplesWritten(t *testing.T) {
 		t.Errorf("status = %d, want %d", rr.Code, http.StatusBadRequest)
 	}
 
-	got := store.QueryRange(validLabels.Fingerprint(), 0, 2000)
+	got, err := store.QueryRange(validLabels.Fingerprint(), 0, 2000)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
 	if len(got) != 0 {
 		t.Errorf("expected no samples written on mixed-batch rejection, got %d", len(got))
 	}
@@ -188,7 +197,10 @@ func TestIngestMetrics_RepeatedWrites_AppendToSameSeries(t *testing.T) {
 		},
 	})
 
-	got := store.QueryRange(labels.Fingerprint(), 0, 3000)
+	got, err := store.QueryRange(labels.Fingerprint(), 0, 3000)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
 	if len(got) != 2 {
 		t.Fatalf("got %d samples, want 2", len(got))
 	}
