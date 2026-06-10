@@ -69,6 +69,79 @@ func TestWALStore_AppendDelegatesToMemory(t *testing.T) {
 	}
 }
 
+// TestWALStore_FlushBlock_HeadFence verifies that FlushBlock does not delete WAL
+// segments containing head-chunk data when the WAL rotated before the chunk sealed.
+// It uses a tiny WAL segment (1 byte threshold) to force rotation after every
+// write, then checks that a simulated restart recovers all samples.
+func TestWALStore_FlushBlock_HeadFence(t *testing.T) {
+	dir := t.TempDir()
+	walDir := dir + "/metrics/wal"
+
+	// Open WAL with a 1-byte segment limit so every write rotates to a new segment.
+	w1, err := wal.Open(walDir, 1, 1)
+	if err != nil {
+		t.Fatalf("wal.Open: %v", err)
+	}
+
+	bs1, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+	store := metrics.NewWALStore(w1, bs1, dir)
+
+	labels, _ := metrics.NewLabels(map[string]string{"__name__": "counter"})
+
+	// Append 121 samples: the first 120 seal a chunk, sample 121 starts a new
+	// head chunk. With 1-byte segments, the WAL will have rotated many times,
+	// so the head chunk's first sample is in an older segment.
+	for i := 0; i < 121; i++ {
+		if err := store.Append(labels, int64(i*1000), float64(i)); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+	}
+
+	// Flush: writes the sealed chunk (samples 0–119) to a block.
+	if err := store.FlushBlock(); err != nil {
+		t.Fatalf("FlushBlock: %v", err)
+	}
+	if err := w1.Close(); err != nil {
+		t.Fatalf("Close WAL: %v", err)
+	}
+
+	// Simulate restart: load blocks, replay WAL from checkpoint.
+	bs2, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("NewBlockStore restart: %v", err)
+	}
+	checkpoint := metrics.ReadCheckpoint(dir)
+	if err := wal.ReplayFrom(walDir, checkpoint, func(pairs []wal.LabelPair, tsMs int64, value float64) {
+		lm := make(map[string]string, len(pairs))
+		for _, p := range pairs {
+			lm[p.Name] = p.Value
+		}
+		lbs, err := metrics.NewLabels(lm)
+		if err != nil {
+			t.Errorf("replay NewLabels: %v", err)
+			return
+		}
+		if err := bs2.Append(lbs, tsMs, value); err != nil {
+			t.Errorf("replay Append: %v", err)
+		}
+	}); err != nil {
+		t.Fatalf("ReplayFrom: %v", err)
+	}
+
+	// All 121 samples must be present: 0–119 from block, 120 from WAL replay.
+	id := labels.Fingerprint()
+	got, err := bs2.QueryRange(id, 0, 120*1000)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
+	if len(got) != 121 {
+		t.Errorf("got %d samples after restart, want 121 (head-chunk sample must survive flush)", len(got))
+	}
+}
+
 func TestWALStore_ReplayRestoresSeries(t *testing.T) {
 	dir := t.TempDir()
 	walDir := dir + "/metrics/wal"
