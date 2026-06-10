@@ -41,6 +41,7 @@ func newWALServer(t *testing.T, dataDir, walDir string) (*api.Server, *wal.WAL) 
 	}); err != nil {
 		t.Fatalf("wal.ReplayFrom: %v", err)
 	}
+	blockStore.MemStore().SetHeadFence(checkpoint + 1)
 
 	w, err := wal.Open(walDir, 128<<20, 1)
 	if err != nil {
