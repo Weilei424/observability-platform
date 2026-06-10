@@ -24,8 +24,9 @@ type Store interface {
 }
 
 type memorySeries struct {
-	labels Labels
-	chunks []*chunk.Chunk
+	labels  Labels
+	chunks  []*chunk.Chunk
+	headSeg int // WAL segment index when the current head chunk was allocated
 }
 
 // MemoryStore is a chunk-backed in-memory Ingester. Samples are encoded using
@@ -44,6 +45,18 @@ func NewMemoryStore() *MemoryStore {
 // Samples may be appended out of order; the chunk encodes them in insertion order
 // and QueryRange sorts on read. For equal timestamps, the last written value wins.
 func (s *MemoryStore) Append(labels Labels, timestampMs int64, value float64) error {
+	return s.appendInternal(labels, timestampMs, value, 0)
+}
+
+// AppendTracked is like Append but records walSeg as the WAL segment index in
+// which this sample is stored. When a new head chunk is allocated, headSeg is
+// set to walSeg so that OldestHeadSegment can return the correct flush boundary.
+// Call this from WALStore.Append; replay code uses plain Append.
+func (s *MemoryStore) AppendTracked(labels Labels, timestampMs int64, value float64, walSeg int) error {
+	return s.appendInternal(labels, timestampMs, value, walSeg)
+}
+
+func (s *MemoryStore) appendInternal(labels Labels, timestampMs int64, value float64, walSeg int) error {
 	id := labels.Fingerprint()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -54,12 +67,44 @@ func (s *MemoryStore) Append(labels Labels, timestampMs int64, value float64) er
 		s.series[id] = ms
 	}
 
-	// Ensure an open head chunk exists
+	// Allocate a new head chunk when none exists or the current one is sealed.
 	if len(ms.chunks) == 0 || ms.chunks[len(ms.chunks)-1].Sealed() {
 		ms.chunks = append(ms.chunks, chunk.NewChunk())
+		ms.headSeg = walSeg
 	}
 
 	return ms.chunks[len(ms.chunks)-1].Append(timestampMs, value)
+}
+
+// OldestHeadSegment returns the smallest WAL segment index across all series
+// whose current head chunk was allocated. Returns -1 when no series has chunks.
+// Use this to determine the safe WAL deletion boundary after a block flush.
+func (s *MemoryStore) OldestHeadSegment() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	oldest := -1
+	for _, ms := range s.series {
+		if len(ms.chunks) == 0 {
+			continue
+		}
+		if oldest < 0 || ms.headSeg < oldest {
+			oldest = ms.headSeg
+		}
+	}
+	return oldest
+}
+
+// SetHeadFence sets headSeg to walSeg for every series that currently has chunks.
+// Call this after WAL replay to mark the oldest segment containing head-chunk data,
+// so that FlushBlock does not delete WAL segments that cover those head chunks.
+func (s *MemoryStore) SetHeadFence(walSeg int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, ms := range s.series {
+		if len(ms.chunks) > 0 {
+			ms.headSeg = walSeg
+		}
+	}
 }
 
 // MatchedSeries is a series ID paired with its label set, returned by SelectSeries.
