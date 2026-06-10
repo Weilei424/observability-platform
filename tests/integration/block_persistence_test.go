@@ -108,6 +108,7 @@ func buildWALStore(t *testing.T, dataDir, walDir string) *metrics.WALStore {
 	}
 	checkpoint := metrics.ReadCheckpoint(dataDir)
 	replayInto(t, walDir, checkpoint, bs)
+	bs.MemStore().SetHeadFence(checkpoint + 1)
 	w, err := wal.Open(walDir, 128<<20, 1)
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
