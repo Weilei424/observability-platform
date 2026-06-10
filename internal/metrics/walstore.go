@@ -45,30 +45,39 @@ func (s *WALStore) SelectSeries(sel Selector) []MatchedSeries {
 	return s.store.SelectSeries(sel)
 }
 
-func (s *WALStore) QueryInstant(id SeriesID, tMs int64) (Sample, bool) {
+func (s *WALStore) QueryInstant(id SeriesID, tMs int64) (Sample, bool, error) {
 	return s.store.QueryInstant(id, tMs)
 }
 
-func (s *WALStore) QueryRange(id SeriesID, startMs, endMs int64) []Sample {
+func (s *WALStore) QueryRange(id SeriesID, startMs, endMs int64) ([]Sample, error) {
 	return s.store.QueryRange(id, startMs, endMs)
 }
 
 // FlushBlock flushes sealed chunks to a new immutable block, writes a checkpoint
-// recording the current WAL segment, then deletes WAL segments covered by the
-// checkpoint.
+// recording the WAL segment before the currently active one, then deletes WAL
+// segments strictly before that segment. The active segment is preserved so that
+// any head-chunk samples written to it remain recoverable on restart.
+// Returns nil without touching the checkpoint or WAL when no sealed chunks exist.
 func (s *WALStore) FlushBlock() error {
 	segIdx := s.w.SegmentIndex()
 
-	if err := s.store.FlushBlock(); err != nil {
+	wrote, err := s.store.FlushBlock()
+	if err != nil {
 		return fmt.Errorf("walstore: flush block: %w", err)
 	}
+	if !wrote {
+		return nil
+	}
 
+	// checkpoint = segIdx-1 so that on restart ReplayFrom replays from segIdx,
+	// recovering head-chunk samples still in the active segment.
+	checkpointSeg := segIdx - 1
 	checkpointPath := filepath.Join(s.dataDir, "metrics", "checkpoint")
-	if err := os.WriteFile(checkpointPath, []byte(strconv.Itoa(segIdx)), 0o644); err != nil {
+	if err := os.WriteFile(checkpointPath, []byte(strconv.Itoa(checkpointSeg)), 0o644); err != nil {
 		return fmt.Errorf("walstore: write checkpoint: %w", err)
 	}
 
-	if err := deleteWALSegmentsUpTo(s.walDir, segIdx); err != nil {
+	if err := deleteWALSegmentsUpTo(s.walDir, checkpointSeg); err != nil {
 		return fmt.Errorf("walstore: delete covered WAL segments: %w", err)
 	}
 
