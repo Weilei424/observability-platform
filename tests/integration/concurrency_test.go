@@ -146,9 +146,28 @@ func TestAppendFlush_AcknowledgedSamplesSurvive(t *testing.T) {
 	var mu sync.Mutex
 	acknowledged := make(map[int64]float64)
 
-	var wg sync.WaitGroup
 	const appendWorkers = 8
 	const samplesPerWorker = 150
+
+	// Pre-seed one sealed chunk (120 samples) before starting any goroutine.
+	// This guarantees the first FlushBlock call has sealed chunks to commit,
+	// so the checkpoint-deletion path is definitely exercised. Without this,
+	// all 40 flush iterations can be no-ops if chunks haven't sealed yet, and
+	// the test passes trivially via WAL replay alone.
+	// Timestamps are placed beyond the concurrent range to avoid collisions.
+	const seedBase = int64(appendWorkers * samplesPerWorker)
+	for i := 0; i < 120; i++ {
+		ts := seedBase + int64(i)
+		val := float64(ts)
+		if err := store.Append(labels, ts, val); err != nil {
+			t.Fatalf("seed Append %d: %v", i, err)
+		}
+		mu.Lock()
+		acknowledged[ts] = val
+		mu.Unlock()
+	}
+
+	var wg sync.WaitGroup
 
 	for i := 0; i < appendWorkers; i++ {
 		wg.Add(1)
@@ -166,18 +185,39 @@ func TestAppendFlush_AcknowledgedSamplesSurvive(t *testing.T) {
 		}(i)
 	}
 
-	// Flush goroutine runs concurrently with all appends.
+	// Flush goroutine runs concurrently with all appends. Errors are propagated
+	// so a broken FlushBlock implementation is caught immediately.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 40; i++ {
-			store.FlushBlock()
+			if err := store.FlushBlock(); err != nil {
+				t.Errorf("FlushBlock iteration %d: %v", i, err)
+			}
 		}
 	}()
 
 	wg.Wait()
 	if err := w1.Close(); err != nil {
 		t.Fatalf("Close WAL: %v", err)
+	}
+
+	// Assert that at least one flush actually committed a block. If the block
+	// directory is empty the checkpoint-deletion path was never exercised and
+	// the correctness assertion below proves nothing.
+	blockDir := filepath.Join(dir, "metrics", "blocks")
+	blockEntries, err := os.ReadDir(blockDir)
+	if err != nil {
+		t.Fatalf("ReadDir blocks: %v", err)
+	}
+	var blockCount int
+	for _, e := range blockEntries {
+		if e.IsDir() {
+			blockCount++
+		}
+	}
+	if blockCount == 0 {
+		t.Fatalf("no blocks written — FlushBlock never committed a chunk; checkpoint-deletion race was not exercised")
 	}
 
 	// Simulate restart: load persisted blocks then replay remaining WAL segments.
