@@ -73,6 +73,11 @@ func main() {
 	}
 	log.Info("WAL replay complete", slog.Int("samples_restored", replayCount))
 
+	// Mark the head-chunk fence so FlushBlock knows the oldest WAL segment that
+	// contains head-chunk data from this replay. Segments >= checkpoint+1 must be
+	// preserved until those head chunks seal and are flushed to a block.
+	blockStore.MemStore().SetHeadFence(checkpoint + 1)
+
 	// 4. Open WAL for new writes.
 	w, err := wal.Open(walDir, cfg.WALSegmentMaxBytes, cfg.WALSyncEveryN)
 	if err != nil {
