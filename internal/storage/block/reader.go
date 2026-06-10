@@ -90,6 +90,8 @@ func (r *Reader) ReadChunk(ref ChunkRef) (*chunk.Chunk, error) {
 
 // Close closes the chunks file if it was opened.
 func (r *Reader) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.chunksFile != nil {
 		return r.chunksFile.Close()
 	}
