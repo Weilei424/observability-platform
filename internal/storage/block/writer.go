@@ -96,12 +96,23 @@ func (w *Writer) Commit() (Meta, error) {
 	if err := writeMeta(w.workDir, meta); err != nil {
 		return Meta{}, err
 	}
+	if err := syncPath(filepath.Join(w.workDir, "meta.json")); err != nil {
+		return Meta{}, err
+	}
+	// Flush the temp directory's entries so all file data is durable before rename.
+	if err := syncPath(w.workDir); err != nil {
+		return Meta{}, err
+	}
 	dest := filepath.Join(w.blocksDir, w.blockID)
 	if err := os.MkdirAll(w.blocksDir, 0o755); err != nil {
 		return Meta{}, fmt.Errorf("block: mkdir blocks dir: %w", err)
 	}
 	if err := os.Rename(w.workDir, dest); err != nil {
 		return Meta{}, fmt.Errorf("block: rename block to final location: %w", err)
+	}
+	// Flush the parent directory so the rename is durable.
+	if err := syncPath(w.blocksDir); err != nil {
+		return Meta{}, err
 	}
 	w.workDir = ""
 	return meta, nil
@@ -179,7 +190,17 @@ func (w *Writer) writeChunksAndIndex() error {
 		}
 	}
 
-	return os.WriteFile(filepath.Join(w.workDir, "index"), idx.Bytes(), 0o644)
+	// Sync the chunks file to disk before closing so all payload bytes are
+	// durable before the WAL checkpoint advances past the segments they cover.
+	if err := cf.Sync(); err != nil {
+		return fmt.Errorf("block: sync chunks file: %w", err)
+	}
+
+	indexPath := filepath.Join(w.workDir, "index")
+	if err := os.WriteFile(indexPath, idx.Bytes(), 0o644); err != nil {
+		return fmt.Errorf("block: write index: %w", err)
+	}
+	return syncPath(indexPath)
 }
 
 func encodeLabelSet(pairs []LabelPair) []byte {
@@ -194,6 +215,21 @@ func encodeLabelSet(pairs []LabelPair) []byte {
 		buf.WriteString(p.Value)
 	}
 	return buf.Bytes()
+}
+
+// syncPath opens path and calls Sync, making its contents durable on Linux for
+// both regular files and directories. Used to guarantee block data survives a
+// crash before the WAL checkpoint is advanced.
+func syncPath(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("block: open for fsync %q: %w", path, err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return fmt.Errorf("block: fsync %q: %w", path, err)
+	}
+	return f.Close()
 }
 
 func generateBlockID() (string, error) {
