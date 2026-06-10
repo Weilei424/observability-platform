@@ -245,9 +245,9 @@ func TestAppendFlush_AcknowledgedSamplesSurvive(t *testing.T) {
 		t.Fatalf("checkpoint value %d means no WAL segments were deleted; appendMu invariant was not on the critical path", checkpointVal)
 	}
 	for seg := 0; seg <= checkpointVal; seg++ {
-		segPath := filepath.Join(walDir, fmt.Sprintf("%d.wal", seg))
+		segPath := filepath.Join(walDir, fmt.Sprintf("%06d.wal", seg))
 		if _, statErr := os.Stat(segPath); !os.IsNotExist(statErr) {
-			t.Errorf("WAL segment %d.wal should have been deleted (checkpoint=%d) but still exists", seg, checkpointVal)
+			t.Errorf("WAL segment %06d.wal should have been deleted (checkpoint=%d) but still exists", seg, checkpointVal)
 			break
 		}
 	}
@@ -357,6 +357,16 @@ func TestAppendMu_FlushBlockWaitsForInFlightAppend(t *testing.T) {
 	pw := &pausingWriter{inner: w, afterDone: afterWriteDone, resume: resume}
 	store := metrics.NewWALStore(pw, bs, dir)
 
+	// Install the hook so we know exactly when FlushBlock has finished block I/O
+	// and is about to call appendMu.Lock(). The Append goroutine is still paused
+	// (holding appendMu) when the hook fires, so in a broken implementation
+	// without appendMu FlushBlock would call OldestHeadSegment immediately and
+	// observe headSeg=-1; with appendMu it must block here until we release Append.
+	readyToLock := make(chan struct{})
+	store.SetTestBeforeCheckpoint(func() {
+		close(readyToLock) // FlushBlock has reached the appendMu acquisition point
+	})
+
 	// Goroutine A: Append ts=120. Pauses inside WriteRecord holding appendMu.
 	appendDone := make(chan error, 1)
 	go func() {
@@ -371,23 +381,36 @@ func TestAppendMu_FlushBlockWaitsForInFlightAppend(t *testing.T) {
 		t.Fatal("append goroutine never reached WriteRecord pause point")
 	}
 
-	// Goroutine B: FlushBlock. Must block on appendMu after writing the block.
+	// Goroutine B: FlushBlock. Starts block I/O; will fire the hook when it
+	// reaches appendMu acquisition.
 	flushDone := make(chan error, 1)
 	go func() {
 		flushDone <- store.FlushBlock()
 	}()
 
+	// Wait for FlushBlock to reach appendMu.Lock() — this is deterministic.
+	// If FlushBlock never fires the hook (e.g. no sealed chunks), the test
+	// setup is wrong and we fail hard.
+	select {
+	case <-readyToLock:
+	case <-time.After(10 * time.Second):
+		close(resume)
+		t.Fatal("FlushBlock never reached checkpoint boundary (no sealed chunk?)")
+	}
+
+	// At this exact point: Append goroutine holds appendMu (still paused at
+	// <-p.resume), FlushBlock is at appendMu.Lock(). FlushBlock must not have
+	// finished yet.
 	select {
 	case err := <-flushDone:
-		// FlushBlock must NOT finish here — it must be blocked on appendMu.
-		t.Errorf("FlushBlock completed while Append held appendMu (invariant broken): %v", err)
+		t.Errorf("FlushBlock completed before acquiring appendMu (invariant broken): %v", err)
 		close(resume)
 		return
-	case <-time.After(50 * time.Millisecond):
-		// Expected: FlushBlock is waiting for appendMu.
+	default:
 	}
 
 	// Release Goroutine A: AppendTracked sets headSeg, then appendMu is released.
+	// FlushBlock unblocks, samples the correct fence, and writes checkpoint.
 	close(resume)
 
 	if err := <-appendDone; err != nil {
