@@ -33,12 +33,15 @@ func NewWALStore(w wal.RecordWriter, store *BlockStore, dataDir string) *WALStor
 }
 
 // Append writes the WAL record first. If the WAL write fails the sample is not
-// written to memory and the error is returned.
+// written to memory and the error is returned. The current WAL segment index is
+// captured before the write so that head-chunk fence tracking records the segment
+// the record actually lands in (WriteRecord may rotate the segment after writing).
 func (s *WALStore) Append(labels Labels, tsMs int64, value float64) error {
+	walSeg := s.w.SegmentIndex()
 	if err := s.w.WriteRecord(labelsToWALPairs(labels), tsMs, value); err != nil {
 		return err
 	}
-	return s.store.Append(labels, tsMs, value)
+	return s.store.AppendTracked(labels, tsMs, value, walSeg)
 }
 
 func (s *WALStore) SelectSeries(sel Selector) []MatchedSeries {
@@ -53,14 +56,13 @@ func (s *WALStore) QueryRange(id SeriesID, startMs, endMs int64) ([]Sample, erro
 	return s.store.QueryRange(id, startMs, endMs)
 }
 
-// FlushBlock flushes sealed chunks to a new immutable block, writes a checkpoint
-// recording the WAL segment before the currently active one, then deletes WAL
-// segments strictly before that segment. The active segment is preserved so that
-// any head-chunk samples written to it remain recoverable on restart.
-// Returns nil without touching the checkpoint or WAL when no sealed chunks exist.
+// FlushBlock flushes sealed chunks to a new immutable block and advances the WAL
+// checkpoint. The safe deletion boundary is determined by OldestHeadSegment: the
+// oldest WAL segment that contains samples for any current head chunk. Segments
+// strictly before that boundary are covered entirely by persisted blocks and can
+// be deleted. Returns nil without touching checkpoint or WAL when no sealed chunks
+// exist.
 func (s *WALStore) FlushBlock() error {
-	segIdx := s.w.SegmentIndex()
-
 	wrote, err := s.store.FlushBlock()
 	if err != nil {
 		return fmt.Errorf("walstore: flush block: %w", err)
@@ -69,15 +71,26 @@ func (s *WALStore) FlushBlock() error {
 		return nil
 	}
 
-	// checkpoint = segIdx-1 so that on restart ReplayFrom replays from segIdx,
-	// recovering head-chunk samples still in the active segment.
-	checkpointSeg := segIdx - 1
+	// headFence is the oldest WAL segment with live head-chunk data. We must
+	// preserve segments >= headFence for crash recovery, so the checkpoint is
+	// headFence-1 and we delete segments up to that value.
+	headFence := s.store.OldestHeadSegment()
+	var safeDelete int
+	if headFence < 0 {
+		// No head chunks in memory: all written samples are in blocks. Safe to
+		// delete up to the segment before the current active one so we never
+		// unlink the live file descriptor.
+		safeDelete = s.w.SegmentIndex() - 1
+	} else {
+		safeDelete = headFence - 1
+	}
+
 	checkpointPath := filepath.Join(s.dataDir, "metrics", "checkpoint")
-	if err := os.WriteFile(checkpointPath, []byte(strconv.Itoa(checkpointSeg)), 0o644); err != nil {
+	if err := os.WriteFile(checkpointPath, []byte(strconv.Itoa(safeDelete)), 0o644); err != nil {
 		return fmt.Errorf("walstore: write checkpoint: %w", err)
 	}
 
-	if err := deleteWALSegmentsUpTo(s.walDir, checkpointSeg); err != nil {
+	if err := deleteWALSegmentsUpTo(s.walDir, safeDelete); err != nil {
 		return fmt.Errorf("walstore: delete covered WAL segments: %w", err)
 	}
 
