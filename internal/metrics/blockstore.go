@@ -281,13 +281,15 @@ func (bs *BlockStore) FlushBlock() (bool, error) {
 		return false, fmt.Errorf("blockstore: open new block %s: %w", meta.BlockID, err)
 	}
 
-	// Remove only the snapshotted sealed chunks from memory and register the new
-	// reader. Passing the snapshot ensures chunks that sealed after the snapshot
-	// was taken (concurrent Append racing with the block write) are retained.
-	bs.mem.DiscardSealedChunks(snapshot)
+	// Register the new reader before discarding sealed chunks from memory.
+	// This ensures no query window where the data is visible in neither source.
+	// Queries that snapshot the block list before this point still see the sealed
+	// chunks in memory; queries that snapshot after may briefly see both, which
+	// is handled correctly by the existing dedup pass (memory wins on ties).
 	bs.mu.Lock()
 	bs.blocks = append(bs.blocks, newReader)
 	bs.mu.Unlock()
+	bs.mem.DiscardSealedChunks(snapshot)
 
 	return true, nil
 }
