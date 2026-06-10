@@ -31,7 +31,7 @@ func TestBlockStore_FlushBlock_DrainsSealedChunks(t *testing.T) {
 		}
 	}
 
-	if err := bs.FlushBlock(); err != nil {
+	if _, err := bs.FlushBlock(); err != nil {
 		t.Fatalf("FlushBlock: %v", err)
 	}
 
@@ -60,7 +60,7 @@ func TestBlockStore_QueryRange_SpansMemoryAndBlock(t *testing.T) {
 		}
 	}
 
-	if err := bs.FlushBlock(); err != nil {
+	if _, err := bs.FlushBlock(); err != nil {
 		t.Fatalf("FlushBlock: %v", err)
 	}
 
@@ -71,7 +71,10 @@ func TestBlockStore_QueryRange_SpansMemoryAndBlock(t *testing.T) {
 		}
 	}
 
-	got := bs.QueryRange(id, 0, int64(122*1000))
+	got, err := bs.QueryRange(id, 0, int64(122*1000))
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
 	if len(got) != 123 {
 		t.Errorf("QueryRange returned %d samples, want 123", len(got))
 	}
@@ -93,7 +96,7 @@ func TestBlockStore_QueryRange_Deduplication(t *testing.T) {
 			t.Fatalf("Append: %v", err)
 		}
 	}
-	if err := bs.FlushBlock(); err != nil {
+	if _, err := bs.FlushBlock(); err != nil {
 		t.Fatalf("FlushBlock: %v", err)
 	}
 
@@ -104,7 +107,10 @@ func TestBlockStore_QueryRange_Deduplication(t *testing.T) {
 		}
 	}
 
-	got := bs.QueryRange(id, 0, int64(119*1000))
+	got, err := bs.QueryRange(id, 0, int64(119*1000))
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
 	if len(got) != 120 {
 		t.Errorf("QueryRange returned %d samples after re-append, want 120 (no duplicates)", len(got))
 	}
@@ -125,7 +131,7 @@ func TestBlockStore_SelectSeries_IncludesBlockSeries(t *testing.T) {
 			t.Fatalf("Append: %v", err)
 		}
 	}
-	if err := bs.FlushBlock(); err != nil {
+	if _, err := bs.FlushBlock(); err != nil {
 		t.Fatalf("FlushBlock: %v", err)
 	}
 
