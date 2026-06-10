@@ -23,7 +23,10 @@ func TestMemoryStore_AppendAndQueryRange_SingleSample(t *testing.T) {
 		t.Fatalf("Append: %v", err)
 	}
 
-	got := store.QueryRange(labels.Fingerprint(), 1000, 1000)
+	got, err := store.QueryRange(labels.Fingerprint(), 1000, 1000)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
 	if len(got) != 1 {
 		t.Fatalf("got %d samples, want 1", len(got))
 	}
@@ -39,7 +42,10 @@ func TestMemoryStore_MultipleSamples_SortedByTimestamp(t *testing.T) {
 	_ = store.Append(labels, 2000, 0.8)
 	_ = store.Append(labels, 1000, 0.5)
 
-	got := store.QueryRange(labels.Fingerprint(), 0, 3000)
+	got, err := store.QueryRange(labels.Fingerprint(), 0, 3000)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
 	if len(got) != 2 {
 		t.Fatalf("got %d samples, want 2", len(got))
 	}
@@ -56,7 +62,10 @@ func TestMemoryStore_OutOfOrder_InsertedAtCorrectPosition(t *testing.T) {
 	_ = store.Append(labels, 1000, 1.0)
 	_ = store.Append(labels, 2000, 2.0)
 
-	got := store.QueryRange(labels.Fingerprint(), 0, 5000)
+	got, err := store.QueryRange(labels.Fingerprint(), 0, 5000)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
 	if len(got) != 3 {
 		t.Fatalf("got %d samples, want 3", len(got))
 	}
@@ -74,7 +83,10 @@ func TestMemoryStore_DuplicateTimestamp_LastWriteWins(t *testing.T) {
 	_ = store.Append(labels, 1000, 0.5)
 	_ = store.Append(labels, 1000, 0.9)
 
-	got := store.QueryRange(labels.Fingerprint(), 1000, 1000)
+	got, err := store.QueryRange(labels.Fingerprint(), 1000, 1000)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
 	if len(got) != 1 {
 		t.Fatalf("got %d samples, want 1", len(got))
 	}
@@ -91,8 +103,14 @@ func TestMemoryStore_DifferentLabelSets_SeparateSeries(t *testing.T) {
 	_ = store.Append(a, 1000, 1.0)
 	_ = store.Append(b, 1000, 2.0)
 
-	gotA := store.QueryRange(a.Fingerprint(), 0, 2000)
-	gotB := store.QueryRange(b.Fingerprint(), 0, 2000)
+	gotA, err := store.QueryRange(a.Fingerprint(), 0, 2000)
+	if err != nil {
+		t.Fatalf("QueryRange A: %v", err)
+	}
+	gotB, err := store.QueryRange(b.Fingerprint(), 0, 2000)
+	if err != nil {
+		t.Fatalf("QueryRange B: %v", err)
+	}
 
 	if len(gotA) != 1 || gotA[0].Value != 1.0 {
 		t.Errorf("series A: got %v", gotA)
@@ -110,7 +128,10 @@ func TestMemoryStore_QueryRange_BoundaryBehavior(t *testing.T) {
 	_ = store.Append(labels, 200, 2.0)
 	_ = store.Append(labels, 300, 3.0)
 
-	got := store.QueryRange(labels.Fingerprint(), 100, 200)
+	got, err := store.QueryRange(labels.Fingerprint(), 100, 200)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
 	if len(got) != 2 {
 		t.Fatalf("got %d samples, want 2", len(got))
 	}
@@ -119,7 +140,10 @@ func TestMemoryStore_QueryRange_BoundaryBehavior(t *testing.T) {
 	}
 
 	// Outside range: series exists but no samples in [400, 500]
-	outside := store.QueryRange(labels.Fingerprint(), 400, 500)
+	outside, err := store.QueryRange(labels.Fingerprint(), 400, 500)
+	if err != nil {
+		t.Fatalf("QueryRange outside: %v", err)
+	}
 	if outside == nil {
 		t.Error("expected empty slice for known series with no samples in range, got nil")
 	}
@@ -130,7 +154,10 @@ func TestMemoryStore_QueryRange_BoundaryBehavior(t *testing.T) {
 
 func TestMemoryStore_QueryRange_UnknownSeries_ReturnsNil(t *testing.T) {
 	store := metrics.NewMemoryStore()
-	got := store.QueryRange(metrics.SeriesID(999), 0, 9999)
+	got, err := store.QueryRange(metrics.SeriesID(999), 0, 9999)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
 	if got != nil {
 		t.Errorf("expected nil for unknown series, got %v", got)
 	}
@@ -212,7 +239,10 @@ func TestMemoryStore_QueryInstant_ReturnsLatestAtOrBefore(t *testing.T) {
 
 	id := labels.Fingerprint()
 
-	s, ok := store.QueryInstant(id, 2500)
+	s, ok, err := store.QueryInstant(id, 2500)
+	if err != nil {
+		t.Fatalf("QueryInstant: %v", err)
+	}
 	if !ok {
 		t.Fatal("expected sample, got none")
 	}
@@ -226,7 +256,10 @@ func TestMemoryStore_QueryInstant_ExactMatch(t *testing.T) {
 	labels := mustNewLabels(t, map[string]string{"__name__": "cpu_usage"})
 	_ = store.Append(labels, 1000, 1.0)
 
-	s, ok := store.QueryInstant(labels.Fingerprint(), 1000)
+	s, ok, err := store.QueryInstant(labels.Fingerprint(), 1000)
+	if err != nil {
+		t.Fatalf("QueryInstant: %v", err)
+	}
 	if !ok {
 		t.Fatal("expected sample, got none")
 	}
@@ -240,7 +273,10 @@ func TestMemoryStore_QueryInstant_BeforeFirstSample_ReturnsFalse(t *testing.T) {
 	labels := mustNewLabels(t, map[string]string{"__name__": "cpu_usage"})
 	_ = store.Append(labels, 1000, 1.0)
 
-	_, ok := store.QueryInstant(labels.Fingerprint(), 500)
+	_, ok, err := store.QueryInstant(labels.Fingerprint(), 500)
+	if err != nil {
+		t.Fatalf("QueryInstant: %v", err)
+	}
 	if ok {
 		t.Error("expected no sample before first, got one")
 	}
@@ -248,7 +284,10 @@ func TestMemoryStore_QueryInstant_BeforeFirstSample_ReturnsFalse(t *testing.T) {
 
 func TestMemoryStore_QueryInstant_UnknownSeries_ReturnsFalse(t *testing.T) {
 	store := metrics.NewMemoryStore()
-	_, ok := store.QueryInstant(metrics.SeriesID(999), 1000)
+	_, ok, err := store.QueryInstant(metrics.SeriesID(999), 1000)
+	if err != nil {
+		t.Fatalf("QueryInstant: %v", err)
+	}
 	if ok {
 		t.Error("expected false for unknown series, got true")
 	}
@@ -278,7 +317,10 @@ func TestMemoryStore_ChunkBoundary_AllSamplesQueryable(t *testing.T) {
 		_ = store.Append(labels, int64(i*1000), float64(i))
 	}
 
-	got := store.QueryRange(labels.Fingerprint(), 0, 121000)
+	got, err := store.QueryRange(labels.Fingerprint(), 0, 121000)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
 	if len(got) != 121 {
 		t.Fatalf("QueryRange returned %d samples, want 121", len(got))
 	}
@@ -302,7 +344,10 @@ func TestMemoryStore_QueryInstantAcrossChunks(t *testing.T) {
 	_ = store.Append(labels, 200000, 999.0)
 
 	// Query from second chunk
-	s, ok := store.QueryInstant(labels.Fingerprint(), 200000)
+	s, ok, err := store.QueryInstant(labels.Fingerprint(), 200000)
+	if err != nil {
+		t.Fatalf("QueryInstant: %v", err)
+	}
 	if !ok {
 		t.Fatal("QueryInstant in second chunk: no sample found")
 	}
@@ -311,7 +356,10 @@ func TestMemoryStore_QueryInstantAcrossChunks(t *testing.T) {
 	}
 
 	// Query from first chunk
-	s, ok = store.QueryInstant(labels.Fingerprint(), 50000)
+	s, ok, err = store.QueryInstant(labels.Fingerprint(), 50000)
+	if err != nil {
+		t.Fatalf("QueryInstant: %v", err)
+	}
 	if !ok {
 		t.Fatal("QueryInstant in first chunk: no sample found")
 	}
@@ -339,7 +387,10 @@ func TestMemoryStore_DuplicateTimestamp_AcrossChunkBoundary(t *testing.T) {
 	}
 
 	// QueryRange: only one sample should appear at ts=119000, with value 999.0 (last-write-wins)
-	got := store.QueryRange(labels.Fingerprint(), 119000, 119000)
+	got, err := store.QueryRange(labels.Fingerprint(), 119000, 119000)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
 	if len(got) != 1 {
 		t.Fatalf("QueryRange returned %d samples, want 1", len(got))
 	}
@@ -348,7 +399,10 @@ func TestMemoryStore_DuplicateTimestamp_AcrossChunkBoundary(t *testing.T) {
 	}
 
 	// QueryInstant: should also return 999.0
-	s, ok := store.QueryInstant(labels.Fingerprint(), 119000)
+	s, ok, err := store.QueryInstant(labels.Fingerprint(), 119000)
+	if err != nil {
+		t.Fatalf("QueryInstant: %v", err)
+	}
 	if !ok {
 		t.Fatal("QueryInstant: no sample found")
 	}
