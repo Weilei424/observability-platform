@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/masonwheeler/observability-platform/internal/storage/chunk"
 )
@@ -35,6 +36,7 @@ type Reader struct {
 	dir        string
 	meta       Meta
 	entries    []SeriesEntry
+	mu         sync.Mutex
 	chunksFile *os.File
 }
 
@@ -69,13 +71,16 @@ func (r *Reader) ReadChunk(ref ChunkRef) (*chunk.Chunk, error) {
 	if ref.Length == 0 {
 		return nil, fmt.Errorf("block: chunk ref at offset %d has zero length", ref.Offset)
 	}
+	r.mu.Lock()
 	if r.chunksFile == nil {
 		f, err := os.Open(filepath.Join(r.dir, "chunks"))
 		if err != nil {
+			r.mu.Unlock()
 			return nil, fmt.Errorf("block: open chunks file: %w", err)
 		}
 		r.chunksFile = f
 	}
+	r.mu.Unlock()
 	buf := make([]byte, ref.Length)
 	if _, err := r.chunksFile.ReadAt(buf, ref.Offset); err != nil {
 		return nil, fmt.Errorf("block: read chunk at offset %d: %w", ref.Offset, err)
