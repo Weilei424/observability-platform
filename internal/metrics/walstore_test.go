@@ -118,7 +118,10 @@ func TestWALStore_ReplayRestoresSeries(t *testing.T) {
 	}
 
 	id := labels.Fingerprint()
-	got := bs2.QueryRange(id, 1000, 3000)
+	got, err := bs2.QueryRange(id, 1000, 3000)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
 	if len(got) != 3 {
 		t.Fatalf("QueryRange returned %d samples after replay, want 3", len(got))
 	}
