@@ -118,9 +118,12 @@ func (bs *BlockStore) SelectSeries(sel Selector) []MatchedSeries {
 
 // QueryInstant returns the latest sample with timestamp ≤ tMs for the given
 // series, searching both memory and all loaded blocks. Memory wins for equal
-// timestamps.
-func (bs *BlockStore) QueryInstant(id SeriesID, tMs int64) (Sample, bool) {
-	best, found := bs.mem.QueryInstant(id, tMs)
+// timestamps. Returns an error if any block chunk cannot be read.
+func (bs *BlockStore) QueryInstant(id SeriesID, tMs int64) (Sample, bool, error) {
+	best, found, err := bs.mem.QueryInstant(id, tMs)
+	if err != nil {
+		return Sample{}, false, err
+	}
 
 	bs.mu.RLock()
 	readers := bs.blocks
@@ -137,7 +140,7 @@ func (bs *BlockStore) QueryInstant(id SeriesID, tMs int64) (Sample, bool) {
 			for _, ref := range se.Chunks {
 				c, err := r.ReadChunk(ref)
 				if err != nil {
-					continue
+					return Sample{}, false, fmt.Errorf("blockstore: read chunk: %w", err)
 				}
 				it := c.Iterator()
 				for it.Next() {
@@ -151,15 +154,16 @@ func (bs *BlockStore) QueryInstant(id SeriesID, tMs int64) (Sample, bool) {
 			}
 		}
 	}
-	return best, found
+	return best, found, nil
 }
 
 // QueryRange returns all samples for series id with startMs ≤ ts ≤ endMs,
 // merging memory and block results. Results are sorted by timestamp;
 // duplicate timestamps are deduplicated (memory wins over block).
-// Returns nil if the series is unknown in both blocks and memory; returns a
+// Returns nil, nil if the series is unknown in both blocks and memory; returns a
 // non-nil empty slice if the series is known but has no in-range samples.
-func (bs *BlockStore) QueryRange(id SeriesID, startMs, endMs int64) []Sample {
+// Returns an error if any block chunk cannot be read.
+func (bs *BlockStore) QueryRange(id SeriesID, startMs, endMs int64) ([]Sample, error) {
 	bs.mu.RLock()
 	readers := bs.blocks
 	bs.mu.RUnlock()
@@ -181,7 +185,7 @@ func (bs *BlockStore) QueryRange(id SeriesID, startMs, endMs int64) []Sample {
 			for _, ref := range se.Chunks {
 				c, err := r.ReadChunk(ref)
 				if err != nil {
-					continue
+					return nil, fmt.Errorf("blockstore: read chunk: %w", err)
 				}
 				it := c.Iterator()
 				for it.Next() {
@@ -195,7 +199,10 @@ func (bs *BlockStore) QueryRange(id SeriesID, startMs, endMs int64) []Sample {
 	}
 
 	// Append memory samples (already sorted and deduped by MemoryStore).
-	memResult := bs.mem.QueryRange(id, startMs, endMs)
+	memResult, err := bs.mem.QueryRange(id, startMs, endMs)
+	if err != nil {
+		return nil, err
+	}
 	result = append(result, memResult...)
 
 	// Ensure non-nil for known series with no in-range samples.
@@ -204,7 +211,7 @@ func (bs *BlockStore) QueryRange(id SeriesID, startMs, endMs int64) []Sample {
 	}
 
 	if len(result) <= 1 {
-		return result
+		return result, nil
 	}
 
 	sort.SliceStable(result, func(i, j int) bool {
@@ -220,58 +227,56 @@ func (bs *BlockStore) QueryRange(id SeriesID, startMs, endMs int64) []Sample {
 			deduped = append(deduped, result[i])
 		}
 	}
-	return deduped
+	return deduped, nil
 }
 
 // FlushBlock writes all sealed chunks from memory into a new immutable block.
-// Returns nil immediately if no sealed chunks exist. On write failure the
-// memory store is unchanged. Concurrent calls are serialized.
-func (bs *BlockStore) FlushBlock() error {
+// Returns (false, nil) immediately if no sealed chunks exist. Returns (true, nil)
+// on success. On write failure the memory store is unchanged. Concurrent calls
+// are serialized.
+func (bs *BlockStore) FlushBlock() (bool, error) {
 	bs.flushMu.Lock()
 	defer bs.flushMu.Unlock()
 
 	snapshot := bs.mem.SealedChunksSnapshot()
 	if len(snapshot) == 0 {
-		return nil
+		return false, nil
 	}
 
 	w, err := block.NewWriter(bs.blockDir, bs.tmpDir)
 	if err != nil {
-		return fmt.Errorf("blockstore: new writer: %w", err)
+		return false, fmt.Errorf("blockstore: new writer: %w", err)
 	}
 
 	for _, sc := range snapshot {
 		pairs := labelsToPairs(sc.Labels)
 		if err := w.AddSeries(uint64(sc.ID), pairs, sc.Chunks); err != nil {
 			_ = w.Abort()
-			return fmt.Errorf("blockstore: add series: %w", err)
+			return false, fmt.Errorf("blockstore: add series: %w", err)
 		}
 	}
 
 	meta, err := w.Commit()
 	if err != nil {
 		_ = w.Abort()
-		return fmt.Errorf("blockstore: commit block: %w", err)
+		return false, fmt.Errorf("blockstore: commit block: %w", err)
 	}
 
 	// Re-open the committed block as a reader using the block ID from Commit.
 	newReader, err := block.OpenReader(filepath.Join(bs.blockDir, meta.BlockID))
 	if err != nil {
-		return fmt.Errorf("blockstore: open new block %s: %w", meta.BlockID, err)
+		return false, fmt.Errorf("blockstore: open new block %s: %w", meta.BlockID, err)
 	}
 
-	// Remove sealed chunks from memory and register the new reader.
-	// Safety: sealed chunks are immutable after sealing. Any concurrent Append
-	// that arrived during the block write lands on the existing unsealed head
-	// chunk or a newly allocated one — never on a chunk that was sealed at
-	// snapshot time. DiscardSealedChunks therefore removes only the committed
-	// chunks without touching in-flight appends.
-	bs.mem.DiscardSealedChunks()
+	// Remove only the snapshotted sealed chunks from memory and register the new
+	// reader. Passing the snapshot ensures chunks that sealed after the snapshot
+	// was taken (concurrent Append racing with the block write) are retained.
+	bs.mem.DiscardSealedChunks(snapshot)
 	bs.mu.Lock()
 	bs.blocks = append(bs.blocks, newReader)
 	bs.mu.Unlock()
 
-	return nil
+	return true, nil
 }
 
 // Close releases file descriptors held by all loaded block readers.
