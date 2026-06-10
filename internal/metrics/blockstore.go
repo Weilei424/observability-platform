@@ -83,6 +83,19 @@ func (bs *BlockStore) Append(labels Labels, tsMs int64, val float64) error {
 	return bs.mem.Append(labels, tsMs, val)
 }
 
+// AppendTracked is like Append but records walSeg in the head-chunk fence.
+// Called from WALStore.Append so that FlushBlock can compute a safe WAL
+// deletion boundary via OldestHeadSegment.
+func (bs *BlockStore) AppendTracked(labels Labels, tsMs int64, val float64, walSeg int) error {
+	return bs.mem.AppendTracked(labels, tsMs, val, walSeg)
+}
+
+// OldestHeadSegment returns the WAL-segment floor across all in-memory head
+// chunks. Returns -1 when no series has chunks.
+func (bs *BlockStore) OldestHeadSegment() int {
+	return bs.mem.OldestHeadSegment()
+}
+
 // SelectSeries returns all series matching sel from memory and all loaded blocks.
 // Results are deduplicated by series fingerprint.
 func (bs *BlockStore) SelectSeries(sel Selector) []MatchedSeries {
