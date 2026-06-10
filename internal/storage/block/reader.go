@@ -38,6 +38,7 @@ type Reader struct {
 	entries    []SeriesEntry
 	mu         sync.Mutex
 	chunksFile *os.File
+	closed     bool
 }
 
 // OpenReader loads meta.json and the index from blockDir.
@@ -66,21 +67,25 @@ func (r *Reader) Meta() Meta { return r.meta }
 func (r *Reader) Series() []SeriesEntry { return r.entries }
 
 // ReadChunk reads and validates the chunk at ref. Opens the chunks file on
-// first call; the file remains open until Close.
+// first call; the file remains open until Close. The mutex is held for the
+// full call so that Close cannot close the descriptor while ReadAt is in
+// progress and no new open can happen after Close.
 func (r *Reader) ReadChunk(ref ChunkRef) (*chunk.Chunk, error) {
 	if ref.Length == 0 {
 		return nil, fmt.Errorf("block: chunk ref at offset %d has zero length", ref.Offset)
 	}
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return nil, fmt.Errorf("block: reader is closed")
+	}
 	if r.chunksFile == nil {
 		f, err := os.Open(filepath.Join(r.dir, "chunks"))
 		if err != nil {
-			r.mu.Unlock()
 			return nil, fmt.Errorf("block: open chunks file: %w", err)
 		}
 		r.chunksFile = f
 	}
-	r.mu.Unlock()
 	buf := make([]byte, ref.Length)
 	if _, err := r.chunksFile.ReadAt(buf, ref.Offset); err != nil {
 		return nil, fmt.Errorf("block: read chunk at offset %d: %w", ref.Offset, err)
@@ -88,10 +93,11 @@ func (r *Reader) ReadChunk(ref ChunkRef) (*chunk.Chunk, error) {
 	return chunk.FromBytes(buf)
 }
 
-// Close closes the chunks file if it was opened.
+// Close marks the reader as closed and closes the chunks file if it was opened.
 func (r *Reader) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.closed = true
 	if r.chunksFile != nil {
 		return r.chunksFile.Close()
 	}
