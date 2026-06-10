@@ -20,6 +20,18 @@ type WALStore struct {
 	dataDir  string
 	walDir   string
 	appendMu sync.Mutex // serializes WAL-write+AppendTracked with FlushBlock's checkpoint calculation
+
+	// testBeforeCheckpoint, if non-nil, is called after block I/O completes but
+	// just before appendMu is acquired for checkpoint sampling. Used only in
+	// tests to synchronize the WriteRecord→AppendTracked race window.
+	testBeforeCheckpoint func()
+}
+
+// SetTestBeforeCheckpoint installs a hook that fires at the start of the
+// checkpoint phase in FlushBlock, after block I/O but before appendMu is
+// acquired. Must not be called after concurrent use begins. Tests only.
+func (s *WALStore) SetTestBeforeCheckpoint(fn func()) {
+	s.testBeforeCheckpoint = fn
 }
 
 var _ Store = (*WALStore)(nil)
@@ -74,6 +86,10 @@ func (s *WALStore) FlushBlock() error {
 	}
 	if !wrote {
 		return nil
+	}
+
+	if s.testBeforeCheckpoint != nil {
+		s.testBeforeCheckpoint()
 	}
 
 	// Hold appendMu while computing the checkpoint boundary so no Append can land
