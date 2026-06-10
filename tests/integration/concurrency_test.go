@@ -93,13 +93,15 @@ func TestFlushQuery_NoVisibilityGap(t *testing.T) {
 					return
 				default:
 				}
-				got, err := bs.QueryRange(id, 0, math.MaxInt64)
+				// Query only the seeded range. Later re-ingested samples start at
+				// chunkSize*1000 and must not mask a gap in the original 0..119 set.
+				got, err := bs.QueryRange(id, 0, int64((chunkSize-1)*1000))
 				if err != nil {
 					t.Errorf("QueryRange error: %v", err)
 					return
 				}
-				if len(got) == 0 {
-					t.Errorf("QueryRange returned 0 samples during concurrent flush — visibility gap detected")
+				if len(got) != chunkSize {
+					t.Errorf("QueryRange returned %d samples for seeded range, want %d — visibility gap detected", len(got), chunkSize)
 					return
 				}
 			}
@@ -167,12 +169,11 @@ func TestAppendFlush_AcknowledgedSamplesSurvive(t *testing.T) {
 		mu.Unlock()
 	}
 
-	var wg sync.WaitGroup
-
+	var appendWg sync.WaitGroup
 	for i := 0; i < appendWorkers; i++ {
-		wg.Add(1)
+		appendWg.Add(1)
 		go func(workerID int) {
-			defer wg.Done()
+			defer appendWg.Done()
 			for j := 0; j < samplesPerWorker; j++ {
 				ts := int64(workerID*samplesPerWorker + j)
 				val := float64(ts)
@@ -185,19 +186,30 @@ func TestAppendFlush_AcknowledgedSamplesSurvive(t *testing.T) {
 		}(i)
 	}
 
-	// Flush goroutine runs concurrently with all appends. Errors are propagated
-	// so a broken FlushBlock implementation is caught immediately.
-	wg.Add(1)
+	// Flush goroutine: loops continuously until all append workers are done.
+	// This guarantees overlap between FlushBlock's checkpoint calculation and
+	// concurrent appends throughout the whole append phase, not just in a fixed
+	// window that might complete before appends generate sealed chunks.
+	appendsDone := make(chan struct{})
+	var flushWg sync.WaitGroup
+	flushWg.Add(1)
 	go func() {
-		defer wg.Done()
-		for i := 0; i < 40; i++ {
+		defer flushWg.Done()
+		for {
 			if err := store.FlushBlock(); err != nil {
-				t.Errorf("FlushBlock iteration %d: %v", i, err)
+				t.Errorf("FlushBlock: %v", err)
+			}
+			select {
+			case <-appendsDone:
+				return
+			default:
 			}
 		}
 	}()
 
-	wg.Wait()
+	appendWg.Wait()
+	close(appendsDone)
+	flushWg.Wait()
 	if err := w1.Close(); err != nil {
 		t.Fatalf("Close WAL: %v", err)
 	}
@@ -218,6 +230,13 @@ func TestAppendFlush_AcknowledgedSamplesSurvive(t *testing.T) {
 	}
 	if blockCount == 0 {
 		t.Fatalf("no blocks written — FlushBlock never committed a chunk; checkpoint-deletion race was not exercised")
+	}
+	// A written checkpoint means WAL segments were actually deleted. Survival of
+	// acknowledged samples then depends on the block, not WAL replay — which is
+	// exactly the path the appendMu invariant protects.
+	checkpointPath := filepath.Join(dir, "metrics", "checkpoint")
+	if _, err := os.Stat(checkpointPath); os.IsNotExist(err) {
+		t.Fatal("checkpoint file never written — no WAL segments were deleted; appendMu invariant was not on the critical path")
 	}
 
 	// Simulate restart: load persisted blocks then replay remaining WAL segments.
