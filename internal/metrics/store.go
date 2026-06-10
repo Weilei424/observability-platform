@@ -14,7 +14,7 @@ type Ingester interface {
 
 // Querier retrieves metric samples from storage.
 type Querier interface {
-	QueryRange(id SeriesID, startMs, endMs int64) []Sample
+	QueryRange(id SeriesID, startMs, endMs int64) ([]Sample, error)
 }
 
 // Store combines write and read access to metric storage.
@@ -101,15 +101,15 @@ func (s *MemoryStore) SelectSeries(sel Selector) []MatchedSeries {
 }
 
 // QueryInstant returns the latest sample with TimestampMs <= tMs for the given series.
-// Returns (Sample{}, false) if the series does not exist or has no sample at or before tMs.
+// Returns (Sample{}, false, nil) if the series does not exist or has no sample at or before tMs.
 // For equal timestamps, the sample written last (last-write-wins) is returned.
-func (s *MemoryStore) QueryInstant(id SeriesID, tMs int64) (Sample, bool) {
+func (s *MemoryStore) QueryInstant(id SeriesID, tMs int64) (Sample, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	ms, ok := s.series[id]
 	if !ok {
-		return Sample{}, false
+		return Sample{}, false, nil
 	}
 
 	var best Sample
@@ -130,26 +130,21 @@ func (s *MemoryStore) QueryInstant(id SeriesID, tMs int64) (Sample, bool) {
 				found = true
 			}
 		}
-		if it.Err() != nil {
-			// In Phase 3.1 this cannot happen (in-memory buffers are always valid).
-			// Once chunks are disk-backed (Phase 3.2), callers should inspect this.
-			_ = it.Err()
-		}
 	}
-	return best, found
+	return best, found, nil
 }
 
 // QueryRange returns samples for series id where startMs <= TimestampMs <= endMs.
 // Results are sorted by timestamp. For duplicate timestamps, the last-written value is kept.
 // Returns a non-nil empty slice for a known series with no samples in range.
-// Returns nil for an unknown series.
-func (s *MemoryStore) QueryRange(id SeriesID, startMs, endMs int64) []Sample {
+// Returns nil, nil for an unknown series.
+func (s *MemoryStore) QueryRange(id SeriesID, startMs, endMs int64) ([]Sample, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	ms, ok := s.series[id]
 	if !ok {
-		return nil
+		return nil, nil
 	}
 
 	result := make([]Sample, 0)
@@ -163,9 +158,6 @@ func (s *MemoryStore) QueryRange(id SeriesID, startMs, endMs int64) []Sample {
 			if ts >= startMs && ts <= endMs {
 				result = append(result, Sample{SeriesID: id, TimestampMs: ts, Value: val})
 			}
-		}
-		if it.Err() != nil {
-			_ = it.Err()
 		}
 	}
 
@@ -189,7 +181,7 @@ func (s *MemoryStore) QueryRange(id SeriesID, startMs, endMs int64) []Sample {
 		result = deduped
 	}
 
-	return result
+	return result, nil
 }
 
 // ChunkCount returns the number of chunks allocated for the given series.
@@ -237,20 +229,27 @@ func (s *MemoryStore) SealedChunksSnapshot() []SeriesChunks {
 	return result
 }
 
-// DiscardSealedChunks removes all sealed chunks from every series, retaining
-// only the unsealed head chunk. Call this only after sealed chunks have been
-// safely written to a block.
-func (s *MemoryStore) DiscardSealedChunks() {
+// DiscardSealedChunks removes exactly the chunks listed in toDiscard from their
+// respective series. Only chunks pointer-equal to those in the snapshot are
+// removed, so any chunk that sealed after the snapshot was taken is preserved.
+// Call this only after the listed chunks have been safely written to a block.
+func (s *MemoryStore) DiscardSealedChunks(toDiscard []SeriesChunks) {
+	remove := make(map[*chunk.Chunk]struct{})
+	for _, sc := range toDiscard {
+		for _, c := range sc.Chunks {
+			remove[c] = struct{}{}
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id, ms := range s.series {
-		var head []*chunk.Chunk
+		var keep []*chunk.Chunk
 		for _, c := range ms.chunks {
-			if !c.Sealed() {
-				head = append(head, c)
+			if _, discard := remove[c]; !discard {
+				keep = append(keep, c)
 			}
 		}
-		ms.chunks = head
+		ms.chunks = keep
 		s.series[id] = ms
 	}
 }
