@@ -1,6 +1,7 @@
 package integration_test
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -231,12 +232,24 @@ func TestAppendFlush_AcknowledgedSamplesSurvive(t *testing.T) {
 	if blockCount == 0 {
 		t.Fatalf("no blocks written — FlushBlock never committed a chunk; checkpoint-deletion race was not exercised")
 	}
-	// A written checkpoint means WAL segments were actually deleted. Survival of
-	// acknowledged samples then depends on the block, not WAL replay — which is
-	// exactly the path the appendMu invariant protects.
+	// Read the checkpoint value and verify that each covered WAL segment was
+	// actually deleted. os.Stat alone only proves the file exists; we need
+	// concrete evidence that WAL segments were removed so that acknowledged
+	// sample survival depends on the block, not WAL replay.
 	checkpointPath := filepath.Join(dir, "metrics", "checkpoint")
-	if _, err := os.Stat(checkpointPath); os.IsNotExist(err) {
+	if _, statErr := os.Stat(checkpointPath); os.IsNotExist(statErr) {
 		t.Fatal("checkpoint file never written — no WAL segments were deleted; appendMu invariant was not on the critical path")
+	}
+	checkpointVal := metrics.ReadCheckpoint(dir)
+	if checkpointVal < 0 {
+		t.Fatalf("checkpoint value %d means no WAL segments were deleted; appendMu invariant was not on the critical path", checkpointVal)
+	}
+	for seg := 0; seg <= checkpointVal; seg++ {
+		segPath := filepath.Join(walDir, fmt.Sprintf("%d.wal", seg))
+		if _, statErr := os.Stat(segPath); !os.IsNotExist(statErr) {
+			t.Errorf("WAL segment %d.wal should have been deleted (checkpoint=%d) but still exists", seg, checkpointVal)
+			break
+		}
 	}
 
 	// Simulate restart: load persisted blocks then replay remaining WAL segments.
@@ -273,5 +286,134 @@ func TestAppendFlush_AcknowledgedSamplesSurvive(t *testing.T) {
 	}
 	if missing > 5 {
 		t.Errorf("... and %d more missing samples (total missing: %d)", missing-5, missing)
+	}
+}
+
+// pausingWriter wraps a WAL RecordWriter and pauses inside WriteRecord after the
+// bytes have been committed but before returning. This creates the exact window
+// the appendMu invariant protects: WAL record on disk, headSeg not yet updated.
+type pausingWriter struct {
+	inner     wal.RecordWriter
+	afterDone chan struct{} // closed when WriteRecord finishes (before pause)
+	resume    chan struct{} // closed by the test to release the pause
+}
+
+func (p *pausingWriter) WriteRecord(pairs []wal.LabelPair, tsMs int64, val float64) error {
+	err := p.inner.WriteRecord(pairs, tsMs, val)
+	close(p.afterDone) // WAL bytes on disk; AppendTracked has not been called yet
+	<-p.resume         // hold the appendMu window open while the test probes FlushBlock
+	return err
+}
+
+func (p *pausingWriter) SegmentIndex() int { return p.inner.SegmentIndex() }
+
+// TestAppendMu_FlushBlockWaitsForInFlightAppend is a deterministic regression
+// test for the appendMu invariant. It forces the exact interleaving that was
+// previously a race condition:
+//
+//  1. Append goroutine writes to WAL (holding appendMu) then pauses before
+//     calling AppendTracked — WAL record is on disk, headSeg is not updated.
+//  2. FlushBlock goroutine completes its block write then tries to acquire
+//     appendMu for OldestHeadSegment+SegmentIndex sampling. It must block.
+//  3. Test asserts FlushBlock has not finished after 50ms (it is blocked).
+//  4. Append is released: AppendTracked sets headSeg, appendMu released.
+//  5. FlushBlock samples the correct fence and writes a checkpoint that
+//     preserves the segment containing the in-flight sample.
+//  6. Restart confirms the sample survives.
+//
+// Without appendMu, step 2 would observe OldestHeadSegment=-1 and compute
+// safeDelete = SegmentIndex()-1, potentially deleting the segment from step 1.
+func TestAppendMu_FlushBlockWaitsForInFlightAppend(t *testing.T) {
+	dir := t.TempDir()
+	walDir := filepath.Join(dir, "metrics", "wal")
+	if err := os.MkdirAll(walDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// 1 KiB segments ensure rotation during seed so safeDelete ≥ 0 and at
+	// least one segment is deleted, making sample survival depend on the block.
+	w, err := wal.Open(walDir, 1<<10, 1)
+	if err != nil {
+		t.Fatalf("wal.Open: %v", err)
+	}
+
+	bs, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+
+	// Seed 120 samples via a plain WALStore so FlushBlock has a sealed chunk to commit.
+	seedStore := metrics.NewWALStore(w, bs, dir)
+	labels, _ := metrics.NewLabels(map[string]string{"__name__": "mutex_probe"})
+	for i := 0; i < 120; i++ {
+		if err := seedStore.Append(labels, int64(i), float64(i)); err != nil {
+			t.Fatalf("seed Append %d: %v", i, err)
+		}
+	}
+
+	// Wire up the pausingWriter for the single controlled Append (ts=120).
+	afterWriteDone := make(chan struct{})
+	resume := make(chan struct{})
+	pw := &pausingWriter{inner: w, afterDone: afterWriteDone, resume: resume}
+	store := metrics.NewWALStore(pw, bs, dir)
+
+	// Goroutine A: Append ts=120. Pauses inside WriteRecord holding appendMu.
+	appendDone := make(chan error, 1)
+	go func() {
+		appendDone <- store.Append(labels, 120, 120.0)
+	}()
+
+	// Wait for WAL write to complete (AppendTracked has NOT been called yet).
+	select {
+	case <-afterWriteDone:
+	case <-time.After(5 * time.Second):
+		close(resume)
+		t.Fatal("append goroutine never reached WriteRecord pause point")
+	}
+
+	// Goroutine B: FlushBlock. Must block on appendMu after writing the block.
+	flushDone := make(chan error, 1)
+	go func() {
+		flushDone <- store.FlushBlock()
+	}()
+
+	select {
+	case err := <-flushDone:
+		// FlushBlock must NOT finish here — it must be blocked on appendMu.
+		t.Errorf("FlushBlock completed while Append held appendMu (invariant broken): %v", err)
+		close(resume)
+		return
+	case <-time.After(50 * time.Millisecond):
+		// Expected: FlushBlock is waiting for appendMu.
+	}
+
+	// Release Goroutine A: AppendTracked sets headSeg, then appendMu is released.
+	close(resume)
+
+	if err := <-appendDone; err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if err := <-flushDone; err != nil {
+		t.Fatalf("FlushBlock: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close WAL: %v", err)
+	}
+
+	// Simulate restart: the checkpoint must have preserved the segment holding
+	// ts=120 (safeDelete = headFence-1 < segment of ts=120).
+	bs2, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("NewBlockStore restart: %v", err)
+	}
+	checkpoint := metrics.ReadCheckpoint(dir)
+	replayInto(t, walDir, checkpoint, bs2)
+
+	got, err := bs2.QueryRange(labels.Fingerprint(), 120, 120)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("in-flight sample ts=120 missing after restart: got %d samples, want 1 — appendMu did not preserve its WAL segment", len(got))
 	}
 }
