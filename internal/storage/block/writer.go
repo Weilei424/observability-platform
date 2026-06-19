@@ -200,7 +200,10 @@ func (w *Writer) writeChunksAndIndex() error {
 	if err := os.WriteFile(indexPath, idx.Bytes(), 0o644); err != nil {
 		return fmt.Errorf("block: write index: %w", err)
 	}
-	return syncPath(indexPath)
+	if err := syncPath(indexPath); err != nil {
+		return err
+	}
+	return writePostings(w.workDir, w.series)
 }
 
 func encodeLabelSet(pairs []LabelPair) []byte {
