@@ -2,6 +2,7 @@ package metrics_test
 
 import (
 	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/masonwheeler/observability-platform/internal/metrics"
@@ -197,5 +198,47 @@ func TestWALStore_ReplayRestoresSeries(t *testing.T) {
 	}
 	if len(got) != 3 {
 		t.Fatalf("QueryRange returned %d samples after replay, want 3", len(got))
+	}
+}
+
+func TestLabelIndex_IngestFlushRestartQuery(t *testing.T) {
+	dir := t.TempDir()
+	walDir := filepath.Join(dir, "metrics", "wal")
+
+	bs1, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+	w1, err := wal.Open(walDir, 1<<20, 1)
+	if err != nil {
+		t.Fatalf("wal.Open: %v", err)
+	}
+	s1 := metrics.NewWALStore(w1, bs1, dir)
+
+	apiLabels := mustLabels(t, map[string]string{"__name__": "http", "job": "api"})
+	for i := int64(0); i < 130; i++ {
+		if err := s1.Append(apiLabels, 1000+i, float64(i)); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	if err := s1.FlushBlock(); err != nil {
+		t.Fatalf("FlushBlock: %v", err)
+	}
+	_ = bs1.Close()
+
+	// Reopen from the same dataDir.
+	bs2, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("reopen NewBlockStore: %v", err)
+	}
+	defer bs2.Close()
+	e := metrics.NewQueryEngine(bs2)
+
+	got := e.Series([]metrics.Selector{{MetricName: "http", Matchers: []metrics.Matcher{{Name: "job", Value: "api"}}}})
+	if len(got) != 1 {
+		t.Fatalf("after restart Series matched %d, want 1", len(got))
+	}
+	if names := e.LabelNames(); len(names) != 2 { // __name__, job
+		t.Fatalf("after restart LabelNames = %v, want [__name__ job]", names)
 	}
 }
