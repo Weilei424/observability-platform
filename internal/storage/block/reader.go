@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/masonwheeler/observability-platform/internal/storage/chunk"
+	"github.com/masonwheeler/observability-platform/internal/storage/index"
 )
 
 // LabelPair is a name/value label stored in the block index.
@@ -36,6 +37,7 @@ type Reader struct {
 	dir        string
 	meta       Meta
 	entries    []SeriesEntry
+	postings   blockPostings
 	mu         sync.Mutex
 	chunksFile *os.File
 	closed     bool
@@ -57,7 +59,11 @@ func OpenReader(blockDir string) (*Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Reader{dir: blockDir, meta: meta, entries: entries}, nil
+	postings, err := loadPostings(blockDir, entries)
+	if err != nil {
+		return nil, err
+	}
+	return &Reader{dir: blockDir, meta: meta, entries: entries, postings: postings}, nil
 }
 
 // Meta returns the block metadata.
@@ -65,6 +71,18 @@ func (r *Reader) Meta() Meta { return r.meta }
 
 // Series returns all series entries loaded from the index.
 func (r *Reader) Series() []SeriesEntry { return r.entries }
+
+// Postings returns the sorted series IDs in this block matching all matchers
+// (AND). Empty matchers return every series in the block.
+func (r *Reader) Postings(matchers []index.Pair) ([]uint64, error) {
+	return r.postings.Select(matchers)
+}
+
+// LabelNames returns the sorted label names present in this block.
+func (r *Reader) LabelNames() []string { return r.postings.LabelNames() }
+
+// LabelValues returns the sorted values for name present in this block.
+func (r *Reader) LabelValues(name string) []string { return r.postings.LabelValues(name) }
 
 // ReadChunk reads and validates the chunk at ref. Opens the chunks file on
 // first call; the file remains open until Close. The mutex is held for the
@@ -98,10 +116,18 @@ func (r *Reader) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.closed = true
+	var firstErr error
 	if r.chunksFile != nil {
-		return r.chunksFile.Close()
+		if err := r.chunksFile.Close(); err != nil {
+			firstErr = err
+		}
 	}
-	return nil
+	if r.postings != nil {
+		if err := r.postings.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // readIndex parses the binary index file and returns all series entries.
