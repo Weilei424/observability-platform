@@ -73,6 +73,9 @@ func (s *WALStore) QueryRange(id SeriesID, startMs, endMs int64) ([]Sample, erro
 	return s.store.QueryRange(id, startMs, endMs)
 }
 
+func (s *WALStore) LabelNames() []string          { return s.store.LabelNames() }
+func (s *WALStore) LabelValues(n string) []string { return s.store.LabelValues(n) }
+
 // FlushBlock flushes sealed chunks to a new immutable block and advances the WAL
 // checkpoint. The safe deletion boundary is determined by OldestHeadSegment: the
 // oldest WAL segment that contains samples for any current head chunk. Segments
