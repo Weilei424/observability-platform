@@ -214,15 +214,16 @@
 - [x] Integration test: ingest → `WalStore.FlushBlock` → new `WalStore` from same dataDir → `QueryRange` returns all flushed samples (`TestBlockPersistence_IngestFlushRestartQuery`)
 
 ### Phase 3.3 — Label Index
-- [ ] Implement metric name → series IDs index
-- [ ] Implement label name → label values index
-- [ ] Implement label pair → series IDs index
-- [ ] Implement series ID → chunk references index
-- [ ] Persist index in block storage
-- [ ] Use index in query planner
-- [ ] Unit tests: index build/load
-- [ ] Integration test: indexed label query
-- [ ] Benchmark: indexed lookup vs full scan
+Design: `docs/superpowers/specs/2026-06-18-phase-3.3-label-index-design.md` · Plan: `docs/superpowers/plans/2026-06-18-phase-3.3-label-index.md`
+- [x] Create `internal/storage/index` package — `MemPostings` (sorted postings, `Add`, `Postings`, intersection-based `Select`) covering metric name → series IDs and label pair → series IDs
+- [x] Extend `MemPostings` — `Delete`, `LabelNames`/`LabelValues` (label name → values), cardinality accessors (`SeriesCount`/`LabelNameCount`/`LabelPairCount`)
+- [x] Integrate index into `MemoryStore` — index series on first append; back `SelectSeries` with `Select`; add `LabelNames`/`LabelValues`/`Cardinality`
+- [x] Persist per-block postings — new `postings` file (magic+version, postings lists + **offset table** + footer) written in `block.Writer.Commit`; `block.Reader` seeks individual lists via `ReadAt` (allRefs sentinel for empty matchers), with in-memory rebuild fallback for pre-existing blocks; add `Reader.Postings`/`LabelNames`/`LabelValues` (series ID → chunk refs stays in the existing forward index)
+- [x] Use index in query planner — `BlockStore.SelectSeries`/`LabelNames`/`LabelValues` via head index + block postings; `BlockStore.Cardinality` snapshot; `QueryEngine` metadata delegates to store (extend `queryStore`; add `WALStore` delegation)
+- [x] Add Prometheus `/metrics` endpoint — `prometheus/client_golang` dep; `internal/observability/metrics.go` registry + pull-model cardinality collector (`obs_active_series`, `obs_label_names_total`, `obs_label_pairs_total`); wire `Server.New`, router, `cmd/server/main.go`
+- [x] Unit tests: index build/load (`index` package, block postings round-trip + rebuild fallback)
+- [x] Integration test: indexed label query (ingest → indexed `SelectSeries`/metadata; ingest → flush → restart → indexed query; `/metrics` scrape)
+- [x] Benchmark: indexed lookup vs full scan (`internal/metrics/index_bench_test.go`) + index/scan agreement guard test
 
 ### Phase 3.4 — Compaction and Retention
 - [ ] Implement automatic flush trigger (background goroutine; flush when WAL exceeds size threshold or sealed chunks exceed age/count threshold)
