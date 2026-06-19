@@ -87,7 +87,8 @@ func main() {
 
 	store := metrics.NewWALStore(w, blockStore, cfg.DataDir)
 	engine := metrics.NewQueryEngine(blockStore)
-	srv := api.New(cfg, log, store, engine)
+	reg := observability.NewRegistry(blockStore)
+	srv := api.New(cfg, log, store, engine, reg)
 
 	log.Info("starting server",
 		slog.String("addr", cfg.HTTPAddr),
