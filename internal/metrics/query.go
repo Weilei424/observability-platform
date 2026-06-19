@@ -6,11 +6,13 @@ import (
 )
 
 // queryStore is the read interface QueryEngine depends on.
-// Both *MemoryStore and *BlockStore implement it.
+// *MemoryStore, *BlockStore, and *WALStore all implement it.
 type queryStore interface {
 	SelectSeries(sel Selector) []MatchedSeries
 	QueryInstant(id SeriesID, tMs int64) (Sample, bool, error)
 	QueryRange(id SeriesID, startMs, endMs int64) ([]Sample, error)
+	LabelNames() []string
+	LabelValues(name string) []string
 }
 
 // QueryEngine executes instant and range queries over a queryStore.
@@ -101,41 +103,23 @@ func (e *QueryEngine) RangeQuery(sel Selector, startMs, endMs, stepMs int64) ([]
 	return result, nil
 }
 
-// LabelNames returns a sorted, deduplicated list of all label names present
-// across all series in the store. Returns a non-nil empty slice when no series
-// exist.
+// LabelNames returns a sorted, deduplicated list of all label names, served by
+// the store's label index. Always returns a non-nil slice.
 func (e *QueryEngine) LabelNames() []string {
-	all := e.store.SelectSeries(Selector{})
-	seen := make(map[string]struct{})
-	for _, ms := range all {
-		for name := range ms.Labels.Map() {
-			seen[name] = struct{}{}
-		}
+	names := e.store.LabelNames()
+	if names == nil {
+		return []string{}
 	}
-	names := make([]string, 0, len(seen))
-	for name := range seen {
-		names = append(names, name)
-	}
-	sort.Strings(names)
 	return names
 }
 
-// LabelValues returns a sorted, deduplicated list of all values for the given
-// label name across all series. Returns a non-nil empty slice when the label
-// name is not present in any series.
+// LabelValues returns a sorted, deduplicated list of all values for name,
+// served by the store's label index. Always returns a non-nil slice.
 func (e *QueryEngine) LabelValues(name string) []string {
-	all := e.store.SelectSeries(Selector{})
-	seen := make(map[string]struct{})
-	for _, ms := range all {
-		if val, ok := ms.Labels.Get(name); ok {
-			seen[val] = struct{}{}
-		}
+	values := e.store.LabelValues(name)
+	if values == nil {
+		return []string{}
 	}
-	values := make([]string, 0, len(seen))
-	for val := range seen {
-		values = append(values, val)
-	}
-	sort.Strings(values)
 	return values
 }
 
