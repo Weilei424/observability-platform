@@ -12,6 +12,7 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/api"
 	"github.com/masonwheeler/observability-platform/internal/config"
 	"github.com/masonwheeler/observability-platform/internal/metrics"
+	"github.com/masonwheeler/observability-platform/internal/observability"
 )
 
 func newQueryTestServer(t *testing.T) (*api.Server, *metrics.MemoryStore) {
@@ -24,7 +25,8 @@ func newQueryTestServer(t *testing.T) (*api.Server, *metrics.MemoryStore) {
 		LogLevel: "info",
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	return api.New(cfg, log, store, engine), store
+	reg := observability.NewRegistry(store)
+	return api.New(cfg, log, store, engine, reg), store
 }
 
 func getQuery(t *testing.T, srv *api.Server, path string) *httptest.ResponseRecorder {

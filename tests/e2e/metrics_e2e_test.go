@@ -14,6 +14,7 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/api"
 	"github.com/masonwheeler/observability-platform/internal/config"
 	"github.com/masonwheeler/observability-platform/internal/metrics"
+	"github.com/masonwheeler/observability-platform/internal/observability"
 	"github.com/masonwheeler/observability-platform/internal/storage/wal"
 )
 
@@ -54,7 +55,8 @@ func newTestServer(t *testing.T, dataDir, walDir string) (*api.Server, *wal.WAL)
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	store := metrics.NewWALStore(w, blockStore, dataDir)
 	engine := metrics.NewQueryEngine(blockStore)
-	return api.New(cfg, log, store, engine), w
+	reg := observability.NewRegistry(blockStore)
+	return api.New(cfg, log, store, engine, reg), w
 }
 
 // ingestSamples POSTs a batch to /api/v1/ingest/metrics and fails the test on
