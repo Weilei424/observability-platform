@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/masonwheeler/observability-platform/internal/storage/chunk"
+	"github.com/masonwheeler/observability-platform/internal/storage/index"
 )
 
 // Ingester accepts metric samples for storage.
@@ -34,11 +35,15 @@ type memorySeries struct {
 type MemoryStore struct {
 	mu     sync.RWMutex
 	series map[SeriesID]*memorySeries
+	idx    *index.MemPostings
 }
 
 // NewMemoryStore returns an empty MemoryStore.
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{series: make(map[SeriesID]*memorySeries)}
+	return &MemoryStore{
+		series: make(map[SeriesID]*memorySeries),
+		idx:    index.NewMemPostings(),
+	}
 }
 
 // Append adds a sample to the series identified by labels.
@@ -65,6 +70,7 @@ func (s *MemoryStore) appendInternal(labels Labels, timestampMs int64, value flo
 	if !ok {
 		ms = &memorySeries{labels: labels}
 		s.series[id] = ms
+		s.idx.Add(uint64(id), labelsToIndexPairs(labels))
 	}
 
 	// Allocate a new head chunk when none exists or the current one is sealed.
@@ -113,36 +119,55 @@ type MatchedSeries struct {
 	Labels Labels
 }
 
-// SelectSeries returns all series that match sel. Matching requires:
-//   - sel.MetricName matches the series __name__ label (skipped when MetricName is "")
-//   - every Matcher in sel.Matchers matches the corresponding label value (AND logic)
-//
-// No label index is used — this is a full scan.
+// SelectSeries returns all series matching sel, resolved through the in-memory
+// label index (postings intersection for equality matchers).
 func (s *MemoryStore) SelectSeries(sel Selector) []MatchedSeries {
+	ids := s.idx.Select(selectorToIndexMatchers(sel))
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	var result []MatchedSeries
-	for id, ms := range s.series {
-		if sel.MetricName != "" {
-			name, _ := ms.labels.Get("__name__")
-			if name != sel.MetricName {
-				continue
-			}
+	result := make([]MatchedSeries, 0, len(ids))
+	for _, id := range ids {
+		ms, ok := s.series[SeriesID(id)]
+		if !ok {
+			continue
 		}
-		match := true
-		for _, m := range sel.Matchers {
-			val, ok := ms.labels.Get(m.Name)
-			if !ok || val != m.Value {
-				match = false
-				break
-			}
-		}
-		if match {
-			result = append(result, MatchedSeries{id: id, Labels: ms.labels})
-		}
+		result = append(result, MatchedSeries{id: SeriesID(id), Labels: ms.labels})
 	}
 	return result
+}
+
+// LabelNames returns all label names present in memory, sorted ascending.
+func (s *MemoryStore) LabelNames() []string { return s.idx.LabelNames() }
+
+// LabelValues returns all values for name present in memory, sorted ascending.
+func (s *MemoryStore) LabelValues(name string) []string { return s.idx.LabelValues(name) }
+
+// Cardinality returns distinct counts of series, label names, and label pairs.
+func (s *MemoryStore) Cardinality() (series, names, pairs int) {
+	return s.idx.SeriesCount(), s.idx.LabelNameCount(), s.idx.LabelPairCount()
+}
+
+func labelsToIndexPairs(l Labels) []index.Pair {
+	m := l.Map()
+	out := make([]index.Pair, 0, len(m))
+	for name, val := range m {
+		out = append(out, index.Pair{Name: name, Value: val})
+	}
+	return out
+}
+
+// selectorToIndexMatchers folds the selector's MetricName into a __name__
+// matcher and appends all equality matchers. An empty selector yields nil,
+// which MemPostings.Select treats as "match all".
+func selectorToIndexMatchers(sel Selector) []index.Pair {
+	var out []index.Pair
+	if sel.MetricName != "" {
+		out = append(out, index.Pair{Name: "__name__", Value: sel.MetricName})
+	}
+	for _, m := range sel.Matchers {
+		out = append(out, index.Pair{Name: m.Name, Value: m.Value})
+	}
+	return out
 }
 
 // QueryInstant returns the latest sample with TimestampMs <= tMs for the given series.
