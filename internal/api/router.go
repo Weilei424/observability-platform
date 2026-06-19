@@ -4,6 +4,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/masonwheeler/observability-platform/internal/api/middleware"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func (s *Server) buildRouter() chi.Router {
@@ -14,6 +15,8 @@ func (s *Server) buildRouter() chi.Router {
 
 	r.Get("/healthz", s.handleHealthz)
 	r.Get("/readyz", s.handleReadyz)
+
+	r.Handle("/metrics", promhttp.HandlerFor(s.reg, promhttp.HandlerOpts{}))
 
 	r.Post("/api/v1/ingest/metrics", s.handleIngestMetrics)
 	r.Get("/api/v1/query", s.handleQuery)
