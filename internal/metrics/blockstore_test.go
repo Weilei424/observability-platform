@@ -148,3 +148,65 @@ func TestBlockStore_SelectSeries_IncludesBlockSeries(t *testing.T) {
 		t.Fatal("SelectSeries on fresh BlockStore returned no series, want series from block")
 	}
 }
+
+func TestBlockStore_SelectSeries_IndexedAcrossBlockAndMemory(t *testing.T) {
+	bs, err := metrics.NewBlockStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+	defer bs.Close()
+
+	// Seal a chunk (>120 samples) for an "http"/"api" series, then flush to a block.
+	apiLabels := mustLabels(t, map[string]string{"__name__": "http", "job": "api"})
+	for i := int64(0); i < 130; i++ {
+		if err := bs.Append(apiLabels, 1000+i, float64(i)); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	if _, err := bs.FlushBlock(); err != nil {
+		t.Fatalf("FlushBlock: %v", err)
+	}
+	// A memory-only series.
+	webLabels := mustLabels(t, map[string]string{"__name__": "http", "job": "web"})
+	if err := bs.Append(webLabels, 2000, 1); err != nil {
+		t.Fatalf("append web: %v", err)
+	}
+
+	got := bs.SelectSeries(metrics.Selector{MetricName: "http"})
+	if len(got) != 2 {
+		t.Fatalf("SelectSeries(http) matched %d, want 2 (block+memory)", len(got))
+	}
+	gotAPI := bs.SelectSeries(metrics.Selector{MetricName: "http", Matchers: []metrics.Matcher{{Name: "job", Value: "api"}}})
+	if len(gotAPI) != 1 {
+		t.Fatalf("SelectSeries(http,job=api) matched %d, want 1", len(gotAPI))
+	}
+}
+
+func TestBlockStore_LabelNamesValues_AcrossBlockAndMemory(t *testing.T) {
+	bs, err := metrics.NewBlockStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+	defer bs.Close()
+
+	l := mustLabels(t, map[string]string{"__name__": "http", "job": "api"})
+	for i := int64(0); i < 130; i++ {
+		_ = bs.Append(l, 1000+i, float64(i))
+	}
+	_, _ = bs.FlushBlock()
+	_ = bs.Append(mustLabels(t, map[string]string{"__name__": "cpu", "host": "h1"}), 2000, 1)
+
+	names := bs.LabelNames()
+	want := map[string]bool{"__name__": true, "job": true, "host": true}
+	if len(names) != 3 {
+		t.Fatalf("LabelNames = %v, want 3 distinct", names)
+	}
+	for _, n := range names {
+		if !want[n] {
+			t.Fatalf("unexpected label name %q in %v", n, names)
+		}
+	}
+	if got := bs.LabelValues("__name__"); len(got) != 2 {
+		t.Fatalf("LabelValues(__name__) = %v, want [cpu http]", got)
+	}
+}
