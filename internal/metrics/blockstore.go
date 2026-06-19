@@ -96,8 +96,9 @@ func (bs *BlockStore) OldestHeadSegment() int {
 	return bs.mem.OldestHeadSegment()
 }
 
-// SelectSeries returns all series matching sel from memory and all loaded blocks.
-// Results are deduplicated by series fingerprint.
+// SelectSeries returns all series matching sel from memory and all loaded
+// blocks, resolved via label-index postings. Results are deduplicated by
+// series fingerprint (memory wins).
 func (bs *BlockStore) SelectSeries(sel Selector) []MatchedSeries {
 	result := bs.mem.SelectSeries(sel)
 	seen := make(map[SeriesID]struct{}, len(result))
@@ -105,12 +106,31 @@ func (bs *BlockStore) SelectSeries(sel Selector) []MatchedSeries {
 		seen[ms.Labels.Fingerprint()] = struct{}{}
 	}
 
+	matchers := selectorToIndexMatchers(sel)
+
 	bs.mu.RLock()
 	readers := bs.blocks
 	bs.mu.RUnlock()
 
 	for _, r := range readers {
+		ids, err := r.Postings(matchers)
+		if err != nil {
+			// Consistent with the existing SelectSeries policy of skipping a
+			// block on a per-series decode error: skip this block's postings
+			// rather than failing the whole (error-free) SelectSeries contract.
+			continue
+		}
+		if len(ids) == 0 {
+			continue
+		}
+		want := make(map[uint64]struct{}, len(ids))
+		for _, id := range ids {
+			want[id] = struct{}{}
+		}
 		for _, se := range r.Series() {
+			if _, ok := want[se.ID]; !ok {
+				continue
+			}
 			labels, err := blockPairsToLabels(se.Labels)
 			if err != nil {
 				continue
@@ -119,14 +139,89 @@ func (bs *BlockStore) SelectSeries(sel Selector) []MatchedSeries {
 			if _, already := seen[fp]; already {
 				continue
 			}
-			if !labelsMatchSelector(labels, sel) {
-				continue
-			}
 			seen[fp] = struct{}{}
 			result = append(result, MatchedSeries{id: SeriesID(se.ID), Labels: labels})
 		}
 	}
 	return result
+}
+
+// LabelNames returns the sorted, deduplicated label names across memory and all
+// loaded blocks.
+func (bs *BlockStore) LabelNames() []string {
+	set := make(map[string]struct{})
+	for _, n := range bs.mem.LabelNames() {
+		set[n] = struct{}{}
+	}
+	bs.mu.RLock()
+	readers := bs.blocks
+	bs.mu.RUnlock()
+	for _, r := range readers {
+		for _, n := range r.LabelNames() {
+			set[n] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for n := range set {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// LabelValues returns the sorted, deduplicated values for name across memory and
+// all loaded blocks.
+func (bs *BlockStore) LabelValues(name string) []string {
+	set := make(map[string]struct{})
+	for _, v := range bs.mem.LabelValues(name) {
+		set[v] = struct{}{}
+	}
+	bs.mu.RLock()
+	readers := bs.blocks
+	bs.mu.RUnlock()
+	for _, r := range readers {
+		for _, v := range r.LabelValues(name) {
+			set[v] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for v := range set {
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Cardinality returns distinct counts of series, label names, and label pairs
+// across memory and all loaded blocks (deduplicated by series fingerprint).
+func (bs *BlockStore) Cardinality() (series, names, pairs int) {
+	seriesSet := make(map[SeriesID]struct{})
+	nameSet := make(map[string]struct{})
+	pairSet := make(map[[2]string]struct{})
+
+	add := func(l Labels, id SeriesID) {
+		seriesSet[id] = struct{}{}
+		for n, v := range l.Map() {
+			nameSet[n] = struct{}{}
+			pairSet[[2]string{n, v}] = struct{}{}
+		}
+	}
+	for _, ms := range bs.mem.SelectSeries(Selector{}) {
+		add(ms.Labels, ms.Labels.Fingerprint())
+	}
+	bs.mu.RLock()
+	readers := bs.blocks
+	bs.mu.RUnlock()
+	for _, r := range readers {
+		for _, se := range r.Series() {
+			labels, err := blockPairsToLabels(se.Labels)
+			if err != nil {
+				continue
+			}
+			add(labels, labels.Fingerprint())
+		}
+	}
+	return len(seriesSet), len(nameSet), len(pairSet)
 }
 
 // QueryInstant returns the latest sample with timestamp ≤ tMs for the given
@@ -376,22 +471,6 @@ func labelsToPairs(l Labels) []block.LabelPair {
 	}
 	sort.Slice(pairs, func(i, j int) bool { return pairs[i].Name < pairs[j].Name })
 	return pairs
-}
-
-func labelsMatchSelector(l Labels, sel Selector) bool {
-	if sel.MetricName != "" {
-		name, _ := l.Get("__name__")
-		if name != sel.MetricName {
-			return false
-		}
-	}
-	for _, m := range sel.Matchers {
-		val, ok := l.Get(m.Name)
-		if !ok || val != m.Value {
-			return false
-		}
-	}
-	return true
 }
 
 // Ensure BlockStore satisfies the Store interface at compile time.
