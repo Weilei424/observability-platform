@@ -378,3 +378,17 @@ func TestQueryEngine_Series_NoMatchingSelector_ReturnsNonNilEmpty(t *testing.T) 
 		t.Errorf("Series() = %v, want []", result)
 	}
 }
+
+func TestQueryEngine_LabelNames_Indexed(t *testing.T) {
+	s := metrics.NewMemoryStore()
+	_ = s.Append(mustLabels(t, map[string]string{"__name__": "http", "job": "api"}), 1, 1)
+	_ = s.Append(mustLabels(t, map[string]string{"__name__": "cpu", "host": "h1"}), 1, 1)
+	e := metrics.NewQueryEngine(s)
+	got := e.LabelNames()
+	if len(got) != 3 { // __name__, host, job
+		t.Fatalf("LabelNames = %v, want 3", got)
+	}
+	if e.LabelValues("__name__")[0] != "cpu" {
+		t.Fatalf("LabelValues(__name__) = %v, want [cpu http]", e.LabelValues("__name__"))
+	}
+}
