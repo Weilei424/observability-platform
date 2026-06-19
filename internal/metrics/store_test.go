@@ -410,3 +410,59 @@ func TestMemoryStore_DuplicateTimestamp_AcrossChunkBoundary(t *testing.T) {
 		t.Errorf("QueryInstant value = %f, want 999.0", s.Value)
 	}
 }
+
+func mustLabels(t *testing.T, m map[string]string) metrics.Labels {
+	t.Helper()
+	l, err := metrics.NewLabels(m)
+	if err != nil {
+		t.Fatalf("NewLabels(%v): %v", m, err)
+	}
+	return l
+}
+
+func TestMemoryStore_SelectSeries_IndexBacked(t *testing.T) {
+	s := metrics.NewMemoryStore()
+	_ = s.Append(mustLabels(t, map[string]string{"__name__": "http", "job": "api"}), 1, 1)
+	_ = s.Append(mustLabels(t, map[string]string{"__name__": "http", "job": "web"}), 1, 1)
+	_ = s.Append(mustLabels(t, map[string]string{"__name__": "cpu", "job": "api"}), 1, 1)
+
+	got := s.SelectSeries(metrics.Selector{MetricName: "http", Matchers: []metrics.Matcher{{Name: "job", Value: "api"}}})
+	if len(got) != 1 {
+		t.Fatalf("SelectSeries matched %d series, want 1", len(got))
+	}
+	if name, _ := got[0].Labels.Get("__name__"); name != "http" {
+		t.Fatalf("matched __name__ = %q, want http", name)
+	}
+}
+
+func TestMemoryStore_SelectSeries_EmptySelectorReturnsAll(t *testing.T) {
+	s := metrics.NewMemoryStore()
+	_ = s.Append(mustLabels(t, map[string]string{"__name__": "http"}), 1, 1)
+	_ = s.Append(mustLabels(t, map[string]string{"__name__": "cpu"}), 1, 1)
+	if got := s.SelectSeries(metrics.Selector{}); len(got) != 2 {
+		t.Fatalf("empty selector matched %d, want 2", len(got))
+	}
+}
+
+func TestMemoryStore_Cardinality(t *testing.T) {
+	s := metrics.NewMemoryStore()
+	_ = s.Append(mustLabels(t, map[string]string{"__name__": "http", "job": "api"}), 1, 1)
+	_ = s.Append(mustLabels(t, map[string]string{"__name__": "http", "job": "web"}), 1, 1)
+	series, names, pairs := s.Cardinality()
+	if series != 2 || names != 2 || pairs != 3 {
+		t.Fatalf("cardinality = (%d,%d,%d), want (2,2,3)", series, names, pairs)
+	}
+}
+
+func TestMemoryStore_LabelNamesAndValues(t *testing.T) {
+	s := metrics.NewMemoryStore()
+	_ = s.Append(mustLabels(t, map[string]string{"__name__": "http", "job": "api"}), 1, 1)
+	_ = s.Append(mustLabels(t, map[string]string{"__name__": "http", "job": "web"}), 1, 1)
+	gotNames := s.LabelNames()
+	if len(gotNames) != 2 || gotNames[0] != "__name__" || gotNames[1] != "job" {
+		t.Fatalf("LabelNames = %v, want [__name__ job]", gotNames)
+	}
+	if got := s.LabelValues("job"); len(got) != 2 || got[0] != "api" || got[1] != "web" {
+		t.Fatalf("LabelValues(job) = %v, want [api web]", got)
+	}
+}
