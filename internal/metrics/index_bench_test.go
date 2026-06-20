@@ -57,7 +57,7 @@ func BenchmarkSelectSeries_Indexed(b *testing.B) {
 	sel := Selector{MetricName: "http_requests_total", Matchers: []Matcher{{Name: "job", Value: "job-7"}}}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = s.SelectSeries(sel)
+		_, _ = s.SelectSeries(sel)
 	}
 }
 
@@ -87,7 +87,7 @@ func TestIndexAndScanAgree(t *testing.T) {
 		}
 	}
 	sel := Selector{MetricName: "http_requests_total", Matchers: []Matcher{{Name: "job", Value: "job-3"}}}
-	indexedResults := s.SelectSeries(sel)
+	indexedResults, _ := s.SelectSeries(sel)
 	fullScanResults := fullScanSelect(s, sel)
 
 	// Extract and sort IDs from indexed results

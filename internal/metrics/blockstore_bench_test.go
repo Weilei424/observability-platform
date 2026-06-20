@@ -62,6 +62,6 @@ func BenchmarkBlockStoreSelectSeries_Persisted(b *testing.B) {
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = bs.SelectSeries(sel)
+		_, _ = bs.SelectSeries(sel)
 	}
 }

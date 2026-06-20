@@ -143,7 +143,7 @@ func TestBlockStore_SelectSeries_IncludesBlockSeries(t *testing.T) {
 	}
 
 	sel := metrics.Selector{MetricName: "disk"}
-	matched := bs2.SelectSeries(sel)
+	matched, _ := bs2.SelectSeries(sel)
 	if len(matched) == 0 {
 		t.Fatal("SelectSeries on fresh BlockStore returned no series, want series from block")
 	}
@@ -172,11 +172,11 @@ func TestBlockStore_SelectSeries_IndexedAcrossBlockAndMemory(t *testing.T) {
 		t.Fatalf("append web: %v", err)
 	}
 
-	got := bs.SelectSeries(metrics.Selector{MetricName: "http"})
+	got, _ := bs.SelectSeries(metrics.Selector{MetricName: "http"})
 	if len(got) != 2 {
 		t.Fatalf("SelectSeries(http) matched %d, want 2 (block+memory)", len(got))
 	}
-	gotAPI := bs.SelectSeries(metrics.Selector{MetricName: "http", Matchers: []metrics.Matcher{{Name: "job", Value: "api"}}})
+	gotAPI, _ := bs.SelectSeries(metrics.Selector{MetricName: "http", Matchers: []metrics.Matcher{{Name: "job", Value: "api"}}})
 	if len(gotAPI) != 1 {
 		t.Fatalf("SelectSeries(http,job=api) matched %d, want 1", len(gotAPI))
 	}

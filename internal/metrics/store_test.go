@@ -172,7 +172,7 @@ func TestMemoryStore_SelectSeries_ByMetricName(t *testing.T) {
 	_ = store.Append(b, 1000, 2.0)
 
 	sel := metrics.Selector{MetricName: "cpu_usage"}
-	got := store.SelectSeries(sel)
+	got, _ := store.SelectSeries(sel)
 	if len(got) != 1 {
 		t.Fatalf("got %d series, want 1", len(got))
 	}
@@ -194,7 +194,7 @@ func TestMemoryStore_SelectSeries_ByLabelMatcher(t *testing.T) {
 		MetricName: "req",
 		Matchers:   []metrics.Matcher{{Name: "service", Value: "api"}},
 	}
-	got := store.SelectSeries(sel)
+	got, _ := store.SelectSeries(sel)
 	if len(got) != 1 {
 		t.Fatalf("got %d series, want 1", len(got))
 	}
@@ -210,7 +210,7 @@ func TestMemoryStore_SelectSeries_NoMatch_ReturnsEmpty(t *testing.T) {
 	_ = store.Append(labels, 1000, 1.0)
 
 	sel := metrics.Selector{MetricName: "nonexistent"}
-	got := store.SelectSeries(sel)
+	got, _ := store.SelectSeries(sel)
 	if len(got) != 0 {
 		t.Errorf("got %d series, want 0", len(got))
 	}
@@ -224,7 +224,7 @@ func TestMemoryStore_SelectSeries_EmptyMetricName_MatchesAll(t *testing.T) {
 	_ = store.Append(b, 1000, 2.0)
 
 	sel := metrics.Selector{}
-	got := store.SelectSeries(sel)
+	got, _ := store.SelectSeries(sel)
 	if len(got) != 2 {
 		t.Errorf("got %d series, want 2", len(got))
 	}
@@ -426,7 +426,7 @@ func TestMemoryStore_SelectSeries_IndexBacked(t *testing.T) {
 	_ = s.Append(mustLabels(t, map[string]string{"__name__": "http", "job": "web"}), 1, 1)
 	_ = s.Append(mustLabels(t, map[string]string{"__name__": "cpu", "job": "api"}), 1, 1)
 
-	got := s.SelectSeries(metrics.Selector{MetricName: "http", Matchers: []metrics.Matcher{{Name: "job", Value: "api"}}})
+	got, _ := s.SelectSeries(metrics.Selector{MetricName: "http", Matchers: []metrics.Matcher{{Name: "job", Value: "api"}}})
 	if len(got) != 1 {
 		t.Fatalf("SelectSeries matched %d series, want 1", len(got))
 	}
@@ -439,7 +439,7 @@ func TestMemoryStore_SelectSeries_EmptySelectorReturnsAll(t *testing.T) {
 	s := metrics.NewMemoryStore()
 	_ = s.Append(mustLabels(t, map[string]string{"__name__": "http"}), 1, 1)
 	_ = s.Append(mustLabels(t, map[string]string{"__name__": "cpu"}), 1, 1)
-	if got := s.SelectSeries(metrics.Selector{}); len(got) != 2 {
+	if got, _ := s.SelectSeries(metrics.Selector{}); len(got) != 2 {
 		t.Fatalf("empty selector matched %d, want 2", len(got))
 	}
 }
