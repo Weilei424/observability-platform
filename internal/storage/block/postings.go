@@ -114,7 +114,11 @@ func loadPostings(dir string, entries []SeriesEntry) (blockPostings, error) {
 	if err != nil {
 		return nil, fmt.Errorf("block: open postings: %w", err)
 	}
-	fp, err := newFilePostings(f)
+	validIDs := make(map[uint64]struct{}, len(entries))
+	for _, se := range entries {
+		validIDs[se.ID] = struct{}{}
+	}
+	fp, err := newFilePostings(f, validIDs)
 	if err != nil {
 		f.Close()
 		return nil, err
@@ -158,7 +162,7 @@ type filePostings struct {
 	values   map[string][]string         // name -> sorted values, excluding sentinel
 }
 
-func newFilePostings(f *os.File) (*filePostings, error) {
+func newFilePostings(f *os.File, validIDs map[uint64]struct{}) (*filePostings, error) {
 	st, err := f.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("block: stat postings: %w", err)
@@ -261,42 +265,77 @@ func newFilePostings(f *os.File) (*filePostings, error) {
 	for _, vs := range fp.values {
 		sort.Strings(vs)
 	}
-	if err := fp.validateLists(); err != nil {
+	if err := fp.validateLists(validIDs); err != nil {
 		return nil, err
 	}
 	return fp, nil
 }
 
-// validateLists eagerly checks the count header of every postings list (the
-// allRefs sentinel plus each label-pair list) so that a corrupt or truncated
-// list body fails at open time. Without this, a bad count would only be caught
-// lazily in readList during a query, where the error is currently skipped and
-// silently converted into missing results. Only the 4-byte count is read here;
-// the list IDs are not loaded, keeping open cheap.
-func (fp *filePostings) validateLists() error {
-	if err := fp.checkListBounds(fp.allRefs); err != nil {
-		return err
-	}
+// validateLists eagerly validates every postings list (the allRefs sentinel plus
+// each label-pair list) at open time, so corruption fails fast instead of being
+// lazily skipped during a query and silently converted into missing/incorrect
+// results. Lists are written contiguously between the header and the offset
+// table, so each list body must end exactly where the next list begins. For
+// each list it verifies:
+//
+//   - the declared body (4-byte count + cnt*8 IDs) exactly fills the gap to the
+//     next list offset (or to the offset table for the final list); this rejects
+//     both reduced counts and counts that bleed into the neighbouring list,
+//   - the IDs are strictly ascending (the intersection logic in Select depends
+//     on sorted lists), and
+//   - every ID refers to a series present in the block index.
+func (fp *filePostings) validateLists(validIDs map[uint64]struct{}) error {
+	// Collect all list offsets and sort them to derive each list's exclusive end
+	// bound from the next list's start.
+	offs := make([]int64, 0, 1+len(fp.offsets))
+	offs = append(offs, fp.allRefs)
 	for _, vals := range fp.offsets {
 		for _, off := range vals {
-			if err := fp.checkListBounds(off); err != nil {
-				return err
-			}
+			offs = append(offs, off)
+		}
+	}
+	sort.Slice(offs, func(i, j int) bool { return offs[i] < offs[j] })
+
+	for i, off := range offs {
+		end := fp.otOffset
+		if i+1 < len(offs) {
+			end = offs[i+1]
+		}
+		if err := fp.validateList(off, end, validIDs); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-// checkListBounds reads the 4-byte count at off and verifies the claimed list
-// body (count header + cnt*8 ID bytes) fits before the offset table.
-func (fp *filePostings) checkListBounds(off int64) error {
+// validateList checks the single list starting at off whose body must end
+// exactly at end (the next list offset, or the offset table for the last list).
+func (fp *filePostings) validateList(off, end int64, validIDs map[uint64]struct{}) error {
 	cntBuf := make([]byte, 4)
 	if _, err := fp.f.ReadAt(cntBuf, off); err != nil {
 		return fmt.Errorf("block: validate postings list count at offset %d: %w", off, err)
 	}
 	cnt := int64(binary.BigEndian.Uint32(cntBuf))
-	if off+4+cnt*8 > fp.otOffset {
-		return fmt.Errorf("block: postings list at offset %d claims %d entries but body exceeds data region", off, cnt)
+	if cnt < 0 || off+4+cnt*8 != end {
+		return fmt.Errorf("block: postings list at offset %d claims %d entries but body does not end at next list boundary %d", off, cnt, end)
+	}
+	if cnt == 0 {
+		return nil
+	}
+	idBuf := make([]byte, cnt*8)
+	if _, err := fp.f.ReadAt(idBuf, off+4); err != nil {
+		return fmt.Errorf("block: validate postings list ids at offset %d: %w", off, err)
+	}
+	var prev uint64
+	for i := int64(0); i < cnt; i++ {
+		id := binary.BigEndian.Uint64(idBuf[i*8:])
+		if i > 0 && id <= prev {
+			return fmt.Errorf("block: postings list at offset %d is not strictly ascending (%d after %d)", off, id, prev)
+		}
+		if _, ok := validIDs[id]; !ok {
+			return fmt.Errorf("block: postings list at offset %d references unknown series ID %d", off, id)
+		}
+		prev = id
 	}
 	return nil
 }
