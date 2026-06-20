@@ -261,7 +261,44 @@ func newFilePostings(f *os.File) (*filePostings, error) {
 	for _, vs := range fp.values {
 		sort.Strings(vs)
 	}
+	if err := fp.validateLists(); err != nil {
+		return nil, err
+	}
 	return fp, nil
+}
+
+// validateLists eagerly checks the count header of every postings list (the
+// allRefs sentinel plus each label-pair list) so that a corrupt or truncated
+// list body fails at open time. Without this, a bad count would only be caught
+// lazily in readList during a query, where the error is currently skipped and
+// silently converted into missing results. Only the 4-byte count is read here;
+// the list IDs are not loaded, keeping open cheap.
+func (fp *filePostings) validateLists() error {
+	if err := fp.checkListBounds(fp.allRefs); err != nil {
+		return err
+	}
+	for _, vals := range fp.offsets {
+		for _, off := range vals {
+			if err := fp.checkListBounds(off); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// checkListBounds reads the 4-byte count at off and verifies the claimed list
+// body (count header + cnt*8 ID bytes) fits before the offset table.
+func (fp *filePostings) checkListBounds(off int64) error {
+	cntBuf := make([]byte, 4)
+	if _, err := fp.f.ReadAt(cntBuf, off); err != nil {
+		return fmt.Errorf("block: validate postings list count at offset %d: %w", off, err)
+	}
+	cnt := int64(binary.BigEndian.Uint32(cntBuf))
+	if off+4+cnt*8 > fp.otOffset {
+		return fmt.Errorf("block: postings list at offset %d claims %d entries but body exceeds data region", off, cnt)
+	}
+	return nil
 }
 
 // readList reads the postings list whose count+ids start at off.
