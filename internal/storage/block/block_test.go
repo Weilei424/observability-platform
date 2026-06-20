@@ -150,6 +150,44 @@ func TestReader_OpenReader_LoadsSeries(t *testing.T) {
 	}
 }
 
+func TestWriter_AddSeries_CanonicalizesUnsortedLabels(t *testing.T) {
+	w, blocksDir, _ := makeWriter(t)
+	// Labels deliberately out of name order; the writer must canonicalize them so
+	// the block round-trips through the reader (which requires sorted names).
+	unsorted := []block.LabelPair{{"job", "api"}, {"__name__", "http"}, {"instance", "i1"}}
+	if err := w.AddSeries(1, unsorted, []*chunk.Chunk{makeChunk(t, [][2]int64{{1000, 1}})}); err != nil {
+		t.Fatalf("AddSeries: %v", err)
+	}
+	meta, err := w.Commit()
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	r, err := block.OpenReader(filepath.Join(blocksDir, meta.BlockID))
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer r.Close()
+
+	se, ok := r.SeriesByID(1)
+	if !ok {
+		t.Fatal("SeriesByID(1): not found")
+	}
+	wantNames := []string{"__name__", "instance", "job"}
+	for i, w := range wantNames {
+		if se.Labels[i].Name != w {
+			t.Errorf("Labels[%d].Name = %q, want %q (sorted)", i, se.Labels[i].Name, w)
+		}
+	}
+}
+
+func TestWriter_AddSeries_RejectsDuplicateLabelName(t *testing.T) {
+	w, _, _ := makeWriter(t)
+	dup := []block.LabelPair{{"job", "a"}, {"job", "b"}}
+	if err := w.AddSeries(1, dup, []*chunk.Chunk{makeChunk(t, [][2]int64{{1000, 1}})}); err == nil {
+		t.Fatal("AddSeries with duplicate label name: want error, got nil")
+	}
+}
+
 func TestWriter_AddSeries_RejectsDuplicateID(t *testing.T) {
 	w, _, _ := makeWriter(t)
 	if err := w.AddSeries(5, []block.LabelPair{{"__name__", "a"}}, []*chunk.Chunk{makeChunk(t, [][2]int64{{1000, 1}})}); err != nil {
