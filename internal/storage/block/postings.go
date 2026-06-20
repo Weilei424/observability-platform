@@ -299,15 +299,17 @@ func (fp *filePostings) validate(expected *index.MemPostings) error {
 		name, value string
 	}
 	refs := []listRef{{fp.allRefs, "", ""}}
-	pairCount := 0
 	for name, vals := range fp.offsets {
 		for value, off := range vals {
 			refs = append(refs, listRef{off, name, value})
-			pairCount++
 		}
 	}
-	if pairCount != expected.LabelPairCount() {
-		return fmt.Errorf("block: postings has %d label pairs, forward index has %d", pairCount, expected.LabelPairCount())
+	// Prove the file's (name,value) key set is exactly the forward index's before
+	// validating list contents. A count comparison alone is insufficient: a
+	// missing expected pair masked by an unexpected (e.g. empty) pair can keep the
+	// counts equal, so compare the key sets directly in both directions.
+	if err := validatePairKeySet(expected, fp.offsets); err != nil {
+		return err
 	}
 
 	sort.Slice(refs, func(i, j int) bool { return refs[i].off < refs[j].off })
@@ -323,6 +325,34 @@ func (fp *filePostings) validate(expected *index.MemPostings) error {
 		if !equalU64(ids, expected.Postings(ref.name, ref.value)) {
 			return fmt.Errorf("block: postings list for %q=%q does not match forward index", ref.name, ref.value)
 		}
+	}
+	return nil
+}
+
+// validatePairKeySet checks that the (name,value) keys present in the persisted
+// offset table (offsets) are exactly those of the forward index (expected):
+// every expected pair is present, and no extra pair exists. The allRefs sentinel
+// is not part of either set.
+func validatePairKeySet(expected *index.MemPostings, offsets map[string]map[string]int64) error {
+	expectedPairs := 0
+	for _, name := range expected.LabelNames() {
+		for _, value := range expected.LabelValues(name) {
+			expectedPairs++
+			vals, ok := offsets[name]
+			if !ok {
+				return fmt.Errorf("block: postings missing label pair %q=%q", name, value)
+			}
+			if _, ok := vals[value]; !ok {
+				return fmt.Errorf("block: postings missing label pair %q=%q", name, value)
+			}
+		}
+	}
+	filePairs := 0
+	for _, vals := range offsets {
+		filePairs += len(vals)
+	}
+	if filePairs != expectedPairs {
+		return fmt.Errorf("block: postings has %d label pairs, forward index has %d", filePairs, expectedPairs)
 	}
 	return nil
 }
