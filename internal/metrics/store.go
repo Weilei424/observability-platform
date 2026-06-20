@@ -120,8 +120,10 @@ type MatchedSeries struct {
 }
 
 // SelectSeries returns all series matching sel, resolved through the in-memory
-// label index (postings intersection for equality matchers).
-func (s *MemoryStore) SelectSeries(sel Selector) []MatchedSeries {
+// label index (postings intersection for equality matchers). The error is always
+// nil; it exists to satisfy the queryStore contract shared with BlockStore,
+// whose persisted reads can fail.
+func (s *MemoryStore) SelectSeries(sel Selector) ([]MatchedSeries, error) {
 	ids := s.idx.Select(selectorToIndexMatchers(sel))
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -133,7 +135,7 @@ func (s *MemoryStore) SelectSeries(sel Selector) []MatchedSeries {
 		}
 		result = append(result, MatchedSeries{id: SeriesID(id), Labels: ms.labels})
 	}
-	return result
+	return result, nil
 }
 
 // LabelNames returns all label names present in memory, sorted ascending.
