@@ -70,7 +70,11 @@ func (s *Server) handleLabels(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	names := s.engine.LabelNames(filter)
+	names, err := s.engine.LabelNames(filter)
+	if err != nil {
+		writePromError(w, http.StatusInternalServerError, "execution", err.Error())
+		return
+	}
 	writePromSuccess(w, names)
 }
 
@@ -84,7 +88,11 @@ func (s *Server) handleLabelValues(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	values := s.engine.LabelValues(name, filter)
+	values, err := s.engine.LabelValues(name, filter)
+	if err != nil {
+		writePromError(w, http.StatusInternalServerError, "execution", err.Error())
+		return
+	}
 	writePromSuccess(w, values)
 }
 
@@ -101,7 +109,11 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	seriesList := s.engine.Series(filter)
+	seriesList, err := s.engine.Series(filter)
+	if err != nil {
+		writePromError(w, http.StatusInternalServerError, "execution", err.Error())
+		return
+	}
 	result := make([]map[string]string, len(seriesList))
 	for i, labels := range seriesList {
 		result[i] = labels.Map()
