@@ -122,14 +122,27 @@ func intersectSorted(a, b []uint64) []uint64 {
 }
 
 // Delete removes id from the postings list of each label pair and from allRefs.
-// Empty resulting lists are left in place (cheap; entries are reused on re-add).
+// A label value whose list becomes empty is removed, and a label name whose
+// values are all gone is dropped, so LabelNames/LabelNameCount never report
+// names that no live series carries (which would otherwise leave metadata and
+// cardinality stale once retention deletes series).
 func (p *MemPostings) Delete(id uint64, labels []Pair) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.allRefs = removeSorted(p.allRefs, id)
 	for _, l := range labels {
-		if vals, ok := p.m[l.Name]; ok {
-			vals[l.Value] = removeSorted(vals[l.Value], id)
+		vals, ok := p.m[l.Name]
+		if !ok {
+			continue
+		}
+		list := removeSorted(vals[l.Value], id)
+		if len(list) == 0 {
+			delete(vals, l.Value)
+		} else {
+			vals[l.Value] = list
+		}
+		if len(vals) == 0 {
+			delete(p.m, l.Name)
 		}
 	}
 }
@@ -175,9 +188,9 @@ func (p *MemPostings) SeriesCount() int {
 	return len(p.allRefs)
 }
 
-// LabelNameCount returns the number of distinct label names, including names
-// whose value lists have all been emptied by Delete (entries are left in place
-// for cheap re-add). This differs from LabelValues, which skips empty lists.
+// LabelNameCount returns the number of distinct label names currently carried by
+// at least one series. Delete prunes names once their last value is removed, so
+// this never counts stale names.
 func (p *MemPostings) LabelNameCount() int {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
