@@ -62,9 +62,12 @@ func NewBlockStore(dataDir string) (*BlockStore, error) {
 		}
 		r, err := block.OpenReader(filepath.Join(blockDir, e.Name()))
 		if err != nil {
+			closeReaders(readers)
 			return nil, fmt.Errorf("blockstore: open block %s: %w", e.Name(), err)
 		}
 		if err := validateBlockSeries(r); err != nil {
+			r.Close()
+			closeReaders(readers)
 			return nil, fmt.Errorf("blockstore: block %s: %w", e.Name(), err)
 		}
 		readers = append(readers, r)
@@ -461,6 +464,14 @@ func deleteWALSegmentsUpTo(walDir string, maxIdx int) error {
 }
 
 // --- helpers ---
+
+// closeReaders closes every reader, used to release already-opened blocks when
+// NewBlockStore aborts partway through loading.
+func closeReaders(readers []*block.Reader) {
+	for _, r := range readers {
+		_ = r.Close()
+	}
+}
 
 // validateBlockSeries checks that every series in a freshly opened block has a
 // well-formed label set whose fingerprint equals the stored series ID. The
