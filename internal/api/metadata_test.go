@@ -10,7 +10,9 @@ import (
 )
 
 // postEmpty sends a POST with no body to the given path.
-func postEmpty(t *testing.T, srv interface{ ServeHTTP(http.ResponseWriter, *http.Request) }, path string) *httptest.ResponseRecorder {
+func postEmpty(t *testing.T, srv interface {
+	ServeHTTP(http.ResponseWriter, *http.Request)
+}, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, path, nil)
 	rr := httptest.NewRecorder()
@@ -304,5 +306,84 @@ func TestMetadata_Series_EndBeforeStart_Returns400(t *testing.T) {
 	body := decodePromResponse(t, rr)
 	if body["errorType"] != "bad_data" {
 		t.Errorf("errorType = %v, want bad_data", body["errorType"])
+	}
+}
+
+// --- positive match[] / time filtering (Phase 3.3 metadata semantics) ---
+
+// dataStrings extracts the data array of a successful metadata response as
+// a []string for comparison.
+func dataStrings(t *testing.T, rr *httptest.ResponseRecorder) []string {
+	t.Helper()
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rr.Code, rr.Body.String())
+	}
+	body := decodePromResponse(t, rr)
+	if body["status"] != "success" {
+		t.Fatalf("status = %v, want success; body: %s", body["status"], rr.Body.String())
+	}
+	raw := body["data"].([]any)
+	out := make([]string, len(raw))
+	for i, v := range raw {
+		out[i] = v.(string)
+	}
+	return out
+}
+
+func TestMetadata_Labels_FilteredByMatch(t *testing.T) {
+	srv, store := newQueryTestServer(t)
+	cpu, _ := metrics.NewLabels(map[string]string{"__name__": "cpu_usage", "host": "a"})
+	mem, _ := metrics.NewLabels(map[string]string{"__name__": "mem_usage", "region": "us"})
+	_ = store.Append(cpu, 1000, 1)
+	_ = store.Append(mem, 1000, 2)
+
+	u := "/api/v1/labels?" + url.Values{"match[]": {"cpu_usage"}}.Encode()
+	got := dataStrings(t, getQuery(t, srv, u))
+	want := []string{"__name__", "host"} // "region" belongs only to mem_usage
+	if len(got) != len(want) {
+		t.Fatalf("labels(match=cpu_usage) = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("labels[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestMetadata_LabelValues_FilteredByMatch(t *testing.T) {
+	srv, store := newQueryTestServer(t)
+	cpu, _ := metrics.NewLabels(map[string]string{"__name__": "cpu_usage", "host": "a"})
+	mem, _ := metrics.NewLabels(map[string]string{"__name__": "mem_usage", "host": "b"})
+	_ = store.Append(cpu, 1000, 1)
+	_ = store.Append(mem, 1000, 2)
+
+	u := "/api/v1/label/host/values?" + url.Values{"match[]": {"cpu_usage"}}.Encode()
+	got := dataStrings(t, getQuery(t, srv, u))
+	want := []string{"a"} // host=b belongs only to mem_usage
+	if len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("label/host/values(match=cpu_usage) = %v, want %v", got, want)
+	}
+}
+
+func TestMetadata_Series_FilteredByTimeRange(t *testing.T) {
+	srv, store := newQueryTestServer(t)
+	early, _ := metrics.NewLabels(map[string]string{"__name__": "cpu_usage", "host": "early"})
+	late, _ := metrics.NewLabels(map[string]string{"__name__": "cpu_usage", "host": "late"})
+	_ = store.Append(early, 1000, 1)  // 1s
+	_ = store.Append(late, 500000, 1) // 500s
+
+	// start=0&end=2 (seconds) covers only the early series.
+	rr := getQuery(t, srv, "/api/v1/series?match[]=cpu_usage&start=0&end=2")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rr.Code, rr.Body.String())
+	}
+	body := decodePromResponse(t, rr)
+	data := body["data"].([]any)
+	if len(data) != 1 {
+		t.Fatalf("series(time=[0,2]) len = %d, want 1; got %v", len(data), data)
+	}
+	got := data[0].(map[string]any)
+	if got["host"] != "early" {
+		t.Fatalf("series(time=[0,2]) host = %v, want early", got["host"])
 	}
 }
