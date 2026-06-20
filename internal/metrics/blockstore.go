@@ -64,6 +64,9 @@ func NewBlockStore(dataDir string) (*BlockStore, error) {
 		if err != nil {
 			return nil, fmt.Errorf("blockstore: open block %s: %w", e.Name(), err)
 		}
+		if err := validateBlockSeries(r); err != nil {
+			return nil, fmt.Errorf("blockstore: block %s: %w", e.Name(), err)
+		}
 		readers = append(readers, r)
 	}
 	sort.Slice(readers, func(i, j int) bool {
@@ -135,7 +138,10 @@ func (bs *BlockStore) SelectSeries(sel Selector) ([]MatchedSeries, error) {
 			}
 			labels, err := blockPairsToLabels(se.Labels)
 			if err != nil {
-				continue
+				// Unreachable for blocks that loaded: validateBlockSeries rejects
+				// malformed label sets at open. Propagate defensively rather than
+				// silently dropping the series.
+				return nil, fmt.Errorf("blockstore: decode series %d labels: %w", se.ID, err)
 			}
 			fp := labels.Fingerprint()
 			if _, already := seen[fp]; already {
@@ -455,6 +461,25 @@ func deleteWALSegmentsUpTo(walDir string, maxIdx int) error {
 }
 
 // --- helpers ---
+
+// validateBlockSeries checks that every series in a freshly opened block has a
+// well-formed label set whose fingerprint equals the stored series ID. The
+// fingerprint check lives here (not in block.OpenReader) because fingerprinting
+// is a metrics-layer concern; the block package must not depend on it. Catching
+// the mismatch at load means the per-series decode in SelectSeries cannot
+// silently drop a corrupt or malformed series at query time.
+func validateBlockSeries(r *block.Reader) error {
+	for _, se := range r.Series() {
+		labels, err := blockPairsToLabels(se.Labels)
+		if err != nil {
+			return fmt.Errorf("series %d: %w", se.ID, err)
+		}
+		if uint64(labels.Fingerprint()) != se.ID {
+			return fmt.Errorf("series %d label set fingerprints to %d", se.ID, uint64(labels.Fingerprint()))
+		}
+	}
+	return nil
+}
 
 func blockPairsToLabels(pairs []block.LabelPair) (Labels, error) {
 	m := make(map[string]string, len(pairs))
