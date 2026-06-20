@@ -1,10 +1,58 @@
 package metrics_test
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 )
+
+func TestQueryEngine_LabelNames_FilteredBySelector(t *testing.T) {
+	engine, store := newEngineWithSamples(t)
+	_ = store.Append(mustNewLabels(t, map[string]string{"__name__": "cpu", "host": "a"}), 1000, 1)
+	_ = store.Append(mustNewLabels(t, map[string]string{"__name__": "mem", "zone": "z"}), 1000, 1)
+
+	got := engine.LabelNames(metrics.MetadataFilter{
+		Selectors: []metrics.Selector{{MetricName: "cpu"}},
+	})
+	want := []string{"__name__", "host"} // "zone" belongs only to the mem series
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("LabelNames(match=cpu) = %v, want %v", got, want)
+	}
+}
+
+func TestQueryEngine_LabelValues_FilteredBySelector(t *testing.T) {
+	engine, store := newEngineWithSamples(t)
+	_ = store.Append(mustNewLabels(t, map[string]string{"__name__": "cpu", "host": "a"}), 1000, 1)
+	_ = store.Append(mustNewLabels(t, map[string]string{"__name__": "mem", "host": "b"}), 1000, 1)
+
+	got := engine.LabelValues("host", metrics.MetadataFilter{
+		Selectors: []metrics.Selector{{MetricName: "cpu"}},
+	})
+	want := []string{"a"} // host=b belongs only to the mem series
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("LabelValues(host, match=cpu) = %v, want %v", got, want)
+	}
+}
+
+func TestQueryEngine_Series_FilteredByTimeRange(t *testing.T) {
+	engine, store := newEngineWithSamples(t)
+	_ = store.Append(mustNewLabels(t, map[string]string{"__name__": "cpu", "host": "early"}), 1000, 1)
+	_ = store.Append(mustNewLabels(t, map[string]string{"__name__": "cpu", "host": "late"}), 500000, 1)
+
+	got := engine.Series(metrics.MetadataFilter{
+		Selectors: []metrics.Selector{{MetricName: "cpu"}},
+		StartMs:   0,
+		EndMs:     2000,
+		HasTime:   true,
+	})
+	if len(got) != 1 {
+		t.Fatalf("Series(time=[0,2000]) len = %d, want 1", len(got))
+	}
+	if h, _ := got[0].Get("host"); h != "early" {
+		t.Fatalf("Series(time=[0,2000]) host = %q, want early", h)
+	}
+}
 
 func newEngineWithSamples(t *testing.T) (*metrics.QueryEngine, *metrics.MemoryStore) {
 	t.Helper()
@@ -169,7 +217,7 @@ func TestQueryEngine_LabelNames_ReturnsSortedUniqueNames(t *testing.T) {
 	_ = store.Append(la, 1000, 1.0)
 	_ = store.Append(lb, 1000, 2.0)
 
-	names := engine.LabelNames()
+	names := engine.LabelNames(metrics.MetadataFilter{})
 	want := []string{"__name__", "host", "region"}
 	if len(names) != len(want) {
 		t.Fatalf("LabelNames() = %v, want %v", names, want)
@@ -189,7 +237,7 @@ func TestQueryEngine_LabelNames_DeduplicatesAcrossSeries(t *testing.T) {
 	_ = store.Append(la, 1000, 1.0)
 	_ = store.Append(lb, 1000, 2.0)
 
-	names := engine.LabelNames()
+	names := engine.LabelNames(metrics.MetadataFilter{})
 	// host appears in both series — must appear only once
 	count := 0
 	for _, n := range names {
@@ -205,7 +253,7 @@ func TestQueryEngine_LabelNames_DeduplicatesAcrossSeries(t *testing.T) {
 func TestQueryEngine_LabelNames_EmptyStore_ReturnsNonNilEmpty(t *testing.T) {
 	engine, _ := newEngineWithSamples(t)
 
-	names := engine.LabelNames()
+	names := engine.LabelNames(metrics.MetadataFilter{})
 	if names == nil {
 		t.Error("LabelNames() returned nil, want non-nil empty slice")
 	}
@@ -222,7 +270,7 @@ func TestQueryEngine_LabelValues_ReturnsSortedUniqueValues(t *testing.T) {
 	_ = store.Append(la, 1000, 1.0)
 	_ = store.Append(lb, 1000, 2.0)
 
-	vals := engine.LabelValues("host")
+	vals := engine.LabelValues("host", metrics.MetadataFilter{})
 	want := []string{"a", "b"}
 	if len(vals) != len(want) {
 		t.Fatalf("LabelValues(\"host\") = %v, want %v", vals, want)
@@ -242,7 +290,7 @@ func TestQueryEngine_LabelValues_MetricNameLabel_ReturnsMetricNames(t *testing.T
 	_ = store.Append(la, 1000, 1.0)
 	_ = store.Append(lb, 1000, 2.0)
 
-	vals := engine.LabelValues("__name__")
+	vals := engine.LabelValues("__name__", metrics.MetadataFilter{})
 	want := []string{"cpu_usage", "mem_usage"}
 	if len(vals) != len(want) {
 		t.Fatalf("LabelValues(\"__name__\") = %v, want %v", vals, want)
@@ -260,7 +308,7 @@ func TestQueryEngine_LabelValues_NonexistentLabel_ReturnsNonNilEmpty(t *testing.
 	la := mustNewLabels(t, map[string]string{"__name__": "cpu_usage"})
 	_ = store.Append(la, 1000, 1.0)
 
-	vals := engine.LabelValues("nonexistent")
+	vals := engine.LabelValues("nonexistent", metrics.MetadataFilter{})
 	if vals == nil {
 		t.Error("LabelValues returned nil, want non-nil empty slice")
 	}
@@ -277,7 +325,7 @@ func TestQueryEngine_Series_ReturnsMatchingLabelSets(t *testing.T) {
 	_ = store.Append(la, 1000, 1.0)
 	_ = store.Append(lb, 1000, 2.0)
 
-	result := engine.Series([]metrics.Selector{{MetricName: "cpu_usage"}})
+	result := engine.Series(metrics.MetadataFilter{Selectors: []metrics.Selector{{MetricName: "cpu_usage"}}})
 	if len(result) != 1 {
 		t.Fatalf("Series() len = %d, want 1", len(result))
 	}
@@ -295,10 +343,10 @@ func TestQueryEngine_Series_UnionAcrossSelectors_Deduplicated(t *testing.T) {
 
 	// Two different selectors that both match the same series.
 	// Deduplication must be by fingerprint, not by selector identity.
-	result := engine.Series([]metrics.Selector{
+	result := engine.Series(metrics.MetadataFilter{Selectors: []metrics.Selector{
 		{MetricName: "cpu_usage"},
 		{MetricName: "cpu_usage", Matchers: []metrics.Matcher{{Name: "host", Value: "a"}}},
-	})
+	}})
 	if len(result) != 1 {
 		t.Errorf("Series() len = %d, want 1 (deduplicated by fingerprint)", len(result))
 	}
@@ -312,10 +360,10 @@ func TestQueryEngine_Series_SortedByMetricName(t *testing.T) {
 	_ = store.Append(la, 1000, 1.0)
 	_ = store.Append(lb, 1000, 2.0)
 
-	result := engine.Series([]metrics.Selector{
+	result := engine.Series(metrics.MetadataFilter{Selectors: []metrics.Selector{
 		{MetricName: "z_metric"},
 		{MetricName: "a_metric"},
-	})
+	}})
 	if len(result) != 2 {
 		t.Fatalf("Series() len = %d, want 2", len(result))
 	}
@@ -334,7 +382,7 @@ func TestQueryEngine_Series_SecondarySortByLabelName(t *testing.T) {
 	_ = store.Append(la, 1000, 1.0)
 	_ = store.Append(lb, 1000, 2.0)
 
-	result := engine.Series([]metrics.Selector{{MetricName: "cpu_usage"}})
+	result := engine.Series(metrics.MetadataFilter{Selectors: []metrics.Selector{{MetricName: "cpu_usage"}}})
 	if len(result) != 2 {
 		t.Fatalf("Series() len = %d, want 2", len(result))
 	}
@@ -354,7 +402,7 @@ func TestQueryEngine_Series_SecondarySortByDifferentLabelNames(t *testing.T) {
 	_ = store.Append(la, 1000, 1.0)
 	_ = store.Append(lb, 1000, 2.0)
 
-	result := engine.Series([]metrics.Selector{{MetricName: "cpu_usage"}})
+	result := engine.Series(metrics.MetadataFilter{Selectors: []metrics.Selector{{MetricName: "cpu_usage"}}})
 	if len(result) != 2 {
 		t.Fatalf("Series() len = %d, want 2", len(result))
 	}
@@ -370,7 +418,7 @@ func TestQueryEngine_Series_NoMatchingSelector_ReturnsNonNilEmpty(t *testing.T) 
 	la := mustNewLabels(t, map[string]string{"__name__": "cpu_usage"})
 	_ = store.Append(la, 1000, 1.0)
 
-	result := engine.Series([]metrics.Selector{{MetricName: "nonexistent"}})
+	result := engine.Series(metrics.MetadataFilter{Selectors: []metrics.Selector{{MetricName: "nonexistent"}}})
 	if result == nil {
 		t.Error("Series() returned nil, want non-nil empty slice")
 	}
@@ -384,11 +432,11 @@ func TestQueryEngine_LabelNames_Indexed(t *testing.T) {
 	_ = s.Append(mustLabels(t, map[string]string{"__name__": "http", "job": "api"}), 1, 1)
 	_ = s.Append(mustLabels(t, map[string]string{"__name__": "cpu", "host": "h1"}), 1, 1)
 	e := metrics.NewQueryEngine(s)
-	got := e.LabelNames()
+	got := e.LabelNames(metrics.MetadataFilter{})
 	if len(got) != 3 { // __name__, host, job
 		t.Fatalf("LabelNames = %v, want 3", got)
 	}
-	if e.LabelValues("__name__")[0] != "cpu" {
-		t.Fatalf("LabelValues(__name__) = %v, want [cpu http]", e.LabelValues("__name__"))
+	if e.LabelValues("__name__", metrics.MetadataFilter{})[0] != "cpu" {
+		t.Fatalf("LabelValues(__name__) = %v, want [cpu http]", e.LabelValues("__name__", metrics.MetadataFilter{}))
 	}
 }
