@@ -35,7 +35,10 @@ func TestWALStore_AppendFailsWhenWALFails(t *testing.T) {
 		t.Fatal("expected error when WAL write fails, got nil")
 	}
 
-	series, _ := bs.SelectSeries(metrics.Selector{MetricName: "cpu_usage"})
+	series, err := bs.SelectSeries(metrics.Selector{MetricName: "cpu_usage"})
+	if err != nil {
+		t.Fatalf("SelectSeries: %v", err)
+	}
 	if len(series) != 0 {
 		t.Errorf("BlockStore has %d series after failed WAL write, want 0", len(series))
 	}
@@ -64,7 +67,10 @@ func TestWALStore_AppendDelegatesToMemory(t *testing.T) {
 		t.Fatalf("Append: %v", err)
 	}
 
-	series, _ := bs.SelectSeries(metrics.Selector{MetricName: "req_total"})
+	series, err := bs.SelectSeries(metrics.Selector{MetricName: "req_total"})
+	if err != nil {
+		t.Fatalf("SelectSeries: %v", err)
+	}
 	if len(series) != 1 {
 		t.Fatalf("BlockStore has %d series, want 1", len(series))
 	}
