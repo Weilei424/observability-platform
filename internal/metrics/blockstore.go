@@ -115,20 +115,22 @@ func (bs *BlockStore) SelectSeries(sel Selector) []MatchedSeries {
 	for _, r := range readers {
 		ids, err := r.Postings(matchers)
 		if err != nil {
-			// Consistent with the existing SelectSeries policy of skipping a
-			// block on a per-series decode error: skip this block's postings
-			// rather than failing the whole (error-free) SelectSeries contract.
+			// Static postings corruption is rejected eagerly in OpenReader
+			// (filePostings.validateLists), so a block that loaded successfully
+			// cannot silently convert corruption into missing data here. A
+			// Postings error at this point indicates a transient post-open I/O
+			// fault on an already-validated file; skip this block rather than
+			// breaking the error-free SelectSeries contract.
 			continue
 		}
 		if len(ids) == 0 {
 			continue
 		}
-		want := make(map[uint64]struct{}, len(ids))
+		// Resolve each matched ID directly via the block's ID index rather than
+		// scanning every series in the block.
 		for _, id := range ids {
-			want[id] = struct{}{}
-		}
-		for _, se := range r.Series() {
-			if _, ok := want[se.ID]; !ok {
+			se, ok := r.SeriesByID(id)
+			if !ok {
 				continue
 			}
 			labels, err := blockPairsToLabels(se.Labels)
@@ -241,23 +243,22 @@ func (bs *BlockStore) QueryInstant(id SeriesID, tMs int64) (Sample, bool, error)
 		if r.Meta().MinTime > tMs {
 			continue
 		}
-		for _, se := range r.Series() {
-			if SeriesID(se.ID) != id {
-				continue
+		se, ok := r.SeriesByID(uint64(id))
+		if !ok {
+			continue
+		}
+		for _, ref := range se.Chunks {
+			c, err := r.ReadChunk(ref)
+			if err != nil {
+				return Sample{}, false, fmt.Errorf("blockstore: read chunk: %w", err)
 			}
-			for _, ref := range se.Chunks {
-				c, err := r.ReadChunk(ref)
-				if err != nil {
-					return Sample{}, false, fmt.Errorf("blockstore: read chunk: %w", err)
-				}
-				it := c.Iterator()
-				for it.Next() {
-					ts, val := it.At()
-					// Memory wins for equal timestamps; block only wins if strictly better.
-					if ts <= tMs && (!found || ts > best.TimestampMs) {
-						best = Sample{SeriesID: id, TimestampMs: ts, Value: val}
-						found = true
-					}
+			it := c.Iterator()
+			for it.Next() {
+				ts, val := it.At()
+				// Memory wins for equal timestamps; block only wins if strictly better.
+				if ts <= tMs && (!found || ts > best.TimestampMs) {
+					best = Sample{SeriesID: id, TimestampMs: ts, Value: val}
+					found = true
 				}
 			}
 		}
@@ -295,22 +296,21 @@ func (bs *BlockStore) QueryRange(id SeriesID, startMs, endMs int64) ([]Sample, e
 		if meta.MaxTime < startMs || meta.MinTime > endMs {
 			continue
 		}
-		for _, se := range r.Series() {
-			if SeriesID(se.ID) != id {
-				continue
+		se, ok := r.SeriesByID(uint64(id))
+		if !ok {
+			continue
+		}
+		seriesFoundInBlock = true
+		for _, ref := range se.Chunks {
+			c, err := r.ReadChunk(ref)
+			if err != nil {
+				return nil, fmt.Errorf("blockstore: read chunk: %w", err)
 			}
-			seriesFoundInBlock = true
-			for _, ref := range se.Chunks {
-				c, err := r.ReadChunk(ref)
-				if err != nil {
-					return nil, fmt.Errorf("blockstore: read chunk: %w", err)
-				}
-				it := c.Iterator()
-				for it.Next() {
-					ts, val := it.At()
-					if ts >= startMs && ts <= endMs {
-						result = append(result, Sample{SeriesID: id, TimestampMs: ts, Value: val})
-					}
+			it := c.Iterator()
+			for it.Next() {
+				ts, val := it.At()
+				if ts >= startMs && ts <= endMs {
+					result = append(result, Sample{SeriesID: id, TimestampMs: ts, Value: val})
 				}
 			}
 		}
