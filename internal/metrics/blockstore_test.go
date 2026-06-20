@@ -86,8 +86,14 @@ func TestNewBlockStore_RejectsFingerprintMismatch(t *testing.T) {
 		t.Fatalf("Commit: %v", err)
 	}
 
+	// This block opens successfully (holding its postings fd) and only then fails
+	// fingerprint validation, so the failure path must close the reader it opened.
+	before := fdsUnder(t, blocksDir)
 	if _, err := metrics.NewBlockStore(dataDir); err == nil {
 		t.Fatal("NewBlockStore with fingerprint/ID mismatch: want error, got nil")
+	}
+	if after := fdsUnder(t, blocksDir); after > before {
+		t.Errorf("NewBlockStore leaked %d open fd(s) under %s when validation failed", after-before, blocksDir)
 	}
 }
 
