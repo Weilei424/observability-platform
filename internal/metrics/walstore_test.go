@@ -234,11 +234,11 @@ func TestLabelIndex_IngestFlushRestartQuery(t *testing.T) {
 	defer bs2.Close()
 	e := metrics.NewQueryEngine(bs2)
 
-	got := e.Series([]metrics.Selector{{MetricName: "http", Matchers: []metrics.Matcher{{Name: "job", Value: "api"}}}})
+	got := e.Series(metrics.MetadataFilter{Selectors: []metrics.Selector{{MetricName: "http", Matchers: []metrics.Matcher{{Name: "job", Value: "api"}}}}})
 	if len(got) != 1 {
 		t.Fatalf("after restart Series matched %d, want 1", len(got))
 	}
-	if names := e.LabelNames(); len(names) != 2 { // __name__, job
+	if names := e.LabelNames(metrics.MetadataFilter{}); len(names) != 2 { // __name__, job
 		t.Fatalf("after restart LabelNames = %v, want [__name__ job]", names)
 	}
 }
