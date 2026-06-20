@@ -12,6 +12,31 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/storage/index"
 )
 
+func TestDecodeLabelSet_RejectsDuplicateName(t *testing.T) {
+	data := encodeLabelSet([]LabelPair{{"job", "api"}, {"job", "web"}})
+	if _, err := decodeLabelSet(data); err == nil {
+		t.Fatal("decodeLabelSet with duplicate label name: want error, got nil")
+	}
+}
+
+func TestDecodeLabelSet_RejectsUnsortedNames(t *testing.T) {
+	data := encodeLabelSet([]LabelPair{{"job", "api"}, {"__name__", "http"}})
+	if _, err := decodeLabelSet(data); err == nil {
+		t.Fatal("decodeLabelSet with unsorted label names: want error, got nil")
+	}
+}
+
+func TestDecodeLabelSet_AcceptsSortedUnique(t *testing.T) {
+	data := encodeLabelSet([]LabelPair{{"__name__", "http"}, {"job", "api"}})
+	pairs, err := decodeLabelSet(data)
+	if err != nil {
+		t.Fatalf("decodeLabelSet(sorted unique): %v", err)
+	}
+	if len(pairs) != 2 {
+		t.Fatalf("decoded %d pairs, want 2", len(pairs))
+	}
+}
+
 func sealedChunk(t *testing.T, ts int64) *chunk.Chunk {
 	t.Helper()
 	c := chunk.NewChunk()
@@ -204,6 +229,42 @@ func TestReader_Postings_WrongIDForLabelPair_FailsAtOpen(t *testing.T) {
 	}
 	if _, err := OpenReader(dir); err == nil {
 		t.Fatal("OpenReader on wrong-ID-for-label-pair: want error, got nil")
+	}
+}
+
+func TestValidatePairKeySet(t *testing.T) {
+	expected := buildMemPostings([]SeriesEntry{
+		{ID: 1, Labels: []LabelPair{{"__name__", "http"}, {"job", "api"}}},
+		{ID: 2, Labels: []LabelPair{{"__name__", "http"}, {"job", "web"}}},
+	})
+
+	// Exact match: same key set.
+	ok := map[string]map[string]int64{
+		"__name__": {"http": 0},
+		"job":      {"api": 0, "web": 0},
+	}
+	if err := validatePairKeySet(expected, ok); err != nil {
+		t.Fatalf("validatePairKeySet(exact) = %v, want nil", err)
+	}
+
+	// Missing expected pair (job=web) masked by an unexpected pair (job=extra)
+	// so the counts still match — this is exactly the case a count check misses.
+	masked := map[string]map[string]int64{
+		"__name__": {"http": 0},
+		"job":      {"api": 0, "extra": 0},
+	}
+	if err := validatePairKeySet(expected, masked); err == nil {
+		t.Error("validatePairKeySet(missing pair masked by extra): want error, got nil")
+	}
+
+	// Extra pair beyond the expected set.
+	extra := map[string]map[string]int64{
+		"__name__": {"http": 0},
+		"job":      {"api": 0, "web": 0},
+		"region":   {"us": 0},
+	}
+	if err := validatePairKeySet(expected, extra); err == nil {
+		t.Error("validatePairKeySet(extra pair): want error, got nil")
 	}
 }
 
