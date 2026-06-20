@@ -60,11 +60,13 @@ func OpenReader(blockDir string) (*Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	postings, err := loadPostings(blockDir, entries)
+	// Build the ID map before opening the postings file so that a duplicate-ID
+	// rejection cannot leak the open file descriptor.
+	byID, err := buildSeriesByID(entries)
 	if err != nil {
 		return nil, err
 	}
-	byID, err := buildSeriesByID(entries)
+	postings, err := loadPostings(blockDir, entries)
 	if err != nil {
 		return nil, err
 	}
