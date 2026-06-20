@@ -150,6 +150,32 @@ func TestReader_OpenReader_LoadsSeries(t *testing.T) {
 	}
 }
 
+func TestReader_SeriesByID(t *testing.T) {
+	w, blocksDir, _ := makeWriter(t)
+	_ = w.AddSeries(7, []block.LabelPair{{"__name__", "req"}}, []*chunk.Chunk{makeChunk(t, [][2]int64{{1000, 1}})})
+	_ = w.AddSeries(42, []block.LabelPair{{"__name__", "lat"}}, []*chunk.Chunk{makeChunk(t, [][2]int64{{1000, 2}})})
+	meta, err := w.Commit()
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	r, err := block.OpenReader(filepath.Join(blocksDir, meta.BlockID))
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer r.Close()
+
+	se, ok := r.SeriesByID(42)
+	if !ok {
+		t.Fatal("SeriesByID(42): want found, got missing")
+	}
+	if se.ID != 42 || len(se.Labels) != 1 || se.Labels[0].Value != "lat" {
+		t.Errorf("SeriesByID(42) = %+v, want id 42 / lat", se)
+	}
+	if _, ok := r.SeriesByID(999); ok {
+		t.Error("SeriesByID(999): want missing, got found")
+	}
+}
+
 func TestReader_ReadChunk_RoundTrip(t *testing.T) {
 	w, blocksDir, _ := makeWriter(t)
 	samples := [][2]int64{{1000, 10}, {2000, 20}, {3000, 30}}
