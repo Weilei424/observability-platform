@@ -75,9 +75,15 @@ func (w *Writer) AddSeries(id uint64, labels []LabelPair, chunks []*chunk.Chunk)
 		return fmt.Errorf("block: duplicate series ID %d", id)
 	}
 	labels = canonicalizeLabels(labels)
-	for i := 1; i < len(labels); i++ {
-		if labels[i].Name == labels[i-1].Name {
-			return fmt.Errorf("block: duplicate label name %q for series %d", labels[i].Name, id)
+	for i, l := range labels {
+		// Empty label names are invalid and, for the reserved ("","") pair, would
+		// collide with the all-series postings sentinel and make the block
+		// unreadable.
+		if l.Name == "" {
+			return fmt.Errorf("block: empty label name for series %d", id)
+		}
+		if i > 0 && l.Name == labels[i-1].Name {
+			return fmt.Errorf("block: duplicate label name %q for series %d", l.Name, id)
 		}
 	}
 	w.seriesIDs[id] = struct{}{}
