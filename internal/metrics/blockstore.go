@@ -98,9 +98,11 @@ func (bs *BlockStore) OldestHeadSegment() int {
 
 // SelectSeries returns all series matching sel from memory and all loaded
 // blocks, resolved via label-index postings. Results are deduplicated by
-// series fingerprint (memory wins).
-func (bs *BlockStore) SelectSeries(sel Selector) []MatchedSeries {
-	result := bs.mem.SelectSeries(sel)
+// series fingerprint (memory wins). A postings read failure in any block is
+// propagated rather than skipped, so a query never silently returns results
+// missing a block's data.
+func (bs *BlockStore) SelectSeries(sel Selector) ([]MatchedSeries, error) {
+	result, _ := bs.mem.SelectSeries(sel) // MemoryStore never errors
 	seen := make(map[SeriesID]struct{}, len(result))
 	for _, ms := range result {
 		seen[ms.Labels.Fingerprint()] = struct{}{}
@@ -116,12 +118,10 @@ func (bs *BlockStore) SelectSeries(sel Selector) []MatchedSeries {
 		ids, err := r.Postings(matchers)
 		if err != nil {
 			// Static postings corruption is rejected eagerly in OpenReader
-			// (filePostings.validateLists), so a block that loaded successfully
-			// cannot silently convert corruption into missing data here. A
-			// Postings error at this point indicates a transient post-open I/O
-			// fault on an already-validated file; skip this block rather than
-			// breaking the error-free SelectSeries contract.
-			continue
+			// (filePostings.validate). A Postings error here indicates a
+			// post-open I/O fault on an already-validated file; surface it so
+			// the query fails rather than silently dropping this block's series.
+			return nil, fmt.Errorf("blockstore: select series in block: %w", err)
 		}
 		if len(ids) == 0 {
 			continue
@@ -145,7 +145,7 @@ func (bs *BlockStore) SelectSeries(sel Selector) []MatchedSeries {
 			result = append(result, MatchedSeries{id: SeriesID(se.ID), Labels: labels})
 		}
 	}
-	return result
+	return result, nil
 }
 
 // LabelNames returns the sorted, deduplicated label names across memory and all
@@ -208,7 +208,8 @@ func (bs *BlockStore) Cardinality() (series, names, pairs int) {
 			pairSet[[2]string{n, v}] = struct{}{}
 		}
 	}
-	for _, ms := range bs.mem.SelectSeries(Selector{}) {
+	memSeries, _ := bs.mem.SelectSeries(Selector{}) // MemoryStore never errors
+	for _, ms := range memSeries {
 		add(ms.Labels, ms.Labels.Fingerprint())
 	}
 	bs.mu.RLock()
