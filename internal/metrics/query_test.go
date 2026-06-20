@@ -57,6 +57,24 @@ func TestQueryEngine_PropagatesSelectSeriesError(t *testing.T) {
 	}
 }
 
+// TestQueryEngine_Eval_PropagatesSelectSeriesError covers the rate/sum execution
+// paths in eval.go, which select series independently of InstantQuery/RangeQuery.
+func TestQueryEngine_Eval_PropagatesSelectSeriesError(t *testing.T) {
+	engine := metrics.NewQueryEngine(errOnSelectStore{})
+	rate := metrics.RateExpr{Selector: metrics.Selector{MetricName: "cpu"}, WindowMs: 60000}
+	sum := metrics.SumExpr{Inner: rate}
+
+	if _, err := engine.EvalInstant(rate, 1000); err == nil {
+		t.Error("EvalInstant(rate) with failing SelectSeries: want error, got nil")
+	}
+	if _, err := engine.EvalRange(rate, 1000, 2000, 1000); err == nil {
+		t.Error("EvalRange(rate) with failing SelectSeries: want error, got nil")
+	}
+	if _, err := engine.EvalInstant(sum, 1000); err == nil {
+		t.Error("EvalInstant(sum(rate)) with failing SelectSeries: want error, got nil")
+	}
+}
+
 func TestQueryEngine_Metadata_PropagatesStorageError(t *testing.T) {
 	labels := mustNewLabels(t, map[string]string{"__name__": "cpu", "host": "a"})
 	engine := metrics.NewQueryEngine(errOnRangeStore{labels: labels})
