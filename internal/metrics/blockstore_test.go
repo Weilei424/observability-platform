@@ -1,9 +1,13 @@
 package metrics_test
 
 import (
+	"path/filepath"
+	"sort"
 	"testing"
 
 	"github.com/masonwheeler/observability-platform/internal/metrics"
+	"github.com/masonwheeler/observability-platform/internal/storage/block"
+	"github.com/masonwheeler/observability-platform/internal/storage/chunk"
 )
 
 func makeLabels(t *testing.T, m map[string]string) metrics.Labels {
@@ -13,6 +17,55 @@ func makeLabels(t *testing.T, m map[string]string) metrics.Labels {
 		t.Fatalf("NewLabels: %v", err)
 	}
 	return l
+}
+
+// labelsToBlockPairs converts a label set to sorted block.LabelPair form.
+func labelsToBlockPairs(l metrics.Labels) []block.LabelPair {
+	m := l.Map()
+	pairs := make([]block.LabelPair, 0, len(m))
+	for name, val := range m {
+		pairs = append(pairs, block.LabelPair{Name: name, Value: val})
+	}
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].Name < pairs[j].Name })
+	return pairs
+}
+
+// sealedChunk returns a chunk filled past the seal threshold.
+func sealedChunk(t *testing.T) *chunk.Chunk {
+	t.Helper()
+	c := chunk.NewChunk()
+	for i := int64(0); i < 120; i++ {
+		if err := c.Append(1000+i, float64(i)); err != nil {
+			t.Fatalf("chunk append: %v", err)
+		}
+	}
+	return c
+}
+
+// TestNewBlockStore_RejectsFingerprintMismatch verifies that a block whose
+// stored series ID does not match the fingerprint of its label set is rejected
+// at load, rather than silently producing wrong query results later.
+func TestNewBlockStore_RejectsFingerprintMismatch(t *testing.T) {
+	dataDir := t.TempDir()
+	blocksDir := filepath.Join(dataDir, "metrics", "blocks")
+	tmpDir := filepath.Join(dataDir, "metrics", "tmp")
+	w, err := block.NewWriter(blocksDir, tmpDir)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	labels := makeLabels(t, map[string]string{"__name__": "cpu", "host": "a"})
+	// Deliberately store a wrong ID (correct fingerprint + 1).
+	wrongID := uint64(labels.Fingerprint()) + 1
+	if err := w.AddSeries(wrongID, labelsToBlockPairs(labels), []*chunk.Chunk{sealedChunk(t)}); err != nil {
+		t.Fatalf("AddSeries: %v", err)
+	}
+	if _, err := w.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	if _, err := metrics.NewBlockStore(dataDir); err == nil {
+		t.Fatal("NewBlockStore with fingerprint/ID mismatch: want error, got nil")
+	}
 }
 
 func TestBlockStore_FlushBlock_DrainsSealedChunks(t *testing.T) {
@@ -143,7 +196,10 @@ func TestBlockStore_SelectSeries_IncludesBlockSeries(t *testing.T) {
 	}
 
 	sel := metrics.Selector{MetricName: "disk"}
-	matched, _ := bs2.SelectSeries(sel)
+	matched, err := bs2.SelectSeries(sel)
+	if err != nil {
+		t.Fatalf("SelectSeries: %v", err)
+	}
 	if len(matched) == 0 {
 		t.Fatal("SelectSeries on fresh BlockStore returned no series, want series from block")
 	}
@@ -172,11 +228,17 @@ func TestBlockStore_SelectSeries_IndexedAcrossBlockAndMemory(t *testing.T) {
 		t.Fatalf("append web: %v", err)
 	}
 
-	got, _ := bs.SelectSeries(metrics.Selector{MetricName: "http"})
+	got, err := bs.SelectSeries(metrics.Selector{MetricName: "http"})
+	if err != nil {
+		t.Fatalf("SelectSeries(http): %v", err)
+	}
 	if len(got) != 2 {
 		t.Fatalf("SelectSeries(http) matched %d, want 2 (block+memory)", len(got))
 	}
-	gotAPI, _ := bs.SelectSeries(metrics.Selector{MetricName: "http", Matchers: []metrics.Matcher{{Name: "job", Value: "api"}}})
+	gotAPI, err := bs.SelectSeries(metrics.Selector{MetricName: "http", Matchers: []metrics.Matcher{{Name: "job", Value: "api"}}})
+	if err != nil {
+		t.Fatalf("SelectSeries(http,job=api): %v", err)
+	}
 	if len(gotAPI) != 1 {
 		t.Fatalf("SelectSeries(http,job=api) matched %d, want 1", len(gotAPI))
 	}
