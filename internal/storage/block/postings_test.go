@@ -167,6 +167,46 @@ func TestReader_Postings_UnknownIDInList_FailsAtOpen(t *testing.T) {
 	}
 }
 
+// TestReader_Postings_WrongIDForLabelPair_FailsAtOpen verifies that a postings
+// list whose IDs are individually valid and ordered, but do not actually carry
+// that label pair, is rejected at open by comparison against the forward index.
+func TestReader_Postings_WrongIDForLabelPair_FailsAtOpen(t *testing.T) {
+	dir := writeTestBlock(t)
+	path := filepath.Join(dir, "postings")
+
+	// Open the valid file to locate the offset of the job="api" list, which
+	// contains exactly the single series ID 1.
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open postings: %v", err)
+	}
+	entries, err := readIndex(dir)
+	if err != nil {
+		t.Fatalf("readIndex: %v", err)
+	}
+	fp, err := newFilePostings(f, buildMemPostings(entries))
+	if err != nil {
+		t.Fatalf("newFilePostings: %v", err)
+	}
+	off := fp.offsets["job"]["api"]
+	fp.Close()
+
+	// Overwrite that list's only ID (series 1, job=api) with series 2 (job=web).
+	// Series 2 exists and the single-element list stays trivially ordered, so
+	// only a label-pair comparison can catch this.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read postings: %v", err)
+	}
+	binary.BigEndian.PutUint64(data[off+4:], 2)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write corrupt postings: %v", err)
+	}
+	if _, err := OpenReader(dir); err == nil {
+		t.Fatal("OpenReader on wrong-ID-for-label-pair: want error, got nil")
+	}
+}
+
 func TestBuildSeriesByID_RejectsDuplicateID(t *testing.T) {
 	entries := []SeriesEntry{
 		{ID: 1, Labels: []LabelPair{{"__name__", "a"}}},
