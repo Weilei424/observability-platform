@@ -103,40 +103,123 @@ func (e *QueryEngine) RangeQuery(sel Selector, startMs, endMs, stepMs int64) ([]
 	return result, nil
 }
 
-// LabelNames returns a sorted, deduplicated list of all label names, served by
-// the store's label index. Always returns a non-nil slice.
-func (e *QueryEngine) LabelNames() []string {
-	names := e.store.LabelNames()
-	if names == nil {
-		return []string{}
-	}
-	return names
+// MetadataFilter narrows metadata queries (LabelNames, LabelValues, Series) by
+// optional series selectors and/or an optional time range. The zero value
+// applies no filtering: all series across all time.
+//
+//   - Selectors: OR-union of selectors a series must match (any one). nil/empty
+//     means every series.
+//   - HasTime: when true, only series with at least one sample in
+//     [StartMs, EndMs] are considered. Callers that supply only one bound should
+//     widen the other to the min/max representable timestamp.
+type MetadataFilter struct {
+	Selectors []Selector
+	StartMs   int64
+	EndMs     int64
+	HasTime   bool
 }
 
-// LabelValues returns a sorted, deduplicated list of all values for name,
-// served by the store's label index. Always returns a non-nil slice.
-func (e *QueryEngine) LabelValues(name string) []string {
-	values := e.store.LabelValues(name)
-	if values == nil {
-		return []string{}
-	}
-	return values
+// isUnfiltered reports whether f applies no narrowing, enabling the index
+// fast path that serves names/values straight from the store.
+func (f MetadataFilter) isUnfiltered() bool {
+	return len(f.Selectors) == 0 && !f.HasTime
 }
 
-// Series returns the label sets for all series matching any of the given
-// selectors. Results are deduplicated by series fingerprint and sorted by
-// __name__ then remaining label pairs (name then value, lexicographic) for
-// stable UI output. Returns a non-nil empty slice when no series match. An
-// empty selectors slice returns a non-nil empty result; callers are
-// responsible for enforcing a minimum selector count.
-func (e *QueryEngine) Series(selectors []Selector) []Labels {
-	seen := make(map[SeriesID]Labels)
-	for _, sel := range selectors {
+// matchingSeries returns the deduplicated series satisfying f: the OR-union of
+// its selectors (or all series when none are given), optionally restricted to
+// those active within [StartMs, EndMs]. A series whose range read errors is
+// skipped rather than failing the whole metadata query.
+func (e *QueryEngine) matchingSeries(f MetadataFilter) []MatchedSeries {
+	sels := f.Selectors
+	if len(sels) == 0 {
+		sels = []Selector{{}} // empty selector matches every series
+	}
+	seen := make(map[SeriesID]struct{})
+	var out []MatchedSeries
+	for _, sel := range sels {
 		for _, ms := range e.store.SelectSeries(sel) {
 			id := ms.Labels.Fingerprint()
-			if _, exists := seen[id]; !exists {
-				seen[id] = ms.Labels
+			if _, ok := seen[id]; ok {
+				continue
 			}
+			if f.HasTime {
+				samples, err := e.store.QueryRange(id, f.StartMs, f.EndMs)
+				if err != nil || len(samples) == 0 {
+					continue
+				}
+			}
+			seen[id] = struct{}{}
+			out = append(out, ms)
+		}
+	}
+	return out
+}
+
+// LabelNames returns a sorted, deduplicated list of label names. With an
+// unfiltered MetadataFilter it is served directly by the store's label index;
+// otherwise it is computed from the label sets of the matching series. Always
+// returns a non-nil slice.
+func (e *QueryEngine) LabelNames(f MetadataFilter) []string {
+	if f.isUnfiltered() {
+		names := e.store.LabelNames()
+		if names == nil {
+			return []string{}
+		}
+		return names
+	}
+	set := make(map[string]struct{})
+	for _, ms := range e.matchingSeries(f) {
+		for name := range ms.Labels.Map() {
+			set[name] = struct{}{}
+		}
+	}
+	return sortedStringSet(set)
+}
+
+// LabelValues returns a sorted, deduplicated list of values for name. With an
+// unfiltered MetadataFilter it is served directly by the store's label index;
+// otherwise it is computed from the matching series. Always returns a non-nil
+// slice.
+func (e *QueryEngine) LabelValues(name string, f MetadataFilter) []string {
+	if f.isUnfiltered() {
+		values := e.store.LabelValues(name)
+		if values == nil {
+			return []string{}
+		}
+		return values
+	}
+	set := make(map[string]struct{})
+	for _, ms := range e.matchingSeries(f) {
+		if v, ok := ms.Labels.Get(name); ok {
+			set[v] = struct{}{}
+		}
+	}
+	return sortedStringSet(set)
+}
+
+// sortedStringSet returns the keys of set sorted ascending, never nil.
+func sortedStringSet(set map[string]struct{}) []string {
+	out := make([]string, 0, len(set))
+	for s := range set {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Series returns the label sets for all series matching the filter (the
+// OR-union of its selectors, optionally restricted to a time range). Results
+// are deduplicated by series fingerprint and sorted by __name__ then remaining
+// label pairs (name then value, lexicographic) for stable UI output. Returns a
+// non-nil empty slice when no series match. An empty filter (no selectors)
+// returns every series; callers that require at least one selector are
+// responsible for enforcing that before calling.
+func (e *QueryEngine) Series(f MetadataFilter) []Labels {
+	seen := make(map[SeriesID]Labels)
+	for _, ms := range e.matchingSeries(f) {
+		id := ms.Labels.Fingerprint()
+		if _, exists := seen[id]; !exists {
+			seen[id] = ms.Labels
 		}
 	}
 	// Cache __name__ per entry to avoid repeated Get calls during sort.
