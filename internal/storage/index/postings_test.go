@@ -125,6 +125,28 @@ func TestMemPostings_Delete(t *testing.T) {
 	}
 }
 
+func TestMemPostings_Delete_RemovesStaleLabelMetadata(t *testing.T) {
+	p := NewMemPostings()
+	p.Add(1, pairs("__name__", "http", "job", "api"))
+	p.Delete(1, pairs("__name__", "http", "job", "api"))
+
+	if got := p.LabelNames(); len(got) != 0 {
+		t.Errorf("LabelNames after deleting all series = %v, want empty", got)
+	}
+	if got := p.LabelNameCount(); got != 0 {
+		t.Errorf("LabelNameCount after deleting all series = %d, want 0", got)
+	}
+	if got := p.LabelPairCount(); got != 0 {
+		t.Errorf("LabelPairCount after deleting all series = %d, want 0", got)
+	}
+	if got := p.SeriesCount(); got != 0 {
+		t.Errorf("SeriesCount after deleting all series = %d, want 0", got)
+	}
+	if got := p.LabelValues("job"); len(got) != 0 {
+		t.Errorf("LabelValues(job) after deleting all series = %v, want empty", got)
+	}
+}
+
 func TestMemPostings_LabelNamesAndValuesSorted(t *testing.T) {
 	p := NewMemPostings()
 	p.Add(1, pairs("__name__", "http", "job", "web"))
