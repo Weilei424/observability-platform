@@ -65,7 +65,10 @@ func scalarPoints(v float64, startMs, endMs, stepMs int64) []SamplePoint {
 }
 
 func (e *QueryEngine) rateInstant(x RateExpr, tMs int64) ([]InstantSample, error) {
-	matched := e.store.SelectSeries(x.Selector)
+	matched, err := e.store.SelectSeries(x.Selector)
+	if err != nil {
+		return nil, err
+	}
 	result := make([]InstantSample, 0, len(matched))
 	windowSec := float64(x.WindowMs) / 1000.0
 	for _, ms := range matched {
@@ -88,7 +91,10 @@ func (e *QueryEngine) rateInstant(x RateExpr, tMs int64) ([]InstantSample, error
 }
 
 func (e *QueryEngine) rateRange(x RateExpr, startMs, endMs, stepMs int64) ([]RangeSeries, error) {
-	matched := e.store.SelectSeries(x.Selector)
+	matched, err := e.store.SelectSeries(x.Selector)
+	if err != nil {
+		return nil, err
+	}
 	result := make([]RangeSeries, 0, len(matched))
 	windowSec := float64(x.WindowMs) / 1000.0
 	for _, ms := range matched {
