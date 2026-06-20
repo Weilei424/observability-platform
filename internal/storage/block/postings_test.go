@@ -119,6 +119,64 @@ func TestReader_Postings_HugeListCount_FailsAtOpen(t *testing.T) {
 	}
 }
 
+// TestReader_Postings_ReducedListCount_FailsAtOpen verifies that a list count
+// smaller than its true length (which still fits inside the data region, so the
+// upper-bound check alone would pass) is rejected at open. Such a count would
+// otherwise silently drop trailing IDs from query results.
+func TestReader_Postings_ReducedListCount_FailsAtOpen(t *testing.T) {
+	dir := writeTestBlock(t)
+	path := filepath.Join(dir, "postings")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read postings: %v", err)
+	}
+	// The allRefs sentinel list is written first, so its 4-byte count sits
+	// immediately after the header. Reduce it by one.
+	cnt := binary.BigEndian.Uint32(data[postingsHeaderSz:])
+	if cnt < 2 {
+		t.Fatalf("allRefs count = %d, want >= 2 to reduce", cnt)
+	}
+	binary.BigEndian.PutUint32(data[postingsHeaderSz:], cnt-1)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write corrupt postings: %v", err)
+	}
+	if _, err := OpenReader(dir); err == nil {
+		t.Fatal("OpenReader on reduced postings list count: want error, got nil")
+	}
+}
+
+// TestReader_Postings_UnknownIDInList_FailsAtOpen verifies that a postings list
+// referencing a series ID not present in the block index is rejected at open.
+func TestReader_Postings_UnknownIDInList_FailsAtOpen(t *testing.T) {
+	dir := writeTestBlock(t)
+	path := filepath.Join(dir, "postings")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read postings: %v", err)
+	}
+	// The allRefs list body begins with its 4-byte count at postingsHeaderSz,
+	// followed by its first 8-byte series ID. Overwrite that first ID with a
+	// value that does not exist in the block (series IDs are 1 and 2).
+	firstIDOff := postingsHeaderSz + 4
+	binary.BigEndian.PutUint64(data[firstIDOff:], 999999)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write corrupt postings: %v", err)
+	}
+	if _, err := OpenReader(dir); err == nil {
+		t.Fatal("OpenReader on unknown postings ID: want error, got nil")
+	}
+}
+
+func TestBuildSeriesByID_RejectsDuplicateID(t *testing.T) {
+	entries := []SeriesEntry{
+		{ID: 1, Labels: []LabelPair{{"__name__", "a"}}},
+		{ID: 1, Labels: []LabelPair{{"__name__", "b"}}},
+	}
+	if _, err := buildSeriesByID(entries); err == nil {
+		t.Fatal("buildSeriesByID with duplicate ID: want error, got nil")
+	}
+}
+
 func TestReader_Postings_CorruptIsError(t *testing.T) {
 	dir := writeTestBlock(t)
 	// Truncate the footer so the offset table cannot be located.
