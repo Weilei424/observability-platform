@@ -225,6 +225,11 @@ Design: `docs/superpowers/specs/2026-06-18-phase-3.3-label-index-design.md` · P
 - [x] Integration test: indexed label query (ingest → indexed `SelectSeries`/metadata; ingest → flush → restart → indexed query; `/metrics` scrape)
 - [x] Benchmark: indexed lookup vs full scan (`internal/metrics/index_bench_test.go`) + index/scan agreement guard test
 
+#### Phase 3.3 — Codex review fixes
+- [x] Postings corruption fails fast: `filePostings.validateLists` eagerly checks every list count header in `newFilePostings`, so corruption surfaces at `OpenReader` instead of being silently skipped in `BlockStore.SelectSeries` (`internal/storage/block/postings.go`; test `TestReader_Postings_HugeListCount_FailsAtOpen`)
+- [x] Persisted queries drop per-series scan: `block.Reader.SeriesByID` (ID→entry map) replaces the full `r.Series()` walk in `BlockStore.SelectSeries`/`QueryInstant`/`QueryRange`; persisted-path benchmark added (`internal/metrics/blockstore_bench_test.go`, `BenchmarkBlockStoreSelectSeries_Persisted`)
+- [x] Metadata filtering implemented (deferred from Phase 2.3): `metrics.MetadataFilter` adds `match[]` + time-range filtering to `QueryEngine.LabelNames`/`LabelValues`/`Series`; handlers build the filter in `internal/api/metadata.go`; positive filtering tests at engine and API level
+
 ### Phase 3.4 — Compaction and Retention
 - [ ] Implement automatic flush trigger (background goroutine; flush when WAL exceeds size threshold or sealed chunks exceed age/count threshold)
 - [ ] Implement block compactor
