@@ -1,14 +1,37 @@
 package metrics_test
 
 import (
+	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/storage/block"
 	"github.com/masonwheeler/observability-platform/internal/storage/chunk"
 )
+
+// fdsUnder counts this process's open file descriptors whose target path is
+// under dir, via /proc/self/fd. The test is skipped on platforms without it.
+func fdsUnder(t *testing.T, dir string) int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Skip("/proc/self/fd unavailable; cannot observe fd leaks")
+	}
+	n := 0
+	for _, e := range entries {
+		target, err := os.Readlink(filepath.Join("/proc/self/fd", e.Name()))
+		if err != nil {
+			continue
+		}
+		if strings.HasPrefix(target, dir) {
+			n++
+		}
+	}
+	return n
+}
 
 func makeLabels(t *testing.T, m map[string]string) metrics.Labels {
 	t.Helper()
@@ -68,10 +91,12 @@ func TestNewBlockStore_RejectsFingerprintMismatch(t *testing.T) {
 	}
 }
 
-// TestNewBlockStore_FailureWithValidBlockLoadedFirst exercises the cleanup path
-// where one valid block is already loaded before a later block fails validation,
-// so the readers accumulated so far are released rather than leaked.
-func TestNewBlockStore_FailureWithValidBlockLoadedFirst(t *testing.T) {
+// TestNewBlockStore_FailureClosesLoadedReaders verifies that when loading aborts
+// partway through, the readers already opened are closed rather than leaked. A
+// valid block (random hex directory name) is loaded first, then an invalid
+// directory named to sort after any hex name forces OpenReader to fail; the
+// test asserts no file descriptor under the blocks directory is left open.
+func TestNewBlockStore_FailureClosesLoadedReaders(t *testing.T) {
 	dataDir := t.TempDir()
 
 	// A valid block written through the normal flush path.
@@ -92,23 +117,20 @@ func TestNewBlockStore_FailureWithValidBlockLoadedFirst(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	// A second, invalid block (wrong stored ID) written directly.
+	// An invalid block directory that sorts after any hex block id (block IDs are
+	// lowercase hex, all < 'z'), so the valid block is loaded — and must be
+	// closed — before OpenReader fails on this one (no meta.json).
 	blocksDir := filepath.Join(dataDir, "metrics", "blocks")
-	tmpDir := filepath.Join(dataDir, "metrics", "tmp")
-	w, err := block.NewWriter(blocksDir, tmpDir)
-	if err != nil {
-		t.Fatalf("NewWriter: %v", err)
-	}
-	bad := makeLabels(t, map[string]string{"__name__": "bad", "host": "b"})
-	if err := w.AddSeries(uint64(bad.Fingerprint())+1, labelsToBlockPairs(bad), []*chunk.Chunk{sealedChunk(t)}); err != nil {
-		t.Fatalf("AddSeries: %v", err)
-	}
-	if _, err := w.Commit(); err != nil {
-		t.Fatalf("Commit: %v", err)
+	if err := os.Mkdir(filepath.Join(blocksDir, "zzzz-invalid"), 0o755); err != nil {
+		t.Fatalf("mkdir invalid block: %v", err)
 	}
 
+	before := fdsUnder(t, blocksDir)
 	if _, err := metrics.NewBlockStore(dataDir); err == nil {
-		t.Fatal("NewBlockStore with one valid and one invalid block: want error, got nil")
+		t.Fatal("NewBlockStore with an invalid block directory: want error, got nil")
+	}
+	if after := fdsUnder(t, blocksDir); after > before {
+		t.Errorf("NewBlockStore leaked %d open fd(s) under %s on failure", after-before, blocksDir)
 	}
 }
 
