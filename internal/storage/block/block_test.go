@@ -188,6 +188,44 @@ func TestWriter_AddSeries_RejectsDuplicateLabelName(t *testing.T) {
 	}
 }
 
+// TestWriter_AddSeries_RejectsEmptyLabelName guards against committing a block
+// that the reader cannot open: an empty-named pair (in particular the reserved
+// ("","") pair) collides with the all-series postings sentinel.
+func TestWriter_AddSeries_RejectsEmptyLabelName(t *testing.T) {
+	cases := map[string][]block.LabelPair{
+		"reserved_sentinel": {{"", ""}},
+		"empty_name":        {{"__name__", "http"}, {"", "x"}},
+	}
+	for name, labels := range cases {
+		t.Run(name, func(t *testing.T) {
+			w, _, _ := makeWriter(t)
+			if err := w.AddSeries(1, labels, []*chunk.Chunk{makeChunk(t, [][2]int64{{1000, 1}})}); err == nil {
+				t.Fatal("AddSeries with empty label name: want error, got nil")
+			}
+		})
+	}
+}
+
+// TestWriter_EmptyLabelName_WouldBreakReader documents the round-trip the
+// rejection protects: a block whose label set contains an empty name must not be
+// producible, because OpenReader would otherwise reject it after Commit.
+func TestWriter_EmptyLabelName_WouldBreakReader(t *testing.T) {
+	w, blocksDir, _ := makeWriter(t)
+	// A normal series still round-trips cleanly.
+	if err := w.AddSeries(1, []block.LabelPair{{"__name__", "http"}, {"job", "api"}}, []*chunk.Chunk{makeChunk(t, [][2]int64{{1000, 1}})}); err != nil {
+		t.Fatalf("AddSeries: %v", err)
+	}
+	meta, err := w.Commit()
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	r, err := block.OpenReader(filepath.Join(blocksDir, meta.BlockID))
+	if err != nil {
+		t.Fatalf("OpenReader on valid block: %v", err)
+	}
+	r.Close()
+}
+
 func TestWriter_AddSeries_RejectsDuplicateID(t *testing.T) {
 	w, _, _ := makeWriter(t)
 	if err := w.AddSeries(5, []block.LabelPair{{"__name__", "a"}}, []*chunk.Chunk{makeChunk(t, [][2]int64{{1000, 1}})}); err != nil {
