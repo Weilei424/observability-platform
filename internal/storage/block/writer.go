@@ -9,10 +9,20 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/masonwheeler/observability-platform/internal/storage/chunk"
 )
+
+// canonicalizeLabels returns a copy of pairs sorted ascending by name, leaving
+// the caller's slice untouched.
+func canonicalizeLabels(pairs []LabelPair) []LabelPair {
+	out := make([]LabelPair, len(pairs))
+	copy(out, pairs)
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
 
 type seriesData struct {
 	id     uint64
@@ -55,11 +65,20 @@ func NewWriter(blocksDir, tmpDir string) (*Writer, error) {
 	}, nil
 }
 
-// AddSeries enqueues one series with its sealed chunks for writing.
+// AddSeries enqueues one series with its sealed chunks for writing. The labels
+// are canonicalized (sorted by name) so the written block always satisfies the
+// reader's strictly-ascending requirement; duplicate label names are rejected
+// since they cannot be canonicalized to a single value.
 // chunks must all be sealed (Bytes() must return a valid payload).
 func (w *Writer) AddSeries(id uint64, labels []LabelPair, chunks []*chunk.Chunk) error {
 	if _, dup := w.seriesIDs[id]; dup {
 		return fmt.Errorf("block: duplicate series ID %d", id)
+	}
+	labels = canonicalizeLabels(labels)
+	for i := 1; i < len(labels); i++ {
+		if labels[i].Name == labels[i-1].Name {
+			return fmt.Errorf("block: duplicate label name %q for series %d", labels[i].Name, id)
+		}
 	}
 	w.seriesIDs[id] = struct{}{}
 	for _, c := range chunks {
