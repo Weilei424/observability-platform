@@ -127,9 +127,11 @@ func (f MetadataFilter) isUnfiltered() bool {
 
 // matchingSeries returns the deduplicated series satisfying f: the OR-union of
 // its selectors (or all series when none are given), optionally restricted to
-// those active within [StartMs, EndMs]. A series whose range read errors is
-// skipped rather than failing the whole metadata query.
-func (e *QueryEngine) matchingSeries(f MetadataFilter) []MatchedSeries {
+// those active within [StartMs, EndMs]. A storage error encountered while
+// testing activity is propagated, never swallowed, so that a corrupt chunk or
+// I/O failure surfaces as a failed metadata query rather than a successful but
+// silently-incomplete one.
+func (e *QueryEngine) matchingSeries(f MetadataFilter) ([]MatchedSeries, error) {
 	sels := f.Selectors
 	if len(sels) == 0 {
 		sels = []Selector{{}} // empty selector matches every series
@@ -144,7 +146,10 @@ func (e *QueryEngine) matchingSeries(f MetadataFilter) []MatchedSeries {
 			}
 			if f.HasTime {
 				samples, err := e.store.QueryRange(id, f.StartMs, f.EndMs)
-				if err != nil || len(samples) == 0 {
+				if err != nil {
+					return nil, err
+				}
+				if len(samples) == 0 {
 					continue
 				}
 			}
@@ -152,49 +157,58 @@ func (e *QueryEngine) matchingSeries(f MetadataFilter) []MatchedSeries {
 			out = append(out, ms)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // LabelNames returns a sorted, deduplicated list of label names. With an
 // unfiltered MetadataFilter it is served directly by the store's label index;
 // otherwise it is computed from the label sets of the matching series. Always
-// returns a non-nil slice.
-func (e *QueryEngine) LabelNames(f MetadataFilter) []string {
+// returns a non-nil slice on success. A storage error from time-range filtering
+// is propagated.
+func (e *QueryEngine) LabelNames(f MetadataFilter) ([]string, error) {
 	if f.isUnfiltered() {
 		names := e.store.LabelNames()
 		if names == nil {
-			return []string{}
+			return []string{}, nil
 		}
-		return names
+		return names, nil
+	}
+	series, err := e.matchingSeries(f)
+	if err != nil {
+		return nil, err
 	}
 	set := make(map[string]struct{})
-	for _, ms := range e.matchingSeries(f) {
+	for _, ms := range series {
 		for name := range ms.Labels.Map() {
 			set[name] = struct{}{}
 		}
 	}
-	return sortedStringSet(set)
+	return sortedStringSet(set), nil
 }
 
 // LabelValues returns a sorted, deduplicated list of values for name. With an
 // unfiltered MetadataFilter it is served directly by the store's label index;
 // otherwise it is computed from the matching series. Always returns a non-nil
-// slice.
-func (e *QueryEngine) LabelValues(name string, f MetadataFilter) []string {
+// slice on success. A storage error from time-range filtering is propagated.
+func (e *QueryEngine) LabelValues(name string, f MetadataFilter) ([]string, error) {
 	if f.isUnfiltered() {
 		values := e.store.LabelValues(name)
 		if values == nil {
-			return []string{}
+			return []string{}, nil
 		}
-		return values
+		return values, nil
+	}
+	series, err := e.matchingSeries(f)
+	if err != nil {
+		return nil, err
 	}
 	set := make(map[string]struct{})
-	for _, ms := range e.matchingSeries(f) {
+	for _, ms := range series {
 		if v, ok := ms.Labels.Get(name); ok {
 			set[v] = struct{}{}
 		}
 	}
-	return sortedStringSet(set)
+	return sortedStringSet(set), nil
 }
 
 // sortedStringSet returns the keys of set sorted ascending, never nil.
@@ -214,9 +228,13 @@ func sortedStringSet(set map[string]struct{}) []string {
 // non-nil empty slice when no series match. An empty filter (no selectors)
 // returns every series; callers that require at least one selector are
 // responsible for enforcing that before calling.
-func (e *QueryEngine) Series(f MetadataFilter) []Labels {
+func (e *QueryEngine) Series(f MetadataFilter) ([]Labels, error) {
+	series, err := e.matchingSeries(f)
+	if err != nil {
+		return nil, err
+	}
 	seen := make(map[SeriesID]Labels)
-	for _, ms := range e.matchingSeries(f) {
+	for _, ms := range series {
 		id := ms.Labels.Fingerprint()
 		if _, exists := seen[id]; !exists {
 			seen[id] = ms.Labels
@@ -273,5 +291,5 @@ func (e *QueryEngine) Series(f MetadataFilter) []Labels {
 	for i, e := range entries {
 		result[i] = e.labels
 	}
-	return result
+	return result, nil
 }
