@@ -249,6 +249,14 @@ func decodeLabelSet(data []byte) ([]LabelPair, error) {
 		value := string(data[pos : pos+valLen])
 		pos += valLen
 
+		// Label names are written strictly ascending (the writer sorts them), so
+		// enforce that here. This rejects both out-of-order names and duplicate
+		// names — the latter would otherwise silently collapse when callers fold
+		// the pairs into a map, yielding a different label set than the postings.
+		if len(pairs) > 0 && name <= pairs[len(pairs)-1].Name {
+			return nil, fmt.Errorf("block: label set names not strictly ascending (%q after %q)", name, pairs[len(pairs)-1].Name)
+		}
+
 		pairs = append(pairs, LabelPair{Name: name, Value: value})
 	}
 	return pairs, nil
