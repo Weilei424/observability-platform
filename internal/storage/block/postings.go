@@ -247,6 +247,9 @@ func newFilePostings(f *os.File, expected *index.MemPostings) (*filePostings, er
 			return nil, fmt.Errorf("block: postings list offset %d out of range", off)
 		}
 		if name == "" && val == "" {
+			if fp.allRefs >= 0 {
+				return nil, fmt.Errorf("block: postings offset table has duplicate allRefs sentinel")
+			}
 			fp.allRefs = off
 			continue
 		}
@@ -254,6 +257,9 @@ func newFilePostings(f *os.File, expected *index.MemPostings) (*filePostings, er
 		if !ok {
 			vals = make(map[string]int64)
 			fp.offsets[name] = vals
+		}
+		if _, dup := vals[val]; dup {
+			return nil, fmt.Errorf("block: postings offset table has duplicate entry %q=%q", name, val)
 		}
 		vals[val] = off
 		nameSet[name] = struct{}{}
