@@ -28,6 +28,7 @@ type Writer struct {
 	blockID    string
 	workDir    string // temp directory; cleared after Commit
 	series     []seriesData
+	seriesIDs  map[uint64]struct{} // guards against duplicate series IDs
 	minTime    int64
 	maxTime    int64
 	numSamples int
@@ -48,6 +49,7 @@ func NewWriter(blocksDir, tmpDir string) (*Writer, error) {
 		blocksDir: blocksDir,
 		blockID:   id,
 		workDir:   workDir,
+		seriesIDs: make(map[uint64]struct{}),
 		minTime:   math.MaxInt64,
 		maxTime:   math.MinInt64,
 	}, nil
@@ -56,6 +58,10 @@ func NewWriter(blocksDir, tmpDir string) (*Writer, error) {
 // AddSeries enqueues one series with its sealed chunks for writing.
 // chunks must all be sealed (Bytes() must return a valid payload).
 func (w *Writer) AddSeries(id uint64, labels []LabelPair, chunks []*chunk.Chunk) error {
+	if _, dup := w.seriesIDs[id]; dup {
+		return fmt.Errorf("block: duplicate series ID %d", id)
+	}
+	w.seriesIDs[id] = struct{}{}
 	for _, c := range chunks {
 		if c.NumSamples() == 0 {
 			continue
