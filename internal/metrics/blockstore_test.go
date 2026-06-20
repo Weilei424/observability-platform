@@ -68,6 +68,50 @@ func TestNewBlockStore_RejectsFingerprintMismatch(t *testing.T) {
 	}
 }
 
+// TestNewBlockStore_FailureWithValidBlockLoadedFirst exercises the cleanup path
+// where one valid block is already loaded before a later block fails validation,
+// so the readers accumulated so far are released rather than leaked.
+func TestNewBlockStore_FailureWithValidBlockLoadedFirst(t *testing.T) {
+	dataDir := t.TempDir()
+
+	// A valid block written through the normal flush path.
+	bs, err := metrics.NewBlockStore(dataDir)
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+	good := makeLabels(t, map[string]string{"__name__": "ok", "host": "a"})
+	for i := 0; i < 120; i++ {
+		if err := bs.Append(good, int64(i*1000), float64(i)); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	if _, err := bs.FlushBlock(); err != nil {
+		t.Fatalf("FlushBlock: %v", err)
+	}
+	if err := bs.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// A second, invalid block (wrong stored ID) written directly.
+	blocksDir := filepath.Join(dataDir, "metrics", "blocks")
+	tmpDir := filepath.Join(dataDir, "metrics", "tmp")
+	w, err := block.NewWriter(blocksDir, tmpDir)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	bad := makeLabels(t, map[string]string{"__name__": "bad", "host": "b"})
+	if err := w.AddSeries(uint64(bad.Fingerprint())+1, labelsToBlockPairs(bad), []*chunk.Chunk{sealedChunk(t)}); err != nil {
+		t.Fatalf("AddSeries: %v", err)
+	}
+	if _, err := w.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	if _, err := metrics.NewBlockStore(dataDir); err == nil {
+		t.Fatal("NewBlockStore with one valid and one invalid block: want error, got nil")
+	}
+}
+
 func TestBlockStore_FlushBlock_DrainsSealedChunks(t *testing.T) {
 	dataDir := t.TempDir()
 	bs, err := metrics.NewBlockStore(dataDir)
