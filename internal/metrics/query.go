@@ -8,7 +8,7 @@ import (
 // queryStore is the read interface QueryEngine depends on.
 // *MemoryStore, *BlockStore, and *WALStore all implement it.
 type queryStore interface {
-	SelectSeries(sel Selector) []MatchedSeries
+	SelectSeries(sel Selector) ([]MatchedSeries, error)
 	QueryInstant(id SeriesID, tMs int64) (Sample, bool, error)
 	QueryRange(id SeriesID, startMs, endMs int64) ([]Sample, error)
 	LabelNames() []string
@@ -47,7 +47,10 @@ type RangeSeries struct {
 // InstantQuery returns the latest sample at or before tMs for each series
 // matching sel. Series with no sample at or before tMs are omitted.
 func (e *QueryEngine) InstantQuery(sel Selector, tMs int64) ([]InstantSample, error) {
-	matched := e.store.SelectSeries(sel)
+	matched, err := e.store.SelectSeries(sel)
+	if err != nil {
+		return nil, err
+	}
 	result := make([]InstantSample, 0, len(matched))
 	for _, ms := range matched {
 		sample, ok, err := e.store.QueryInstant(ms.Labels.Fingerprint(), tMs)
@@ -79,7 +82,10 @@ func (e *QueryEngine) RangeQuery(sel Selector, startMs, endMs, stepMs int64) ([]
 		return nil, fmt.Errorf("end time must be >= start time")
 	}
 
-	matched := e.store.SelectSeries(sel)
+	matched, err := e.store.SelectSeries(sel)
+	if err != nil {
+		return nil, err
+	}
 	result := make([]RangeSeries, 0, len(matched))
 
 	for _, ms := range matched {
@@ -139,7 +145,11 @@ func (e *QueryEngine) matchingSeries(f MetadataFilter) ([]MatchedSeries, error) 
 	seen := make(map[SeriesID]struct{})
 	var out []MatchedSeries
 	for _, sel := range sels {
-		for _, ms := range e.store.SelectSeries(sel) {
+		matched, err := e.store.SelectSeries(sel)
+		if err != nil {
+			return nil, err
+		}
+		for _, ms := range matched {
 			id := ms.Labels.Fingerprint()
 			if _, ok := seen[id]; ok {
 				continue
