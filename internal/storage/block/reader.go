@@ -64,11 +64,25 @@ func OpenReader(blockDir string) (*Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	byID := make(map[uint64]int, len(entries))
-	for i, se := range entries {
-		byID[se.ID] = i
+	byID, err := buildSeriesByID(entries)
+	if err != nil {
+		return nil, err
 	}
 	return &Reader{dir: blockDir, meta: meta, entries: entries, byID: byID, postings: postings}, nil
+}
+
+// buildSeriesByID maps each series ID to its index in entries, rejecting
+// duplicate IDs. A duplicate would otherwise cause SeriesByID to silently
+// resolve only the last entry, dropping the others from query results.
+func buildSeriesByID(entries []SeriesEntry) (map[uint64]int, error) {
+	byID := make(map[uint64]int, len(entries))
+	for i, se := range entries {
+		if _, dup := byID[se.ID]; dup {
+			return nil, fmt.Errorf("block: duplicate series ID %d in index", se.ID)
+		}
+		byID[se.ID] = i
+	}
+	return byID, nil
 }
 
 // Meta returns the block metadata.
