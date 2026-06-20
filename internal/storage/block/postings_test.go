@@ -98,6 +98,27 @@ func TestReader_Postings_RebuildFallback(t *testing.T) {
 	}
 }
 
+// TestReader_Postings_HugeListCount_FailsAtOpen verifies that an inflated list
+// count is caught eagerly at OpenReader time, so corruption surfaces as a load
+// failure rather than being lazily converted into silently-missing query data.
+func TestReader_Postings_HugeListCount_FailsAtOpen(t *testing.T) {
+	dir := writeTestBlock(t)
+	path := filepath.Join(dir, "postings")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read postings: %v", err)
+	}
+	// Inflate the first list's 4-byte count (at postingsHeaderSz) so its body
+	// would run past the offset table.
+	binary.BigEndian.PutUint32(data[postingsHeaderSz:], 0x0FFFFFFF)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write corrupt postings: %v", err)
+	}
+	if _, err := OpenReader(dir); err == nil {
+		t.Fatal("OpenReader on inflated postings list count: want error, got nil")
+	}
+}
+
 func TestReader_Postings_CorruptIsError(t *testing.T) {
 	dir := writeTestBlock(t)
 	// Truncate the footer so the offset table cannot be located.
