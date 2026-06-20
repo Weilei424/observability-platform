@@ -7,12 +7,16 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 )
 
-// buildFlushedBlockStore creates nSeries (each with one sealed chunk) and flushes
-// them into an on-disk block, returning a BlockStore whose data lives entirely in
-// the persisted block. This exercises the postings + ID-index resolution path,
-// not the in-memory index.
+// buildFlushedBlockStore creates nSeries (each with one sealed chunk), flushes
+// them into an on-disk block, then reopens the store from the same data dir.
+// Reopening matters: DiscardSealedChunks leaves the flushed series in the head
+// index, so without a fresh open SelectSeries would still resolve them from
+// memory and the benchmark would not measure the persisted path. After reopen
+// the memory store is empty and every series lives only in the block, isolating
+// the postings + ID-index resolution path.
 func buildFlushedBlockStore(b *testing.B, nSeries int) *metrics.BlockStore {
-	bs, err := metrics.NewBlockStore(b.TempDir())
+	dataDir := b.TempDir()
+	bs, err := metrics.NewBlockStore(dataDir)
 	if err != nil {
 		b.Fatalf("NewBlockStore: %v", err)
 	}
@@ -35,7 +39,14 @@ func buildFlushedBlockStore(b *testing.B, nSeries int) *metrics.BlockStore {
 	if ok, err := bs.FlushBlock(); err != nil || !ok {
 		b.Fatalf("FlushBlock: ok=%v err=%v", ok, err)
 	}
-	return bs
+	if err := bs.Close(); err != nil {
+		b.Fatalf("Close: %v", err)
+	}
+	reopened, err := metrics.NewBlockStore(dataDir)
+	if err != nil {
+		b.Fatalf("reopen NewBlockStore: %v", err)
+	}
+	return reopened
 }
 
 // BenchmarkBlockStoreSelectSeries_Persisted measures the persisted-query path
