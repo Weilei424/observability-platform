@@ -114,11 +114,7 @@ func loadPostings(dir string, entries []SeriesEntry) (blockPostings, error) {
 	if err != nil {
 		return nil, fmt.Errorf("block: open postings: %w", err)
 	}
-	validIDs := make(map[uint64]struct{}, len(entries))
-	for _, se := range entries {
-		validIDs[se.ID] = struct{}{}
-	}
-	fp, err := newFilePostings(f, validIDs)
+	fp, err := newFilePostings(f, buildMemPostings(entries))
 	if err != nil {
 		f.Close()
 		return nil, err
@@ -126,7 +122,11 @@ func loadPostings(dir string, entries []SeriesEntry) (blockPostings, error) {
 	return fp, nil
 }
 
-func rebuildPostings(entries []SeriesEntry) blockPostings {
+// buildMemPostings constructs the in-memory inverted index implied by the
+// forward index. It is the authoritative expected form of the persisted
+// postings and is used both as the rebuild fallback and to validate the
+// persisted file at open.
+func buildMemPostings(entries []SeriesEntry) *index.MemPostings {
 	mp := index.NewMemPostings()
 	for _, se := range entries {
 		pairs := make([]index.Pair, 0, len(se.Labels))
@@ -135,7 +135,11 @@ func rebuildPostings(entries []SeriesEntry) blockPostings {
 		}
 		mp.Add(se.ID, pairs)
 	}
-	return &memPostings{idx: mp}
+	return mp
+}
+
+func rebuildPostings(entries []SeriesEntry) blockPostings {
+	return &memPostings{idx: buildMemPostings(entries)}
 }
 
 // --- memPostings (fallback) ---
@@ -162,7 +166,7 @@ type filePostings struct {
 	values   map[string][]string         // name -> sorted values, excluding sentinel
 }
 
-func newFilePostings(f *os.File, validIDs map[uint64]struct{}) (*filePostings, error) {
+func newFilePostings(f *os.File, expected *index.MemPostings) (*filePostings, error) {
 	st, err := f.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("block: stat postings: %w", err)
@@ -265,79 +269,104 @@ func newFilePostings(f *os.File, validIDs map[uint64]struct{}) (*filePostings, e
 	for _, vs := range fp.values {
 		sort.Strings(vs)
 	}
-	if err := fp.validateLists(validIDs); err != nil {
+	if err := fp.validate(expected); err != nil {
 		return nil, err
 	}
 	return fp, nil
 }
 
-// validateLists eagerly validates every postings list (the allRefs sentinel plus
-// each label-pair list) at open time, so corruption fails fast instead of being
-// lazily skipped during a query and silently converted into missing/incorrect
-// results. Lists are written contiguously between the header and the offset
-// table, so each list body must end exactly where the next list begins. For
-// each list it verifies:
+// validate verifies the persisted postings exactly reproduce the inverted index
+// implied by the forward index (expected), so corruption fails fast at open
+// instead of being lazily skipped during a query and silently converted into
+// missing or incorrect results. Lists are written contiguously between the
+// header and the offset table, so each body must end exactly where the next list
+// begins. validate checks:
 //
-//   - the declared body (4-byte count + cnt*8 IDs) exactly fills the gap to the
-//     next list offset (or to the offset table for the final list); this rejects
-//     both reduced counts and counts that bleed into the neighbouring list,
-//   - the IDs are strictly ascending (the intersection logic in Select depends
-//     on sorted lists), and
-//   - every ID refers to a series present in the block index.
-func (fp *filePostings) validateLists(validIDs map[uint64]struct{}) error {
-	// Collect all list offsets and sort them to derive each list's exclusive end
-	// bound from the next list's start.
-	offs := make([]int64, 0, 1+len(fp.offsets))
-	offs = append(offs, fp.allRefs)
-	for _, vals := range fp.offsets {
-		for _, off := range vals {
-			offs = append(offs, off)
+//   - the file lists the same set of label pairs as the forward index (no
+//     missing or extra pairs),
+//   - each list body (4-byte count + cnt*8 IDs) exactly fills the gap to the
+//     next list offset, rejecting reduced or overlapping counts,
+//   - no list claims more entries than the block has series (bounding the read
+//     allocation), and
+//   - each list's IDs equal the forward index's postings for that exact pair —
+//     which subsumes ordering, ID existence, and correct label-pair association.
+func (fp *filePostings) validate(expected *index.MemPostings) error {
+	total := expected.SeriesCount()
+
+	// Pair each list offset with its (name, value); allRefs is the "","" sentinel.
+	type listRef struct {
+		off         int64
+		name, value string
+	}
+	refs := []listRef{{fp.allRefs, "", ""}}
+	pairCount := 0
+	for name, vals := range fp.offsets {
+		for value, off := range vals {
+			refs = append(refs, listRef{off, name, value})
+			pairCount++
 		}
 	}
-	sort.Slice(offs, func(i, j int) bool { return offs[i] < offs[j] })
+	if pairCount != expected.LabelPairCount() {
+		return fmt.Errorf("block: postings has %d label pairs, forward index has %d", pairCount, expected.LabelPairCount())
+	}
 
-	for i, off := range offs {
+	sort.Slice(refs, func(i, j int) bool { return refs[i].off < refs[j].off })
+	for i, ref := range refs {
 		end := fp.otOffset
-		if i+1 < len(offs) {
-			end = offs[i+1]
+		if i+1 < len(refs) {
+			end = refs[i+1].off
 		}
-		if err := fp.validateList(off, end, validIDs); err != nil {
+		ids, err := fp.readListBounded(ref.off, end, total)
+		if err != nil {
 			return err
+		}
+		if !equalU64(ids, expected.Postings(ref.name, ref.value)) {
+			return fmt.Errorf("block: postings list for %q=%q does not match forward index", ref.name, ref.value)
 		}
 	}
 	return nil
 }
 
-// validateList checks the single list starting at off whose body must end
-// exactly at end (the next list offset, or the offset table for the last list).
-func (fp *filePostings) validateList(off, end int64, validIDs map[uint64]struct{}) error {
+// readListBounded reads the list at off whose body must end exactly at end. cnt
+// is rejected if it exceeds maxCount (the block's series count), bounding the
+// allocation against a corrupt count.
+func (fp *filePostings) readListBounded(off, end int64, maxCount int) ([]uint64, error) {
 	cntBuf := make([]byte, 4)
 	if _, err := fp.f.ReadAt(cntBuf, off); err != nil {
-		return fmt.Errorf("block: validate postings list count at offset %d: %w", off, err)
+		return nil, fmt.Errorf("block: validate postings list count at offset %d: %w", off, err)
 	}
 	cnt := int64(binary.BigEndian.Uint32(cntBuf))
-	if cnt < 0 || off+4+cnt*8 != end {
-		return fmt.Errorf("block: postings list at offset %d claims %d entries but body does not end at next list boundary %d", off, cnt, end)
+	if off+4+cnt*8 != end {
+		return nil, fmt.Errorf("block: postings list at offset %d claims %d entries but body does not end at next list boundary %d", off, cnt, end)
+	}
+	if cnt > int64(maxCount) {
+		return nil, fmt.Errorf("block: postings list at offset %d claims %d entries, exceeds block series count %d", off, cnt, maxCount)
 	}
 	if cnt == 0 {
-		return nil
+		return nil, nil
 	}
 	idBuf := make([]byte, cnt*8)
 	if _, err := fp.f.ReadAt(idBuf, off+4); err != nil {
-		return fmt.Errorf("block: validate postings list ids at offset %d: %w", off, err)
+		return nil, fmt.Errorf("block: validate postings list ids at offset %d: %w", off, err)
 	}
-	var prev uint64
+	ids := make([]uint64, cnt)
 	for i := int64(0); i < cnt; i++ {
-		id := binary.BigEndian.Uint64(idBuf[i*8:])
-		if i > 0 && id <= prev {
-			return fmt.Errorf("block: postings list at offset %d is not strictly ascending (%d after %d)", off, id, prev)
-		}
-		if _, ok := validIDs[id]; !ok {
-			return fmt.Errorf("block: postings list at offset %d references unknown series ID %d", off, id)
-		}
-		prev = id
+		ids[i] = binary.BigEndian.Uint64(idBuf[i*8:])
 	}
-	return nil
+	return ids, nil
+}
+
+// equalU64 reports whether two uint64 slices have identical contents in order.
+func equalU64(a, b []uint64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // readList reads the postings list whose count+ids start at off.
