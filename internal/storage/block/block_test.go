@@ -150,6 +150,16 @@ func TestReader_OpenReader_LoadsSeries(t *testing.T) {
 	}
 }
 
+func TestWriter_AddSeries_RejectsDuplicateID(t *testing.T) {
+	w, _, _ := makeWriter(t)
+	if err := w.AddSeries(5, []block.LabelPair{{"__name__", "a"}}, []*chunk.Chunk{makeChunk(t, [][2]int64{{1000, 1}})}); err != nil {
+		t.Fatalf("first AddSeries: %v", err)
+	}
+	if err := w.AddSeries(5, []block.LabelPair{{"__name__", "b"}}, []*chunk.Chunk{makeChunk(t, [][2]int64{{1000, 2}})}); err == nil {
+		t.Fatal("second AddSeries with duplicate ID: want error, got nil")
+	}
+}
+
 func TestReader_SeriesByID(t *testing.T) {
 	w, blocksDir, _ := makeWriter(t)
 	_ = w.AddSeries(7, []block.LabelPair{{"__name__", "req"}}, []*chunk.Chunk{makeChunk(t, [][2]int64{{1000, 1}})})
