@@ -13,8 +13,8 @@ import (
 // silently treating the series as inactive.
 type errOnRangeStore struct{ labels metrics.Labels }
 
-func (s errOnRangeStore) SelectSeries(_ metrics.Selector) []metrics.MatchedSeries {
-	return []metrics.MatchedSeries{{Labels: s.labels}}
+func (s errOnRangeStore) SelectSeries(_ metrics.Selector) ([]metrics.MatchedSeries, error) {
+	return []metrics.MatchedSeries{{Labels: s.labels}}, nil
 }
 func (s errOnRangeStore) QueryInstant(_ metrics.SeriesID, _ int64) (metrics.Sample, bool, error) {
 	return metrics.Sample{}, false, nil
@@ -24,6 +24,38 @@ func (s errOnRangeStore) QueryRange(_ metrics.SeriesID, _, _ int64) ([]metrics.S
 }
 func (s errOnRangeStore) LabelNames() []string          { return nil }
 func (s errOnRangeStore) LabelValues(_ string) []string { return nil }
+
+// errOnSelectStore is a queryStore whose SelectSeries always fails, used to
+// verify query execution propagates a postings read failure rather than
+// silently returning fewer series.
+type errOnSelectStore struct{}
+
+func (errOnSelectStore) SelectSeries(_ metrics.Selector) ([]metrics.MatchedSeries, error) {
+	return nil, errors.New("simulated postings read failure")
+}
+func (errOnSelectStore) QueryInstant(_ metrics.SeriesID, _ int64) (metrics.Sample, bool, error) {
+	return metrics.Sample{}, false, nil
+}
+func (errOnSelectStore) QueryRange(_ metrics.SeriesID, _, _ int64) ([]metrics.Sample, error) {
+	return nil, nil
+}
+func (errOnSelectStore) LabelNames() []string          { return nil }
+func (errOnSelectStore) LabelValues(_ string) []string { return nil }
+
+func TestQueryEngine_PropagatesSelectSeriesError(t *testing.T) {
+	engine := metrics.NewQueryEngine(errOnSelectStore{})
+	sel := metrics.Selector{MetricName: "cpu"}
+
+	if _, err := engine.InstantQuery(sel, 1000); err == nil {
+		t.Error("InstantQuery with failing SelectSeries: want error, got nil")
+	}
+	if _, err := engine.RangeQuery(sel, 1000, 2000, 1000); err == nil {
+		t.Error("RangeQuery with failing SelectSeries: want error, got nil")
+	}
+	if _, err := engine.Series(metrics.MetadataFilter{Selectors: []metrics.Selector{sel}}); err == nil {
+		t.Error("Series with failing SelectSeries: want error, got nil")
+	}
+}
 
 func TestQueryEngine_Metadata_PropagatesStorageError(t *testing.T) {
 	labels := mustNewLabels(t, map[string]string{"__name__": "cpu", "host": "a"})
