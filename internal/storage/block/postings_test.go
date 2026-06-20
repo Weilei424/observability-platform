@@ -278,6 +278,69 @@ func TestBuildSeriesByID_RejectsDuplicateID(t *testing.T) {
 	}
 }
 
+// duplicateOffsetTableEntry returns a copy of a postings file with the
+// offset-table entry at entryIndex duplicated (appended) and the entry count
+// incremented. The lists region and footer offset are unchanged.
+func duplicateOffsetTableEntry(t *testing.T, data []byte, entryIndex int) []byte {
+	t.Helper()
+	otOffset := int64(binary.BigEndian.Uint64(data[len(data)-postingsFooterSz:]))
+	table := data[otOffset : len(data)-postingsFooterSz]
+	numEntries := int(binary.BigEndian.Uint32(table[:4]))
+	pos := 4
+	skipStr := func() {
+		n := int(binary.BigEndian.Uint32(table[pos:]))
+		pos += 4 + n
+	}
+	var start, end int
+	for i := 0; i < numEntries; i++ {
+		s := pos
+		skipStr() // name
+		skipStr() // value
+		pos += 8  // offset
+		if i == entryIndex {
+			start, end = s, pos
+			break
+		}
+	}
+	entry := append([]byte(nil), table[start:end]...)
+
+	var cnt [4]byte
+	binary.BigEndian.PutUint32(cnt[:], uint32(numEntries+1))
+	newTable := append([]byte(nil), cnt[:]...)
+	newTable = append(newTable, table[4:]...)
+	newTable = append(newTable, entry...)
+
+	var footer [8]byte
+	binary.BigEndian.PutUint64(footer[:], uint64(otOffset))
+	out := append([]byte(nil), data[:otOffset]...)
+	out = append(out, newTable...)
+	out = append(out, footer[:]...)
+	return out
+}
+
+// TestReader_Postings_DuplicateOffsetEntry_FailsAtOpen verifies that a duplicated
+// offset-table entry is rejected, rather than being silently collapsed by the
+// map that backs the offset lookup. Entry 0 is the allRefs sentinel; entry 1 is
+// the first real label pair.
+func TestReader_Postings_DuplicateOffsetEntry_FailsAtOpen(t *testing.T) {
+	for name, idx := range map[string]int{"sentinel": 0, "pair": 1} {
+		t.Run(name, func(t *testing.T) {
+			dir := writeTestBlock(t)
+			path := filepath.Join(dir, "postings")
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read postings: %v", err)
+			}
+			if err := os.WriteFile(path, duplicateOffsetTableEntry(t, data, idx), 0o644); err != nil {
+				t.Fatalf("write corrupt postings: %v", err)
+			}
+			if _, err := OpenReader(dir); err == nil {
+				t.Fatal("OpenReader with duplicate offset-table entry: want error, got nil")
+			}
+		})
+	}
+}
+
 func TestReader_Postings_CorruptIsError(t *testing.T) {
 	dir := writeTestBlock(t)
 	// Truncate the footer so the offset table cannot be located.
