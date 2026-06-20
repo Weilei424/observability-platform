@@ -37,6 +37,7 @@ type Reader struct {
 	dir        string
 	meta       Meta
 	entries    []SeriesEntry
+	byID       map[uint64]int // series ID -> index into entries
 	postings   blockPostings
 	mu         sync.Mutex
 	chunksFile *os.File
@@ -63,7 +64,11 @@ func OpenReader(blockDir string) (*Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Reader{dir: blockDir, meta: meta, entries: entries, postings: postings}, nil
+	byID := make(map[uint64]int, len(entries))
+	for i, se := range entries {
+		byID[se.ID] = i
+	}
+	return &Reader{dir: blockDir, meta: meta, entries: entries, byID: byID, postings: postings}, nil
 }
 
 // Meta returns the block metadata.
@@ -71,6 +76,17 @@ func (r *Reader) Meta() Meta { return r.meta }
 
 // Series returns all series entries loaded from the index.
 func (r *Reader) Series() []SeriesEntry { return r.entries }
+
+// SeriesByID returns the series entry for id in O(1) via the ID index, avoiding
+// a linear scan over all series. The second return is false if id is not in
+// this block.
+func (r *Reader) SeriesByID(id uint64) (SeriesEntry, bool) {
+	i, ok := r.byID[id]
+	if !ok {
+		return SeriesEntry{}, false
+	}
+	return r.entries[i], true
+}
 
 // Postings returns the sorted series IDs in this block matching all matchers
 // (AND). Empty matchers return every series in the block.
