@@ -61,7 +61,7 @@ func (s *WALStore) Append(labels Labels, tsMs int64, value float64) error {
 	return s.store.AppendTracked(labels, tsMs, value, walSeg)
 }
 
-func (s *WALStore) SelectSeries(sel Selector) []MatchedSeries {
+func (s *WALStore) SelectSeries(sel Selector) ([]MatchedSeries, error) {
 	return s.store.SelectSeries(sel)
 }
 
