@@ -265,6 +265,9 @@ func newFilePostings(f *os.File, expected *index.MemPostings) (*filePostings, er
 		nameSet[name] = struct{}{}
 		fp.values[name] = append(fp.values[name], val)
 	}
+	if pos != len(ot) {
+		return nil, fmt.Errorf("block: postings offset table has %d unconsumed trailing bytes", len(ot)-pos)
+	}
 	if fp.allRefs < 0 {
 		return nil, fmt.Errorf("block: postings missing allRefs sentinel")
 	}
