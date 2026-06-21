@@ -147,6 +147,23 @@ func TestMemPostings_Delete_RemovesStaleLabelMetadata(t *testing.T) {
 	}
 }
 
+func TestMemPostings_Add_ExistingIDIsNoOp(t *testing.T) {
+	p := NewMemPostings()
+	p.Add(1, pairs("job", "api"))
+	// Re-adding the same id with different labels must be a no-op per the contract.
+	p.Add(1, pairs("job", "web"))
+
+	if got := p.Postings("job", "web"); len(got) != 0 {
+		t.Errorf("Postings(job=web) = %v, want empty (Add must be a no-op for an existing id)", got)
+	}
+	if got := p.Postings("job", "api"); len(got) != 1 || got[0] != 1 {
+		t.Errorf("Postings(job=api) = %v, want [1]", got)
+	}
+	if got := p.LabelValues("job"); len(got) != 1 || got[0] != "api" {
+		t.Errorf("LabelValues(job) = %v, want [api]", got)
+	}
+}
+
 func TestMemPostings_LabelNamesAndValuesSorted(t *testing.T) {
 	p := NewMemPostings()
 	p.Add(1, pairs("__name__", "http", "job", "web"))
