@@ -28,10 +28,15 @@ func NewMemPostings() *MemPostings {
 }
 
 // Add inserts id into the postings list of each label pair and into allRefs,
-// keeping every list sorted ascending. Adding an id already present is a no-op.
+// keeping every list sorted ascending. Adding an id already present is a no-op,
+// regardless of the labels passed: a series is indexed once, under the labels of
+// its first Add.
 func (p *MemPostings) Add(id uint64, labels []Pair) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if containsSorted(p.allRefs, id) {
+		return
+	}
 	p.allRefs = insertSorted(p.allRefs, id)
 	for _, l := range labels {
 		vals, ok := p.m[l.Name]
@@ -88,6 +93,12 @@ func (p *MemPostings) Select(matchers []Pair) []uint64 {
 		}
 	}
 	return result
+}
+
+// containsSorted reports whether the ascending slice s contains id.
+func containsSorted(s []uint64, id uint64) bool {
+	i := sort.Search(len(s), func(i int) bool { return s[i] >= id })
+	return i < len(s) && s[i] == id
 }
 
 // insertSorted inserts id into the ascending slice s, skipping duplicates.
