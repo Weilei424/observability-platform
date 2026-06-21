@@ -475,9 +475,16 @@ func (fp *filePostings) Select(matchers []index.Pair) ([]uint64, error) {
 	return result, nil
 }
 
-func (fp *filePostings) LabelNames() []string { return fp.names }
+// LabelNames returns a copy of the sorted label names; the caller may mutate it
+// without corrupting the reader's internal metadata.
+func (fp *filePostings) LabelNames() []string {
+	return append([]string(nil), fp.names...)
+}
 
-func (fp *filePostings) LabelValues(name string) []string { return fp.values[name] }
+// LabelValues returns a copy of the sorted values for name.
+func (fp *filePostings) LabelValues(name string) []string {
+	return append([]string(nil), fp.values[name]...)
+}
 
 func (fp *filePostings) Close() error {
 	fp.mu.Lock()
