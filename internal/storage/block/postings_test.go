@@ -341,6 +341,31 @@ func TestReader_Postings_DuplicateOffsetEntry_FailsAtOpen(t *testing.T) {
 	}
 }
 
+// TestReader_Postings_TrailingOffsetTableBytes_FailsAtOpen verifies that extra,
+// unconsumed bytes in the offset-table region (between the last entry and the
+// footer) are rejected rather than silently ignored.
+func TestReader_Postings_TrailingOffsetTableBytes_FailsAtOpen(t *testing.T) {
+	dir := writeTestBlock(t)
+	path := filepath.Join(dir, "postings")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read postings: %v", err)
+	}
+	// Insert junk just before the 8-byte footer. otOffset is unchanged, so the
+	// offset-table region grows by the junk while numEntries stays the same,
+	// leaving trailing bytes unconsumed after parsing.
+	junk := []byte{0xde, 0xad, 0xbe, 0xef}
+	corrupt := append([]byte(nil), data[:len(data)-postingsFooterSz]...)
+	corrupt = append(corrupt, junk...)
+	corrupt = append(corrupt, data[len(data)-postingsFooterSz:]...)
+	if err := os.WriteFile(path, corrupt, 0o644); err != nil {
+		t.Fatalf("write corrupt postings: %v", err)
+	}
+	if _, err := OpenReader(dir); err == nil {
+		t.Fatal("OpenReader with trailing offset-table bytes: want error, got nil")
+	}
+}
+
 func TestReader_Postings_CorruptIsError(t *testing.T) {
 	dir := writeTestBlock(t)
 	// Truncate the footer so the offset table cannot be located.
