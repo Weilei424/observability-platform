@@ -366,6 +366,36 @@ func TestReader_Postings_TrailingOffsetTableBytes_FailsAtOpen(t *testing.T) {
 	}
 }
 
+// TestReader_Postings_LabelMetadataReturnsCopies verifies that mutating the
+// slices returned by LabelNames/LabelValues does not corrupt the reader's
+// internal metadata.
+func TestReader_Postings_LabelMetadataReturnsCopies(t *testing.T) {
+	dir := writeTestBlock(t)
+	r, err := OpenReader(dir)
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer r.Close()
+
+	names := r.LabelNames()
+	if len(names) == 0 {
+		t.Fatal("LabelNames returned empty")
+	}
+	names[0] = "MUTATED"
+	if r.LabelNames()[0] == "MUTATED" {
+		t.Error("LabelNames returned a mutable internal slice")
+	}
+
+	vals := r.LabelValues("job")
+	if len(vals) == 0 {
+		t.Fatal("LabelValues(job) returned empty")
+	}
+	vals[0] = "MUTATED"
+	if r.LabelValues("job")[0] == "MUTATED" {
+		t.Error("LabelValues returned a mutable internal slice")
+	}
+}
+
 func TestReader_Postings_CorruptIsError(t *testing.T) {
 	dir := writeTestBlock(t)
 	// Truncate the footer so the offset table cannot be located.
