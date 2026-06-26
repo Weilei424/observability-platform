@@ -466,3 +466,20 @@ func TestMemoryStore_LabelNamesAndValues(t *testing.T) {
 		t.Fatalf("LabelValues(job) = %v, want [api web]", got)
 	}
 }
+
+func TestMemoryStore_SealedChunkCount(t *testing.T) {
+	s := metrics.NewMemoryStore()
+	lbls, err := metrics.NewLabels(map[string]string{"__name__": "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 120 samples seal exactly one chunk; the 121st opens an unsealed head chunk.
+	for i := 0; i < 121; i++ {
+		if err := s.Append(lbls, int64(i)*1000, float64(i)); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+	}
+	if got := s.SealedChunkCount(); got != 1 {
+		t.Fatalf("SealedChunkCount = %d, want 1", got)
+	}
+}
