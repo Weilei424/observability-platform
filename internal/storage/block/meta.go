@@ -16,6 +16,32 @@ type Meta struct {
 	NumSeries  int       `json:"num_series"`
 	NumSamples int       `json:"num_samples"`
 	CreatedAt  time.Time `json:"created_at"`
+	Level      int       `json:"level"`             // 1 = freshly flushed head block; N = compacted
+	Sources    []string  `json:"sources,omitempty"` // block IDs merged into this block
+}
+
+// EffectiveLevel returns the compaction level, treating a missing/zero level
+// (blocks written before Phase 3.4) as level 1.
+func (m Meta) EffectiveLevel() int {
+	if m.Level <= 0 {
+		return 1
+	}
+	return m.Level
+}
+
+// BlockInfo is a lightweight snapshot of a block for compaction planning and
+// storage metrics. SizeBytes is the sum of the block directory's file sizes.
+type BlockInfo struct {
+	ID        string
+	Level     int
+	MinTime   int64
+	MaxTime   int64
+	SizeBytes int64
+}
+
+// ReadMeta reads and parses meta.json from a block directory.
+func ReadMeta(dir string) (Meta, error) {
+	return readMeta(dir)
 }
 
 func writeMeta(dir string, m Meta) error {
