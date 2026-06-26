@@ -227,16 +227,22 @@ Design: `docs/superpowers/specs/2026-06-18-phase-3.3-label-index-design.md` · P
 - [x] Metadata filtering (deferred from Phase 2.3): `metrics.MetadataFilter` adds `match[]` + time-range filtering to `QueryEngine.LabelNames`/`LabelValues`/`Series`; handlers build the filter in `internal/api/metadata.go`
 
 ### Phase 3.4 — Compaction and Retention
-- [ ] Implement automatic flush trigger (background goroutine; flush when WAL exceeds size threshold or sealed chunks exceed age/count threshold)
-- [ ] Implement block compactor
-- [ ] Merge adjacent compatible blocks
-- [ ] Preserve index correctness after compaction
-- [ ] Implement retention cleanup by time window
-- [ ] Add safe deletion behavior
-- [ ] Emit compaction metrics
-- [ ] Unit tests: compaction does not lose data
-- [ ] Unit tests: retention boundary behavior
-- [ ] Integration test: compacted data remains queryable
+Design: `docs/superpowers/specs/2026-06-25-phase-3.4-compaction-retention-design.md` · Plan: `docs/superpowers/plans/2026-06-25-phase-3.4-compaction-retention.md`
+- [x] Extend `block.Meta` with `Level` + `Sources` (`EffectiveLevel`, `BlockInfo`, exported `ReadMeta`); `Writer.SetCompaction` writes them (flush blocks are level 1)
+- [x] Add `block.Compact(blocksDir, tmpDir, sources)` pure merge primitive — union series, sort+dedup samples (later source wins), re-chunk (120/2h), regenerate index+postings via `Writer`
+- [x] Add flush-threshold accessors — `wal.DirSize`/`WALStore.WALBytes`, `MemoryStore.SealedChunkCount`/`BlockStore.SealedChunkCount`
+- [x] Add `BlockStore.BlockInfos` + `StorageStats` (block count + on-disk bytes)
+- [x] Hold `BlockStore` read lock across block reads so compaction/retention can safely close+reclaim readers; add `CompactOnce`, `readerByID`, crash-safe `safeDeleteBlock` (rename-to-tmp + RemoveAll)
+- [x] Add `BlockStore.ApplyRetention` (whole-block, `MaxTime < now-retention`); startup GC of superseded compaction sources in `NewBlockStore`
+- [x] Add config — `maintenance_interval`, `flush_interval`, `flush_sealed_chunks`, `flush_wal_bytes`, `compaction_base_range`, `compaction_multiplier`, `compaction_levels`, `retention` (default 0 = disabled) with validation
+- [x] Refactor `observability.NewRegistry` → `(card, storage) (*Registry, *Metrics)`; add pull gauges `obs_blocks_total`/`obs_blocks_bytes` and push instruments (compactions, compaction duration, failures, retention deletions, flushes)
+- [x] Add `internal/compactor` tiered time-aligned planner (`Ranges`, `Plan`) — merge ≥2 aligned blocks below the tier range, smallest tier first
+- [x] Add `internal/compactor` maintenance scheduler (`RunOnce`/`Run`: flush-if-due → compact-to-stable → retention) with metrics
+- [x] Wire graceful lifecycle in `cmd/server/main.go` — signal context, `http.Server.Shutdown`, background compactor goroutine, final flush, close WAL + block readers
+- [x] Unit tests: compaction does not lose data (planner, `block.Compact`, `CompactOnce` query-equivalence)
+- [x] Unit tests: retention boundary behavior (exact cutoff, `retention=0` no-op, safe-delete leaves no partial dir)
+- [x] Concurrency test: queries during `CompactOnce`/`ApplyRetention` never error (lock-drain)
+- [x] Integration test: compacted data remains queryable, including across restart + startup GC convergence
 
 ### Phase 3.5 — Performance Benchmarks
 - [ ] Add k6 or Go benchmark for metrics ingestion throughput
