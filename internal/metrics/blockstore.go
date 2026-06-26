@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/masonwheeler/observability-platform/internal/storage/block"
 )
@@ -55,10 +56,40 @@ func NewBlockStore(dataDir string) (*BlockStore, error) {
 	if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("blockstore: read block dir: %w", err)
 	}
+
+	// Startup GC: a crash may have left a compacted block beside its sources.
+	// Delete any block listed as a source of a surviving block before opening
+	// readers (queries would dedup them harmlessly, but this keeps the set minimal
+	// and prevents recompaction thrash).
+	superseded := make(map[string]struct{})
+	for _, e := range blockEntries {
+		if !e.IsDir() {
+			continue
+		}
+		m, err := block.ReadMeta(filepath.Join(blockDir, e.Name()))
+		if err != nil {
+			continue // unreadable meta is surfaced when the reader is opened below
+		}
+		for _, src := range m.Sources {
+			superseded[src] = struct{}{}
+		}
+	}
+	for id := range superseded {
+		src := filepath.Join(blockDir, id)
+		dst := filepath.Join(tmpDir, id)
+		_ = os.RemoveAll(dst)
+		if err := os.Rename(src, dst); err == nil {
+			_ = os.RemoveAll(dst)
+		}
+	}
+
 	readers := make([]*block.Reader, 0, len(blockEntries))
 	for _, e := range blockEntries {
 		if !e.IsDir() {
 			continue
+		}
+		if _, gone := superseded[e.Name()]; gone {
+			continue // GC'd above
 		}
 		r, err := block.OpenReader(filepath.Join(blockDir, e.Name()))
 		if err != nil {
@@ -108,6 +139,9 @@ func (bs *BlockStore) OldestHeadSegment() int {
 // propagated rather than skipped, so a query never silently returns results
 // missing a block's data.
 func (bs *BlockStore) SelectSeries(sel Selector) ([]MatchedSeries, error) {
+	bs.mu.RLock()
+	defer bs.mu.RUnlock()
+
 	result, _ := bs.mem.SelectSeries(sel) // MemoryStore never errors
 	seen := make(map[SeriesID]struct{}, len(result))
 	for _, ms := range result {
@@ -116,24 +150,14 @@ func (bs *BlockStore) SelectSeries(sel Selector) ([]MatchedSeries, error) {
 
 	matchers := selectorToIndexMatchers(sel)
 
-	bs.mu.RLock()
-	readers := bs.blocks
-	bs.mu.RUnlock()
-
-	for _, r := range readers {
+	for _, r := range bs.blocks {
 		ids, err := r.Postings(matchers)
 		if err != nil {
-			// Static postings corruption is rejected eagerly in OpenReader
-			// (filePostings.validate). A Postings error here indicates a
-			// post-open I/O fault on an already-validated file; surface it so
-			// the query fails rather than silently dropping this block's series.
 			return nil, fmt.Errorf("blockstore: select series in block: %w", err)
 		}
 		if len(ids) == 0 {
 			continue
 		}
-		// Resolve each matched ID directly via the block's ID index rather than
-		// scanning every series in the block.
 		for _, id := range ids {
 			se, ok := r.SeriesByID(id)
 			if !ok {
@@ -141,9 +165,6 @@ func (bs *BlockStore) SelectSeries(sel Selector) ([]MatchedSeries, error) {
 			}
 			labels, err := blockPairsToLabels(se.Labels)
 			if err != nil {
-				// Unreachable for blocks that loaded: validateBlockSeries rejects
-				// malformed label sets at open. Propagate defensively rather than
-				// silently dropping the series.
 				return nil, fmt.Errorf("blockstore: decode series %d labels: %w", se.ID, err)
 			}
 			fp := labels.Fingerprint()
@@ -160,14 +181,13 @@ func (bs *BlockStore) SelectSeries(sel Selector) ([]MatchedSeries, error) {
 // LabelNames returns the sorted, deduplicated label names across memory and all
 // loaded blocks.
 func (bs *BlockStore) LabelNames() []string {
+	bs.mu.RLock()
+	defer bs.mu.RUnlock()
 	set := make(map[string]struct{})
 	for _, n := range bs.mem.LabelNames() {
 		set[n] = struct{}{}
 	}
-	bs.mu.RLock()
-	readers := bs.blocks
-	bs.mu.RUnlock()
-	for _, r := range readers {
+	for _, r := range bs.blocks {
 		for _, n := range r.LabelNames() {
 			set[n] = struct{}{}
 		}
@@ -183,14 +203,13 @@ func (bs *BlockStore) LabelNames() []string {
 // LabelValues returns the sorted, deduplicated values for name across memory and
 // all loaded blocks.
 func (bs *BlockStore) LabelValues(name string) []string {
+	bs.mu.RLock()
+	defer bs.mu.RUnlock()
 	set := make(map[string]struct{})
 	for _, v := range bs.mem.LabelValues(name) {
 		set[v] = struct{}{}
 	}
-	bs.mu.RLock()
-	readers := bs.blocks
-	bs.mu.RUnlock()
-	for _, r := range readers {
+	for _, r := range bs.blocks {
 		for _, v := range r.LabelValues(name) {
 			set[v] = struct{}{}
 		}
@@ -206,6 +225,8 @@ func (bs *BlockStore) LabelValues(name string) []string {
 // Cardinality returns distinct counts of series, label names, and label pairs
 // across memory and all loaded blocks (deduplicated by series fingerprint).
 func (bs *BlockStore) Cardinality() (series, names, pairs int) {
+	bs.mu.RLock()
+	defer bs.mu.RUnlock()
 	seriesSet := make(map[SeriesID]struct{})
 	nameSet := make(map[string]struct{})
 	pairSet := make(map[[2]string]struct{})
@@ -221,10 +242,7 @@ func (bs *BlockStore) Cardinality() (series, names, pairs int) {
 	for _, ms := range memSeries {
 		add(ms.Labels, ms.Labels.Fingerprint())
 	}
-	bs.mu.RLock()
-	readers := bs.blocks
-	bs.mu.RUnlock()
-	for _, r := range readers {
+	for _, r := range bs.blocks {
 		for _, se := range r.Series() {
 			labels, err := blockPairsToLabels(se.Labels)
 			if err != nil {
@@ -236,20 +254,70 @@ func (bs *BlockStore) Cardinality() (series, names, pairs int) {
 	return len(seriesSet), len(nameSet), len(pairSet)
 }
 
+// BlockInfos returns a snapshot of all loaded blocks for compaction planning and
+// storage metrics, ordered by MinTime.
+func (bs *BlockStore) BlockInfos() []block.BlockInfo {
+	bs.mu.RLock()
+	readers := make([]*block.Reader, len(bs.blocks))
+	copy(readers, bs.blocks)
+	bs.mu.RUnlock()
+
+	infos := make([]block.BlockInfo, 0, len(readers))
+	for _, r := range readers {
+		m := r.Meta()
+		infos = append(infos, block.BlockInfo{
+			ID:        m.BlockID,
+			Level:     m.EffectiveLevel(),
+			MinTime:   m.MinTime,
+			MaxTime:   m.MaxTime,
+			SizeBytes: dirSizeBytes(filepath.Join(bs.blockDir, m.BlockID)),
+		})
+	}
+	sort.Slice(infos, func(i, j int) bool { return infos[i].MinTime < infos[j].MinTime })
+	return infos
+}
+
+// StorageStats returns the number of loaded blocks and their total on-disk size.
+func (bs *BlockStore) StorageStats() (blocks int, bytes int64) {
+	for _, info := range bs.BlockInfos() {
+		blocks++
+		bytes += info.SizeBytes
+	}
+	return blocks, bytes
+}
+
+// dirSizeBytes sums the sizes of the regular files directly inside dir. Best
+// effort: unreadable entries are skipped (size metrics must never fail a query).
+func dirSizeBytes(dir string) int64 {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	var total int64
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if fi, err := e.Info(); err == nil {
+			total += fi.Size()
+		}
+	}
+	return total
+}
+
 // QueryInstant returns the latest sample with timestamp ≤ tMs for the given
 // series, searching both memory and all loaded blocks. Memory wins for equal
 // timestamps. Returns an error if any block chunk cannot be read.
 func (bs *BlockStore) QueryInstant(id SeriesID, tMs int64) (Sample, bool, error) {
+	bs.mu.RLock()
+	defer bs.mu.RUnlock()
+
 	best, found, err := bs.mem.QueryInstant(id, tMs)
 	if err != nil {
 		return Sample{}, false, err
 	}
 
-	bs.mu.RLock()
-	readers := bs.blocks
-	bs.mu.RUnlock()
-
-	for _, r := range readers {
+	for _, r := range bs.blocks {
 		if r.Meta().MinTime > tMs {
 			continue
 		}
@@ -265,7 +333,6 @@ func (bs *BlockStore) QueryInstant(id SeriesID, tMs int64) (Sample, bool, error)
 			it := c.Iterator()
 			for it.Next() {
 				ts, val := it.At()
-				// Memory wins for equal timestamps; block only wins if strictly better.
 				if ts <= tMs && (!found || ts > best.TimestampMs) {
 					best = Sample{SeriesID: id, TimestampMs: ts, Value: val}
 					found = true
@@ -283,25 +350,20 @@ func (bs *BlockStore) QueryInstant(id SeriesID, tMs int64) (Sample, bool, error)
 // non-nil empty slice if the series is known but has no in-range samples.
 // Returns an error if any block chunk cannot be read.
 func (bs *BlockStore) QueryRange(id SeriesID, startMs, endMs int64) ([]Sample, error) {
-	// Read memory before snapshotting the block list. This closes the window
-	// where sealed chunks are discarded from memory but the new block reader
-	// hasn't been captured yet: FlushBlock always registers the reader before
-	// discarding (see FlushBlock), so if memory is empty the reader is already
-	// present and the subsequent block snapshot will include it.
+	bs.mu.RLock()
+	defer bs.mu.RUnlock()
+
+	// The read lock is held for the whole query so compaction/retention (which
+	// take the write lock to close+delete readers) cannot reclaim a block while
+	// it is being read.
 	memResult, err := bs.mem.QueryRange(id, startMs, endMs)
 	if err != nil {
 		return nil, err
 	}
 
-	bs.mu.RLock()
-	readers := bs.blocks
-	bs.mu.RUnlock()
-
-	// Collect block samples; memory samples appended after so that stable sort
-	// + dedup (keep last) still favours memory for equal timestamps.
 	var result []Sample
 	seriesFoundInBlock := false
-	for _, r := range readers {
+	for _, r := range bs.blocks {
 		meta := r.Meta()
 		if meta.MaxTime < startMs || meta.MinTime > endMs {
 			continue
@@ -404,6 +466,151 @@ func (bs *BlockStore) FlushBlock() (bool, error) {
 	return true, nil
 }
 
+// CompactOnce applies plan to the current block set. For each returned group of
+// ≥2 still-present block IDs it merges those blocks into one new block, registers
+// the new reader, and safe-deletes the sources. Returns the number of groups
+// compacted. Taking the write lock for the swap drains in-flight queries before
+// any source reader is closed. Concurrent calls are serialized via flushMu so
+// CompactOnce and FlushBlock never race on the block set.
+func (bs *BlockStore) CompactOnce(plan func([]block.BlockInfo) [][]string) (int, error) {
+	bs.flushMu.Lock()
+	defer bs.flushMu.Unlock()
+
+	groups := plan(bs.BlockInfos())
+	compacted := 0
+	for _, group := range groups {
+		if len(group) < 2 {
+			continue
+		}
+
+		bs.mu.RLock()
+		sources := make([]*block.Reader, 0, len(group))
+		ok := true
+		for _, id := range group {
+			r := bs.readerByID(id)
+			if r == nil {
+				ok = false
+				break
+			}
+			sources = append(sources, r)
+		}
+		bs.mu.RUnlock()
+		if !ok || len(sources) < 2 {
+			continue
+		}
+
+		meta, err := block.Compact(bs.blockDir, bs.tmpDir, sources)
+		if err != nil {
+			return compacted, fmt.Errorf("blockstore: compact: %w", err)
+		}
+		newReader, err := block.OpenReader(filepath.Join(bs.blockDir, meta.BlockID))
+		if err != nil {
+			_ = bs.safeDeleteBlock(meta.BlockID)
+			return compacted, fmt.Errorf("blockstore: open compacted block %s: %w", meta.BlockID, err)
+		}
+		if err := validateBlockSeries(newReader); err != nil {
+			_ = newReader.Close()
+			_ = bs.safeDeleteBlock(meta.BlockID)
+			return compacted, fmt.Errorf("blockstore: compacted block %s: %w", meta.BlockID, err)
+		}
+
+		inGroup := make(map[string]struct{}, len(group))
+		for _, id := range group {
+			inGroup[id] = struct{}{}
+		}
+		var removed []*block.Reader
+		bs.mu.Lock()
+		kept := make([]*block.Reader, 0, len(bs.blocks))
+		for _, r := range bs.blocks {
+			if _, drop := inGroup[r.Meta().BlockID]; drop {
+				removed = append(removed, r)
+			} else {
+				kept = append(kept, r)
+			}
+		}
+		kept = append(kept, newReader)
+		bs.blocks = kept
+		bs.mu.Unlock()
+
+		for _, r := range removed {
+			id := r.Meta().BlockID
+			_ = r.Close()
+			if err := bs.safeDeleteBlock(id); err != nil {
+				return compacted, fmt.Errorf("blockstore: delete source block %s: %w", id, err)
+			}
+		}
+		compacted++
+	}
+	return compacted, nil
+}
+
+// ApplyRetention removes every block whose MaxTime is strictly older than
+// now-retention, closing its reader and safe-deleting its directory. A
+// non-positive retention disables retention (no-op). Returns the number deleted.
+// The write lock drains in-flight queries before any reader is closed.
+func (bs *BlockStore) ApplyRetention(now time.Time, retention time.Duration) (int, error) {
+	if retention <= 0 {
+		return 0, nil
+	}
+	cutoff := now.UnixMilli() - retention.Milliseconds()
+
+	bs.flushMu.Lock()
+	defer bs.flushMu.Unlock()
+
+	bs.mu.Lock()
+	kept := make([]*block.Reader, 0, len(bs.blocks))
+	var expired []*block.Reader
+	for _, r := range bs.blocks {
+		if r.Meta().MaxTime < cutoff {
+			expired = append(expired, r)
+		} else {
+			kept = append(kept, r)
+		}
+	}
+	if len(expired) > 0 {
+		bs.blocks = kept
+	}
+	bs.mu.Unlock()
+
+	for _, r := range expired {
+		id := r.Meta().BlockID
+		_ = r.Close()
+		if err := bs.safeDeleteBlock(id); err != nil {
+			return len(expired), err
+		}
+	}
+	return len(expired), nil
+}
+
+// readerByID returns the loaded reader for id, or nil. Caller holds bs.mu.
+func (bs *BlockStore) readerByID(id string) *block.Reader {
+	for _, r := range bs.blocks {
+		if r.Meta().BlockID == id {
+			return r
+		}
+	}
+	return nil
+}
+
+// safeDeleteBlock removes a block directory crash-safely: rename into tmpDir
+// (atomic, same filesystem) then RemoveAll. A crash between the two leaves only a
+// tmp entry, which NewBlockStore wipes on startup. A missing source is not an error.
+func (bs *BlockStore) safeDeleteBlock(id string) error {
+	src := filepath.Join(bs.blockDir, id)
+	dst := filepath.Join(bs.tmpDir, id)
+	_ = os.RemoveAll(dst)
+	if err := os.Rename(src, dst); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("blockstore: rename block %s to tmp: %w", id, err)
+	}
+	if err := os.RemoveAll(dst); err != nil {
+		return fmt.Errorf("blockstore: remove tmp block %s: %w", id, err)
+	}
+	return nil
+}
+
 // Close releases file descriptors held by all loaded block readers.
 func (bs *BlockStore) Close() error {
 	bs.mu.Lock()
@@ -420,6 +627,12 @@ func (bs *BlockStore) Close() error {
 // MemStore returns the underlying MemoryStore. Used in tests to inspect
 // chunk counts after flush.
 func (bs *BlockStore) MemStore() *MemoryStore { return bs.mem }
+
+// SealedChunkCount reports the number of sealed chunks held in memory (not yet
+// flushed to a block).
+func (bs *BlockStore) SealedChunkCount() int {
+	return bs.mem.SealedChunkCount()
+}
 
 // ReadCheckpoint reads the WAL segment number from the checkpoint file at
 // dataDir/metrics/checkpoint. Returns 0 if the file does not exist.
