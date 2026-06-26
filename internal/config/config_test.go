@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoad_EnvVarOverride(t *testing.T) {
@@ -84,5 +85,62 @@ func TestLoad_WALEnvOverride(t *testing.T) {
 	}
 	if cfg.WALSyncEveryN != 10 {
 		t.Errorf("WALSyncEveryN = %d, want 10", cfg.WALSyncEveryN)
+	}
+}
+
+func TestLoad_MaintenanceDefaults(t *testing.T) {
+	t.Setenv("OBS_DATA_DIR", "data")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MaintenanceInterval != 30*time.Second {
+		t.Errorf("MaintenanceInterval = %v, want 30s", cfg.MaintenanceInterval)
+	}
+	if cfg.FlushInterval != 2*time.Minute {
+		t.Errorf("FlushInterval = %v, want 2m", cfg.FlushInterval)
+	}
+	if cfg.FlushSealedChunks != 1000 {
+		t.Errorf("FlushSealedChunks = %d, want 1000", cfg.FlushSealedChunks)
+	}
+	if cfg.FlushWALBytes != 64<<20 {
+		t.Errorf("FlushWALBytes = %d, want %d", cfg.FlushWALBytes, 64<<20)
+	}
+	if cfg.CompactionBaseRange != 2*time.Hour {
+		t.Errorf("CompactionBaseRange = %v, want 2h", cfg.CompactionBaseRange)
+	}
+	if cfg.CompactionMultiplier != 4 || cfg.CompactionLevels != 3 {
+		t.Errorf("multiplier/levels = %d/%d, want 4/3", cfg.CompactionMultiplier, cfg.CompactionLevels)
+	}
+	if cfg.Retention != 0 {
+		t.Errorf("Retention = %v, want 0", cfg.Retention)
+	}
+}
+
+func TestLoad_RetentionEnvOverride(t *testing.T) {
+	t.Setenv("OBS_DATA_DIR", "data")
+	t.Setenv("OBS_RETENTION", "15m")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Retention != 15*time.Minute {
+		t.Errorf("Retention = %v, want 15m", cfg.Retention)
+	}
+}
+
+func TestLoad_InvalidMultiplierErrors(t *testing.T) {
+	t.Setenv("OBS_DATA_DIR", "data")
+	t.Setenv("OBS_COMPACTION_MULTIPLIER", "1")
+	if _, err := Load(); err == nil {
+		t.Fatal("multiplier=1 should error")
+	}
+}
+
+func TestLoad_InvalidDurationErrors(t *testing.T) {
+	t.Setenv("OBS_DATA_DIR", "data")
+	t.Setenv("OBS_FLUSH_INTERVAL", "notaduration")
+	if _, err := Load(); err == nil {
+		t.Fatal("invalid flush_interval should error")
 	}
 }
