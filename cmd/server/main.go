@@ -1,13 +1,19 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
+	"time"
 
 	"github.com/masonwheeler/observability-platform/internal/api"
+	"github.com/masonwheeler/observability-platform/internal/compactor"
 	"github.com/masonwheeler/observability-platform/internal/config"
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/observability"
@@ -27,30 +33,22 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
-		log.Error("failed to create data directory",
-			slog.String("data_dir", cfg.DataDir),
-			slog.String("error", err.Error()),
-		)
+	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
+		log.Error("failed to create data directory", slog.String("data_dir", cfg.DataDir), slog.String("error", err.Error()))
 		os.Exit(1)
 	}
 
 	walDir := filepath.Join(cfg.DataDir, "metrics", "wal")
 
-	// 1. Load persisted blocks and prepare temp directory.
 	blockStore, err := metrics.NewBlockStore(cfg.DataDir)
 	if err != nil {
 		log.Error("failed to open block store", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
 
-	// 2. Read checkpoint — skip WAL segments already covered by blocks.
 	checkpoint := metrics.ReadCheckpoint(cfg.DataDir)
 	log.Info("WAL checkpoint", slog.Int("after_segment", checkpoint))
 
-	// 3. Replay WAL segments after the checkpoint into the block store.
-	// Replay BEFORE opening the WAL for writes (wal.Open creates a new segment
-	// at maxIdx+1; replaying after would make the previous last segment non-final).
 	var replayCount int
 	if err := wal.ReplayFrom(walDir, checkpoint, func(pairs []wal.LabelPair, tsMs int64, value float64) {
 		lm := make(map[string]string, len(pairs))
@@ -73,12 +71,8 @@ func main() {
 	}
 	log.Info("WAL replay complete", slog.Int("samples_restored", replayCount))
 
-	// Mark the head-chunk fence so FlushBlock knows the oldest WAL segment that
-	// contains head-chunk data from this replay. Segments >= checkpoint+1 must be
-	// preserved until those head chunks seal and are flushed to a block.
 	blockStore.MemStore().SetHeadFence(checkpoint + 1)
 
-	// 4. Open WAL for new writes.
 	w, err := wal.Open(walDir, cfg.WALSegmentMaxBytes, cfg.WALSyncEveryN)
 	if err != nil {
 		log.Error("failed to open WAL", slog.String("wal_dir", walDir), slog.String("error", err.Error()))
@@ -87,16 +81,52 @@ func main() {
 
 	store := metrics.NewWALStore(w, blockStore, cfg.DataDir)
 	engine := metrics.NewQueryEngine(blockStore)
-	reg := observability.NewRegistry(blockStore)
+	reg, mx := observability.NewRegistry(blockStore, blockStore)
 	srv := api.New(cfg, log, store, engine, reg)
 
-	log.Info("starting server",
-		slog.String("addr", cfg.HTTPAddr),
-		slog.String("data_dir", cfg.DataDir),
-	)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
-	if err := http.ListenAndServe(cfg.HTTPAddr, srv); err != nil {
-		log.Error("server stopped", slog.String("error", err.Error()))
-		os.Exit(1)
+	comp := compactor.New(store, blockStore, store, time.Now, compactor.Config{
+		MaintenanceInterval: cfg.MaintenanceInterval,
+		FlushInterval:       cfg.FlushInterval,
+		FlushSealedChunks:   cfg.FlushSealedChunks,
+		FlushWALBytes:       cfg.FlushWALBytes,
+		Ranges:              compactor.Ranges(cfg.CompactionBaseRange.Milliseconds(), int64(cfg.CompactionMultiplier), cfg.CompactionLevels),
+		Retention:           cfg.Retention,
+	}, mx, log)
+
+	compDone := make(chan struct{})
+	go func() {
+		comp.Run(ctx)
+		close(compDone)
+	}()
+
+	httpSrv := &http.Server{Addr: cfg.HTTPAddr, Handler: srv}
+	go func() {
+		log.Info("starting server", slog.String("addr", cfg.HTTPAddr), slog.String("data_dir", cfg.DataDir))
+		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("server stopped", slog.String("error", err.Error()))
+			stop() // unblock shutdown below
+		}
+	}()
+
+	<-ctx.Done()
+	log.Info("shutdown signal received")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+		log.Error("http shutdown error", slog.String("error", err.Error()))
 	}
+
+	<-compDone // compactor performs its final flush on ctx cancellation
+
+	if err := w.Close(); err != nil {
+		log.Error("wal close error", slog.String("error", err.Error()))
+	}
+	if err := blockStore.Close(); err != nil {
+		log.Error("block store close error", slog.String("error", err.Error()))
+	}
+	log.Info("shutdown complete")
 }
