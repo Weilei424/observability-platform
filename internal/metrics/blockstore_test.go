@@ -5,7 +5,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/storage/block"
@@ -342,5 +344,198 @@ func TestBlockStore_LabelNamesValues_AcrossBlockAndMemory(t *testing.T) {
 	}
 	if got := bs.LabelValues("__name__"); len(got) != 2 {
 		t.Fatalf("LabelValues(__name__) = %v, want [cpu http]", got)
+	}
+}
+
+func TestBlockStore_BlockInfos_And_StorageStats(t *testing.T) {
+	bs, err := metrics.NewBlockStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+	lbls, _ := metrics.NewLabels(map[string]string{"__name__": "m"})
+	// Seal one chunk (120 samples) then flush to make one block.
+	for i := 0; i < 120; i++ {
+		if err := bs.Append(lbls, int64(i)*1000, float64(i)); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	if _, err := bs.FlushBlock(); err != nil {
+		t.Fatalf("FlushBlock: %v", err)
+	}
+	infos := bs.BlockInfos()
+	if len(infos) != 1 {
+		t.Fatalf("BlockInfos len = %d, want 1", len(infos))
+	}
+	if infos[0].Level != 1 || infos[0].SizeBytes <= 0 {
+		t.Fatalf("BlockInfo = %+v, want level 1 and positive size", infos[0])
+	}
+	if infos[0].MinTime != 0 || infos[0].MaxTime != 119000 {
+		t.Fatalf("BlockInfo min/max = %d/%d, want 0/119000", infos[0].MinTime, infos[0].MaxTime)
+	}
+	blocks, bytes := bs.StorageStats()
+	if blocks != 1 || bytes != infos[0].SizeBytes {
+		t.Fatalf("StorageStats = %d,%d; want 1,%d", blocks, bytes, infos[0].SizeBytes)
+	}
+}
+
+func flushOneBlock(t *testing.T, bs *metrics.BlockStore, name string, base int64) {
+	t.Helper()
+	lbls, _ := metrics.NewLabels(map[string]string{"__name__": name})
+	for i := 0; i < 120; i++ {
+		if err := bs.Append(lbls, base+int64(i)*1000, float64(i)); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	if _, err := bs.FlushBlock(); err != nil {
+		t.Fatalf("FlushBlock: %v", err)
+	}
+}
+
+func metricFingerprint(t *testing.T, name string) metrics.SeriesID {
+	t.Helper()
+	lbls, err := metrics.NewLabels(map[string]string{"__name__": name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return lbls.Fingerprint()
+}
+
+func TestBlockStore_CompactOnce_MergesAndPreservesData(t *testing.T) {
+	bs, _ := metrics.NewBlockStore(t.TempDir())
+	flushOneBlock(t, bs, "m", 0)      // block A: ts 0..119000
+	flushOneBlock(t, bs, "m", 200000) // block B: ts 200000..319000
+
+	infos := bs.BlockInfos()
+	if len(infos) != 2 {
+		t.Fatalf("setup: want 2 blocks, got %d", len(infos))
+	}
+	all := []string{infos[0].ID, infos[1].ID}
+	plan := func([]block.BlockInfo) [][]string { return [][]string{all} }
+
+	n, err := bs.CompactOnce(plan)
+	if err != nil {
+		t.Fatalf("CompactOnce: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("CompactOnce merged %d groups, want 1", n)
+	}
+	if got := len(bs.BlockInfos()); got != 1 {
+		t.Fatalf("after compaction blocks = %d, want 1", got)
+	}
+	id := metricFingerprint(t, "m")
+	got, err := bs.QueryRange(id, 0, 400000)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
+	if len(got) != 240 {
+		t.Fatalf("merged query returned %d samples, want 240", len(got))
+	}
+}
+
+func TestBlockStore_CompactOnce_ConcurrentQueriesNeverError(t *testing.T) {
+	bs, _ := metrics.NewBlockStore(t.TempDir())
+	flushOneBlock(t, bs, "m", 0)
+	flushOneBlock(t, bs, "m", 200000)
+	all := []string{bs.BlockInfos()[0].ID, bs.BlockInfos()[1].ID}
+	id := metricFingerprint(t, "m")
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				if _, err := bs.QueryRange(id, 0, 400000); err != nil {
+					t.Errorf("query during compaction errored: %v", err)
+					return
+				}
+			}
+		}
+	}()
+	if _, err := bs.CompactOnce(func([]block.BlockInfo) [][]string { return [][]string{all} }); err != nil {
+		t.Fatalf("CompactOnce: %v", err)
+	}
+	close(stop)
+	wg.Wait()
+}
+
+func TestBlockStore_ApplyRetention_Boundary(t *testing.T) {
+	bs, _ := metrics.NewBlockStore(t.TempDir())
+	flushOneBlock(t, bs, "m", 0) // block MaxTime = 119000
+
+	// retention=0 → no-op.
+	if n, err := bs.ApplyRetention(time.UnixMilli(10_000_000), 0); err != nil || n != 0 {
+		t.Fatalf("retention=0 = %d,%v; want 0,nil", n, err)
+	}
+
+	// cutoff == MaxTime (119000): MaxTime < cutoff is false → block KEPT (strict boundary).
+	now := time.UnixMilli(119001)
+	n, err := bs.ApplyRetention(now, 1*time.Millisecond) // cutoff = 119000; 119000 < 119000 is false → kept
+	if err != nil {
+		t.Fatalf("ApplyRetention: %v", err)
+	}
+	if n != 0 || len(bs.BlockInfos()) != 1 {
+		t.Fatalf("at exact boundary block should be kept: deleted=%d blocks=%d", n, len(bs.BlockInfos()))
+	}
+
+	// cutoff strictly greater than MaxTime → deleted.
+	n, err = bs.ApplyRetention(time.UnixMilli(119002), 1*time.Millisecond) // cutoff = 119001 > 119000 → delete
+	if err != nil {
+		t.Fatalf("ApplyRetention: %v", err)
+	}
+	if n != 1 || len(bs.BlockInfos()) != 0 {
+		t.Fatalf("expired block should be deleted: deleted=%d blocks=%d", n, len(bs.BlockInfos()))
+	}
+}
+
+func TestBlockStore_StartupGC_RemovesSupersededSources(t *testing.T) {
+	dir := t.TempDir()
+	bs, _ := metrics.NewBlockStore(dir)
+	flushOneBlock(t, bs, "m", 0)      // source S1
+	flushOneBlock(t, bs, "m", 200000) // source S2
+	infos := bs.BlockInfos()
+	s1, s2 := infos[0].ID, infos[1].ID
+
+	// Fabricate a crash state: write a merged block whose meta lists S1+S2 as
+	// Sources WITHOUT deleting the sources, so all three coexist on disk exactly
+	// as they would after a crash between block.Compact and source deletion.
+	blocksDir := filepath.Join(dir, "metrics", "blocks")
+	tmpDir := filepath.Join(dir, "metrics", "tmp")
+	r1, err := block.OpenReader(filepath.Join(blocksDir, s1))
+	if err != nil {
+		t.Fatalf("open s1: %v", err)
+	}
+	r2, err := block.OpenReader(filepath.Join(blocksDir, s2))
+	if err != nil {
+		t.Fatalf("open s2: %v", err)
+	}
+	meta, err := block.Compact(blocksDir, tmpDir, []*block.Reader{r1, r2})
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	_ = r1.Close()
+	_ = r2.Close()
+	_ = bs.Close()
+
+	// Reopen: startup GC must delete S1 and S2 (listed in the merged block's
+	// Sources), leaving only the merged block, and all data must remain queryable.
+	reopened, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	infos2 := reopened.BlockInfos()
+	if len(infos2) != 1 || infos2[0].ID != meta.BlockID {
+		t.Fatalf("after GC blocks = %+v, want only merged %s", infos2, meta.BlockID)
+	}
+	got, err := reopened.QueryRange(metricFingerprint(t, "m"), 0, 400000)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
+	if len(got) != 240 {
+		t.Fatalf("after GC query = %d samples, want 240", len(got))
 	}
 }
