@@ -268,6 +268,22 @@ func (s *MemoryStore) ChunkCount(id SeriesID) int {
 	return len(ms.chunks)
 }
 
+// SealedChunkCount returns the total number of sealed chunks across all series,
+// used by the maintenance loop as a flush trigger.
+func (s *MemoryStore) SealedChunkCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	n := 0
+	for _, ms := range s.series {
+		for _, c := range ms.chunks {
+			if c.Sealed() {
+				n++
+			}
+		}
+	}
+	return n
+}
+
 // SeriesChunks is a snapshot of one series and its sealed chunks, used
 // to transfer data from MemoryStore to a block writer.
 type SeriesChunks struct {
