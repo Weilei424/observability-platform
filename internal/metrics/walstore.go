@@ -122,6 +122,12 @@ func (s *WALStore) FlushBlock() error {
 	return nil
 }
 
+// WALBytes returns the total on-disk size of the WAL segment directory, used by
+// the maintenance loop as a flush trigger.
+func (s *WALStore) WALBytes() (int64, error) {
+	return wal.DirSize(s.walDir)
+}
+
 func labelsToWALPairs(l Labels) []wal.LabelPair {
 	m := l.Map()
 	pairs := make([]wal.LabelPair, 0, len(m))
