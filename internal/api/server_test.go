@@ -25,7 +25,7 @@ func newTestServer(t *testing.T, dataDir string) *api.Server {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	store := metrics.NewMemoryStore()
 	engine := metrics.NewQueryEngine(store)
-	reg := observability.NewRegistry(store)
+	reg, _ := observability.NewRegistry(store, nil)
 	return api.New(cfg, log, store, engine, reg)
 }
 

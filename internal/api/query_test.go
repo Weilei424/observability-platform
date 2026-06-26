@@ -25,7 +25,7 @@ func newQueryTestServer(t *testing.T) (*api.Server, *metrics.MemoryStore) {
 		LogLevel: "info",
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	reg := observability.NewRegistry(store)
+	reg, _ := observability.NewRegistry(store, nil)
 	return api.New(cfg, log, store, engine, reg), store
 }
 

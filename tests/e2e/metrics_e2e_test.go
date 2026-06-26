@@ -55,7 +55,7 @@ func newTestServer(t *testing.T, dataDir, walDir string) (*api.Server, *wal.WAL)
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	store := metrics.NewWALStore(w, blockStore, dataDir)
 	engine := metrics.NewQueryEngine(blockStore)
-	reg := observability.NewRegistry(blockStore)
+	reg, _ := observability.NewRegistry(blockStore, nil)
 	return api.New(cfg, log, store, engine, reg), w
 }
 
