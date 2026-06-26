@@ -42,6 +42,8 @@ type Writer struct {
 	minTime    int64
 	maxTime    int64
 	numSamples int
+	level      int      // 0 → Commit writes 1; set by SetCompaction for compacted blocks
+	sources    []string // source block IDs when this block is a compaction output
 }
 
 // NewWriter creates a Writer that writes to a temp directory and renames to
@@ -63,6 +65,14 @@ func NewWriter(blocksDir, tmpDir string) (*Writer, error) {
 		minTime:   math.MaxInt64,
 		maxTime:   math.MinInt64,
 	}, nil
+}
+
+// SetCompaction records the compaction level and source block IDs to write into
+// this block's meta.json. Call before Commit. A plain flush leaves the default
+// (level 1, no sources).
+func (w *Writer) SetCompaction(level int, sources []string) {
+	w.level = level
+	w.sources = sources
 }
 
 // AddSeries enqueues one series with its sealed chunks for writing. The labels
@@ -116,6 +126,10 @@ func (w *Writer) Commit() (Meta, error) {
 		w.minTime = 0
 		w.maxTime = 0
 	}
+	level := w.level
+	if level <= 0 {
+		level = 1
+	}
 	meta := Meta{
 		BlockID:    w.blockID,
 		MinTime:    w.minTime,
@@ -123,6 +137,8 @@ func (w *Writer) Commit() (Meta, error) {
 		NumSeries:  len(w.series),
 		NumSamples: w.numSamples,
 		CreatedAt:  time.Now().UTC(),
+		Level:      level,
+		Sources:    w.sources,
 	}
 	if err := writeMeta(w.workDir, meta); err != nil {
 		return Meta{}, err
