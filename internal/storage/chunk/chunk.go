@@ -15,9 +15,16 @@ var ErrChunkFull = errors.New("chunk is full")
 const (
 	maxSamples = uint16(120)
 	maxSpanMs  = int64(7_200_000) // 2 hours
+
+	// chunkFormatV1 is the leading magic byte of the generation-aware chunk format.
+	// A legacy chunk begins with the high byte of its minTimestamp, which is 0x00
+	// for every realistic millisecond timestamp, so the two formats are
+	// distinguishable. Legacy chunks decode with all sample generations = 0.
+	chunkFormatV1 = byte(0x01)
 )
 
-// Chunk stores time-series samples using Gorilla/XOR encoding.
+// Chunk stores time-series samples using Gorilla/XOR encoding, plus a per-sample
+// write generation used for last-write-wins deduplication.
 // Seal threshold: 120 samples OR 2-hour time span, whichever comes first.
 type Chunk struct {
 	minTs        int64
@@ -25,6 +32,8 @@ type Chunk struct {
 	numSamples   uint16
 	sealed       bool
 	bw           bitsWriter
+	gens         []int64 // per-sample write generation, insertion order
+	maxGen       int64
 	lastTs       int64
 	lastDelta    int64
 	lastVal      uint64
@@ -38,23 +47,79 @@ func NewChunk() *Chunk {
 }
 
 // Bytes serializes the chunk to a byte slice suitable for persistence.
-// Format: [8]minTs | [8]maxTs | [2]numSamples | encoded bitstream.
+// Format: [1]magic | [8]minTs | [8]maxTs | [2]numSamples | [4]bitstreamLen |
+// bitstream | genSection. genSection holds numSamples generations: the first as an
+// unsigned varint, the rest as signed varint deltas.
 // The deserialized chunk is sealed (read-only); call FromBytes to reconstruct it.
 func (c *Chunk) Bytes() []byte {
-	data := c.bw.bytes()
-	out := make([]byte, 18+len(data))
-	binary.BigEndian.PutUint64(out[0:8], uint64(c.minTs))
-	binary.BigEndian.PutUint64(out[8:16], uint64(c.maxTs))
-	binary.BigEndian.PutUint16(out[16:18], c.numSamples)
-	copy(out[18:], data)
+	bitstream := c.bw.bytes()
+
+	var genBuf []byte
+	var tmp [binary.MaxVarintLen64]byte
+	var prev int64
+	for i, g := range c.gens {
+		if i == 0 {
+			genBuf = append(genBuf, tmp[:binary.PutUvarint(tmp[:], uint64(g))]...)
+		} else {
+			genBuf = append(genBuf, tmp[:binary.PutVarint(tmp[:], g-prev)]...)
+		}
+		prev = g
+	}
+
+	out := make([]byte, 23, 23+len(bitstream)+len(genBuf))
+	out[0] = chunkFormatV1
+	binary.BigEndian.PutUint64(out[1:9], uint64(c.minTs))
+	binary.BigEndian.PutUint64(out[9:17], uint64(c.maxTs))
+	binary.BigEndian.PutUint16(out[17:19], c.numSamples)
+	binary.BigEndian.PutUint32(out[19:23], uint32(len(bitstream)))
+	out = append(out, bitstream...)
+	out = append(out, genBuf...)
 	return out
 }
 
 // FromBytes reconstructs a sealed, read-only Chunk from data produced by Bytes.
-// It eagerly decodes all declared samples to catch corrupt payloads and validates
-// that the decoded min/max timestamps match the header. Returns an error on any
-// decode failure or metadata inconsistency.
+// It detects the generation-aware format (chunkFormatV1) and otherwise decodes the
+// legacy format (no per-sample generations; all decoded as 0). It eagerly decodes
+// all declared samples to catch corrupt payloads and validates that the decoded
+// min/max timestamps match the header.
 func FromBytes(data []byte) (*Chunk, error) {
+	if len(data) >= 1 && data[0] == chunkFormatV1 {
+		return fromBytesV1(data)
+	}
+	return fromBytesLegacy(data)
+}
+
+func fromBytesV1(data []byte) (*Chunk, error) {
+	if len(data) < 23 {
+		return nil, fmt.Errorf("chunk.FromBytes: v1 data too short (%d bytes)", len(data))
+	}
+	minTs := int64(binary.BigEndian.Uint64(data[1:9]))
+	maxTs := int64(binary.BigEndian.Uint64(data[9:17]))
+	numSamples := binary.BigEndian.Uint16(data[17:19])
+	bitLen := binary.BigEndian.Uint32(data[19:23])
+	if uint64(23)+uint64(bitLen) > uint64(len(data)) {
+		return nil, fmt.Errorf("chunk.FromBytes: v1 bitstream length %d exceeds data", bitLen)
+	}
+	payload := make([]byte, bitLen)
+	copy(payload, data[23:23+bitLen])
+	c, err := decodeAndValidate(minTs, maxTs, numSamples, payload)
+	if err != nil {
+		return nil, err
+	}
+	gens, err := decodeGens(data[23+bitLen:], int(numSamples))
+	if err != nil {
+		return nil, err
+	}
+	c.gens = gens
+	for _, g := range gens {
+		if g > c.maxGen {
+			c.maxGen = g
+		}
+	}
+	return c, nil
+}
+
+func fromBytesLegacy(data []byte) (*Chunk, error) {
 	if len(data) < 18 {
 		return nil, fmt.Errorf("chunk.FromBytes: data too short (%d bytes)", len(data))
 	}
@@ -63,6 +128,18 @@ func FromBytes(data []byte) (*Chunk, error) {
 	numSamples := binary.BigEndian.Uint16(data[16:18])
 	payload := make([]byte, len(data)-18)
 	copy(payload, data[18:])
+	c, err := decodeAndValidate(minTs, maxTs, numSamples, payload)
+	if err != nil {
+		return nil, err
+	}
+	c.gens = make([]int64, numSamples) // legacy chunks carry no generations
+	return c, nil
+}
+
+// decodeAndValidate builds a sealed chunk from header fields and the ts/val
+// bitstream payload, eagerly decoding all samples to catch corruption. It does not
+// populate per-sample generations.
+func decodeAndValidate(minTs, maxTs int64, numSamples uint16, payload []byte) (*Chunk, error) {
 	c := &Chunk{
 		minTs:       minTs,
 		maxTs:       maxTs,
@@ -82,55 +159,85 @@ func FromBytes(data []byte) (*Chunk, error) {
 		return c, nil
 	}
 	// Eagerly decode all samples to catch corrupt payloads before returning.
-	if numSamples > 0 {
-		it := c.Iterator()
-		var gotMin, gotMax int64
-		first := true
-		n := 0
-		for it.Next() {
-			ts, _ := it.At()
-			if first {
+	it := c.Iterator()
+	var gotMin, gotMax int64
+	first := true
+	n := 0
+	for it.Next() {
+		ts, _ := it.At()
+		if first {
+			gotMin = ts
+			gotMax = ts
+			first = false
+		} else {
+			if ts < gotMin {
 				gotMin = ts
-				gotMax = ts
-				first = false
-			} else {
-				if ts < gotMin {
-					gotMin = ts
-				}
-				if ts > gotMax {
-					gotMax = ts
-				}
 			}
-			n++
+			if ts > gotMax {
+				gotMax = ts
+			}
 		}
-		if err := it.Err(); err != nil {
-			return nil, fmt.Errorf("chunk.FromBytes: decode error at sample %d: %w", n, err)
-		}
-		if n != int(numSamples) {
-			return nil, fmt.Errorf("chunk.FromBytes: decoded %d samples, header declared %d", n, numSamples)
-		}
-		if gotMin != minTs || gotMax != maxTs {
-			return nil, fmt.Errorf("chunk.FromBytes: header min/max (%d/%d) does not match decoded (%d/%d)",
-				minTs, maxTs, gotMin, gotMax)
-		}
-		// All declared samples decoded; any unread full bytes are trailing garbage.
-		// Remaining bits in the current partial byte are zero-padding from bitsWriter and are harmless.
-		if it.br.pos < len(it.br.buf) {
-			return nil, fmt.Errorf("chunk.FromBytes: %d trailing bytes after %d decoded samples",
-				len(it.br.buf)-it.br.pos, numSamples)
-		}
+		n++
+	}
+	if err := it.Err(); err != nil {
+		return nil, fmt.Errorf("chunk.FromBytes: decode error at sample %d: %w", n, err)
+	}
+	if n != int(numSamples) {
+		return nil, fmt.Errorf("chunk.FromBytes: decoded %d samples, header declared %d", n, numSamples)
+	}
+	if gotMin != minTs || gotMax != maxTs {
+		return nil, fmt.Errorf("chunk.FromBytes: header min/max (%d/%d) does not match decoded (%d/%d)",
+			minTs, maxTs, gotMin, gotMax)
+	}
+	// All declared samples decoded; any unread full bytes are trailing garbage.
+	// Remaining bits in the current partial byte are zero-padding and are harmless.
+	if it.br.pos < len(it.br.buf) {
+		return nil, fmt.Errorf("chunk.FromBytes: %d trailing bytes after %d decoded samples",
+			len(it.br.buf)-it.br.pos, numSamples)
 	}
 	return c, nil
 }
 
-// Append encodes tsMs and val into the chunk.
+// decodeGens decodes count generations: the first as an unsigned varint, the rest
+// as signed varint deltas. It requires the section to be fully consumed.
+func decodeGens(data []byte, count int) ([]int64, error) {
+	gens := make([]int64, 0, count)
+	pos := 0
+	for i := 0; i < count; i++ {
+		if i == 0 {
+			v, n := binary.Uvarint(data[pos:])
+			if n <= 0 {
+				return nil, fmt.Errorf("chunk.FromBytes: bad generation varint at sample 0")
+			}
+			gens = append(gens, int64(v))
+			pos += n
+			continue
+		}
+		d, n := binary.Varint(data[pos:])
+		if n <= 0 {
+			return nil, fmt.Errorf("chunk.FromBytes: bad generation delta at sample %d", i)
+		}
+		gens = append(gens, gens[i-1]+d)
+		pos += n
+	}
+	if pos != len(data) {
+		return nil, fmt.Errorf("chunk.FromBytes: %d trailing bytes in generation section", len(data)-pos)
+	}
+	return gens, nil
+}
+
+// Append encodes tsMs, val, and the sample's write generation into the chunk.
 // Returns ErrChunkFull immediately if the chunk is already sealed.
 // The threshold-crossing sample is written before sealing: the chunk is sealed
 // after storing the sample that first meets the count or time-span threshold.
 // Subsequent appends return ErrChunkFull. This matches Prometheus head chunk behavior.
-func (c *Chunk) Append(tsMs int64, val float64) error {
+func (c *Chunk) Append(tsMs int64, val float64, gen int64) error {
 	if c.sealed {
 		return ErrChunkFull
+	}
+	c.gens = append(c.gens, gen)
+	if gen > c.maxGen {
+		c.maxGen = gen
 	}
 	v := math.Float64bits(val)
 	if c.numSamples == 0 {
@@ -176,11 +283,16 @@ func (c *Chunk) MaxTs() int64 { return c.maxTs }
 // NumSamples returns the number of samples encoded in the chunk.
 func (c *Chunk) NumSamples() int { return int(c.numSamples) }
 
+// MaxGen returns the maximum write generation among the chunk's samples (0 for an
+// empty or legacy chunk).
+func (c *Chunk) MaxGen() int64 { return c.maxGen }
+
 // Iterator returns a new Iterator that decodes samples from this chunk in order.
 func (c *Chunk) Iterator() *Iterator {
 	return &Iterator{
 		br:          newBitsReader(c.bw.bytes()),
 		total:       int(c.numSamples),
+		gens:        c.gens,
 		lastLeading: 0xff,
 	}
 }
@@ -190,6 +302,7 @@ type Iterator struct {
 	br           bitsReader
 	total        int
 	n            int
+	gens         []int64
 	lastTs       int64
 	lastDelta    int64
 	lastVal      uint64
@@ -250,6 +363,17 @@ func (it *Iterator) Next() bool {
 // Must only be called after a successful Next().
 func (it *Iterator) At() (tsMs int64, val float64) {
 	return it.curTs, it.curVal
+}
+
+// Gen returns the write generation of the current sample. Must only be called
+// after a successful Next(). Returns 0 when generations are unavailable (a legacy
+// chunk decoded without per-sample generations).
+func (it *Iterator) Gen() int64 {
+	idx := it.n - 1
+	if idx < 0 || idx >= len(it.gens) {
+		return 0
+	}
+	return it.gens[idx]
 }
 
 // Err returns any error encountered during iteration.
