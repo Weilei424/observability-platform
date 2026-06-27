@@ -140,6 +140,54 @@ func TestCompactor_CompactedDataSurvivesRestart(t *testing.T) {
 	}
 }
 
+// TestCompactor_RunOnce_FlushesOnSealedChunkThreshold proves the sealed-chunk
+// flush trigger fires independently of the interval trigger.
+func TestCompactor_RunOnce_FlushesOnSealedChunkThreshold(t *testing.T) {
+	dir := t.TempDir()
+	ws, bs := newStores(t, dir)
+	_, mx := observability.NewRegistry(bs, bs)
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+
+	cfg := testConfig()
+	cfg.FlushInterval = time.Hour // interval must not be what triggers the flush
+	cfg.FlushSealedChunks = 1
+	cfg.FlushWALBytes = 0
+	c := compactor.New(ws, bs, ws, time.Now, cfg, mx, log)
+
+	// Nothing sealed yet: neither interval nor threshold is due.
+	c.RunOnce(context.Background())
+	if got := len(bs.BlockInfos()); got != 0 {
+		t.Fatalf("flushed with no sealed chunks: blocks = %d, want 0", got)
+	}
+
+	ingestSealedBlock(t, ws, "m", 0) // one sealed chunk crosses the threshold
+	c.RunOnce(context.Background())
+	if got := len(bs.BlockInfos()); got != 1 {
+		t.Fatalf("sealed-chunk threshold did not flush: blocks = %d, want 1", got)
+	}
+}
+
+// TestCompactor_RunOnce_FlushesOnWALBytesThreshold proves the WAL-size flush
+// trigger fires independently of interval and sealed-chunk triggers.
+func TestCompactor_RunOnce_FlushesOnWALBytesThreshold(t *testing.T) {
+	dir := t.TempDir()
+	ws, bs := newStores(t, dir)
+	_, mx := observability.NewRegistry(bs, bs)
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+
+	cfg := testConfig()
+	cfg.FlushInterval = time.Hour
+	cfg.FlushSealedChunks = 0 // isolate the WAL-bytes trigger
+	cfg.FlushWALBytes = 1
+	c := compactor.New(ws, bs, ws, time.Now, cfg, mx, log)
+
+	ingestSealedBlock(t, ws, "m", 0) // grows the WAL past 1 byte and seals a chunk
+	c.RunOnce(context.Background())
+	if got := len(bs.BlockInfos()); got != 1 {
+		t.Fatalf("WAL-bytes threshold did not flush: blocks = %d, want 1", got)
+	}
+}
+
 func mustFingerprint(t *testing.T, name string) metrics.SeriesID {
 	t.Helper()
 	lbls, err := metrics.NewLabels(map[string]string{"__name__": name})
