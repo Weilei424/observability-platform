@@ -125,6 +125,113 @@ func TestCompact_DedupsEqualTimestamps_LaterSourceWins(t *testing.T) {
 	}
 }
 
+// writeBlockSeq writes a one-series block stamped with an explicit write-generation
+// sequence, returning an open Reader.
+func writeBlockSeq(t *testing.T, blocks, tmp string, seq int64, id uint64, lbl []block.LabelPair, samples [][2]int64) *block.Reader {
+	t.Helper()
+	w, err := block.NewWriter(blocks, tmp)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	w.SetSequence(seq)
+	if err := w.AddSeries(id, lbl, []*chunk.Chunk{makeChunk(t, samples)}); err != nil {
+		t.Fatalf("AddSeries: %v", err)
+	}
+	meta, err := w.Commit()
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	r, err := block.OpenReader(filepath.Join(blocks, meta.BlockID))
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	return r
+}
+
+// TestCompact_DedupResolvedBySequence_NotMinTime proves equal-timestamp dedup is
+// decided by write-generation (Sequence), not time bounds. The newer block (seq 2)
+// deliberately has the SMALLER MinTime — as happens when a correction arrives with
+// an out-of-order earlier sample — so a MinTime-ordered merge would wrongly keep
+// the older value.
+func TestCompact_DedupResolvedBySequence_NotMinTime(t *testing.T) {
+	dir := t.TempDir()
+	blocks, tmp := filepath.Join(dir, "blocks"), filepath.Join(dir, "tmp")
+	lbl := []block.LabelPair{{Name: "__name__", Value: "m"}}
+
+	newer := writeBlockSeq(t, blocks, tmp, 2, 1, lbl, [][2]int64{{50, 5}, {100, 99}})   // MinTime 50
+	older := writeBlockSeq(t, blocks, tmp, 1, 1, lbl, [][2]int64{{100, 11}, {200, 22}}) // MinTime 100
+
+	out := filepath.Join(dir, "out")
+	// Pass newer first so input order alone cannot explain a correct result.
+	meta, err := block.Compact(out, tmp, []*block.Reader{newer, older})
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if meta.Sequence != 2 {
+		t.Fatalf("merged sequence = %d, want 2 (max of sources)", meta.Sequence)
+	}
+	merged, err := block.OpenReader(filepath.Join(out, meta.BlockID))
+	if err != nil {
+		t.Fatalf("OpenReader merged: %v", err)
+	}
+	got := readAll(t, merged, 1)
+	want := [][2]int64{{50, 5}, {100, 99}, {200, 22}}
+	if len(got) != len(want) {
+		t.Fatalf("merged = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("sample %d = %v, want %v (ts=100 must resolve to the higher-sequence block)", i, got[i], want[i])
+		}
+	}
+}
+
+// TestCompact_RechunkSealsAtSampleBoundary verifies the merged block re-chunks at
+// the 120-sample seal boundary rather than emitting one oversized chunk.
+func TestCompact_RechunkSealsAtSampleBoundary(t *testing.T) {
+	dir := t.TempDir()
+	blocks, tmp := filepath.Join(dir, "blocks"), filepath.Join(dir, "tmp")
+	lbl := []block.LabelPair{{Name: "__name__", Value: "m"}}
+
+	first := make([][2]int64, 0, 80)
+	for i := 0; i < 80; i++ {
+		first = append(first, [2]int64{int64(i) * 1000, int64(i)})
+	}
+	second := make([][2]int64, 0, 80)
+	for i := 80; i < 160; i++ {
+		second = append(second, [2]int64{int64(i) * 1000, int64(i)})
+	}
+	r1 := writeBlockSeq(t, blocks, tmp, 1, 1, lbl, first)
+	r2 := writeBlockSeq(t, blocks, tmp, 2, 1, lbl, second)
+
+	out := filepath.Join(dir, "out")
+	meta, err := block.Compact(out, tmp, []*block.Reader{r1, r2})
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	merged, err := block.OpenReader(filepath.Join(out, meta.BlockID))
+	if err != nil {
+		t.Fatalf("OpenReader merged: %v", err)
+	}
+	se, ok := merged.SeriesByID(1)
+	if !ok {
+		t.Fatal("series 1 missing from merged block")
+	}
+	if len(se.Chunks) != 2 {
+		t.Fatalf("merged series has %d chunks, want 2 (120 + 40 across the 120-sample seal)", len(se.Chunks))
+	}
+	c0, err := merged.ReadChunk(se.Chunks[0])
+	if err != nil {
+		t.Fatalf("ReadChunk: %v", err)
+	}
+	if c0.NumSamples() != 120 {
+		t.Fatalf("first merged chunk has %d samples, want 120", c0.NumSamples())
+	}
+	if total := len(readAll(t, merged, 1)); total != 160 {
+		t.Fatalf("merged total samples = %d, want 160", total)
+	}
+}
+
 func TestCompact_LabelMismatchSameID_Errors(t *testing.T) {
 	dir := t.TempDir()
 	blocks, tmp := filepath.Join(dir, "blocks"), filepath.Join(dir, "tmp")
