@@ -229,7 +229,8 @@ Design: `docs/superpowers/specs/2026-06-18-phase-3.3-label-index-design.md` · P
 ### Phase 3.4 — Compaction and Retention
 Design: `docs/superpowers/specs/2026-06-25-phase-3.4-compaction-retention-design.md` · Plan: `docs/superpowers/plans/2026-06-25-phase-3.4-compaction-retention.md`
 - [x] Extend `block.Meta` with `Level` + `Sources` (`EffectiveLevel`, `BlockInfo`, exported `ReadMeta`); `Writer.SetCompaction` writes them (flush blocks are level 1)
-- [x] Add `block.Compact(blocksDir, tmpDir, sources)` pure merge primitive — union series, sort+dedup samples (later source wins), re-chunk (120/2h), regenerate index+postings via `Writer`
+- [x] Add `block.Compact(blocksDir, tmpDir, sources)` pure merge primitive — union series, sort+dedup samples (later source wins, by write-generation), re-chunk (120/2h), regenerate index+postings via `Writer`
+- [x] Persist a monotonic write-generation (`Meta.Sequence`; flush = max+1, compaction = max(source seq)) and order block dedup by it in `NewBlockStore`, `QueryRange`/`QueryInstant`, and `block.Compact`, so equal-timestamp last-write-wins is identical at runtime, after restart, and after compaction (legacy blocks = sequence 0, fall back to MinTime)
 - [x] Add flush-threshold accessors — `wal.DirSize`/`WALStore.WALBytes`, `MemoryStore.SealedChunkCount`/`BlockStore.SealedChunkCount`
 - [x] Add `BlockStore.BlockInfos` + `StorageStats` (block count + on-disk bytes)
 - [x] Hold `BlockStore` read lock across block reads so compaction/retention can safely close+reclaim readers; add `CompactOnce`, `readerByID`, crash-safe `safeDeleteBlock` (rename-to-tmp + RemoveAll)
@@ -239,9 +240,11 @@ Design: `docs/superpowers/specs/2026-06-25-phase-3.4-compaction-retention-design
 - [x] Add `internal/compactor` tiered time-aligned planner (`Ranges`, `Plan`) — merge ≥2 aligned blocks below the tier range, smallest tier first
 - [x] Add `internal/compactor` maintenance scheduler (`RunOnce`/`Run`: flush-if-due → compact-to-stable → retention) with metrics
 - [x] Wire graceful lifecycle in `cmd/server/main.go` — signal context, `http.Server.Shutdown`, background compactor goroutine, final flush, close WAL + block readers
-- [x] Unit tests: compaction does not lose data (planner, `block.Compact`, `CompactOnce` query-equivalence)
-- [x] Unit tests: retention boundary behavior (exact cutoff, `retention=0` no-op, safe-delete leaves no partial dir)
-- [x] Concurrency test: queries during `CompactOnce`/`ApplyRetention` never error (lock-drain)
+- [x] Unit tests: compaction does not lose data (planner; `block.Compact` merge/dedup, sequence-ordered last-write-wins, re-chunk seal boundaries; `CompactOnce` query- and label-index-equivalence)
+- [x] Unit tests: retention boundary behavior (exact cutoff, `retention=0` no-op, safe-delete leaves no partial dir, delete-failure keeps the block readable with an accurate deleted count)
+- [x] Concurrency test: queries during `CompactOnce` and `ApplyRetention` never error (lock-drain)
+- [x] Unit tests: flush triggers fire per-condition (interval, sealed-chunk threshold, WAL-bytes threshold)
+- [x] Unit tests: last-write-wins consistent across runtime/restart/compaction; startup preserves source blocks when a compacted survivor is corrupt (and reclaims a corrupt source under a valid survivor)
 - [x] Integration test: compacted data remains queryable, including across restart + startup GC convergence
 
 ### Phase 3.5 — Performance Benchmarks
