@@ -18,8 +18,8 @@ func TestChunk_RoundTrip_VariedValues(t *testing.T) {
 	samples := []sample{
 		{1000, 1.5}, {2000, 2.7}, {3000, 0.1}, {4000, 100.0}, {5000, -3.14},
 	}
-	for _, s := range samples {
-		if err := c.Append(s.ts, s.val); err != nil {
+	for i, s := range samples {
+		if err := c.Append(s.ts, s.val, int64(i)); err != nil {
 			t.Fatalf("Append(%d, %f): %v", s.ts, s.val, err)
 		}
 	}
@@ -47,7 +47,7 @@ func TestChunk_RoundTrip_VariedValues(t *testing.T) {
 func TestChunk_RoundTrip_ConstantValue(t *testing.T) {
 	c := chunk.NewChunk()
 	for i := 0; i < 10; i++ {
-		if err := c.Append(int64(i*1000), 42.0); err != nil {
+		if err := c.Append(int64(i*1000), 42.0, int64(i)); err != nil {
 			t.Fatalf("Append %d: %v", i, err)
 		}
 	}
@@ -69,7 +69,7 @@ func TestChunk_RoundTrip_ConstantValue(t *testing.T) {
 func TestChunk_RoundTrip_MonotonicCounter(t *testing.T) {
 	c := chunk.NewChunk()
 	for i := 0; i < 20; i++ {
-		if err := c.Append(int64(i*15000), float64(i*100)); err != nil {
+		if err := c.Append(int64(i*15000), float64(i*100), int64(i)); err != nil {
 			t.Fatalf("Append %d: %v", i, err)
 		}
 	}
@@ -93,7 +93,7 @@ func TestChunk_RoundTrip_RegularScrapeInterval(t *testing.T) {
 	// delta-of-delta = 0 for every tick — the cheapest timestamp path
 	c := chunk.NewChunk()
 	for i := 0; i < 30; i++ {
-		if err := c.Append(int64(i*15000), float64(i)); err != nil {
+		if err := c.Append(int64(i*15000), float64(i), int64(i)); err != nil {
 			t.Fatalf("Append %d: %v", i, err)
 		}
 	}
@@ -117,7 +117,7 @@ func TestChunk_RoundTrip_IrregularTimestamps(t *testing.T) {
 	timestamps := []int64{100, 250, 310, 900, 1001, 5000}
 	values := []float64{1.1, 2.2, 3.3, 4.4, 5.5, 6.6}
 	for i, ts := range timestamps {
-		if err := c.Append(ts, values[i]); err != nil {
+		if err := c.Append(ts, values[i], int64(i)); err != nil {
 			t.Fatalf("Append %d: %v", i, err)
 		}
 	}
@@ -141,7 +141,7 @@ func TestChunk_RoundTrip_NaNAndInf(t *testing.T) {
 	c := chunk.NewChunk()
 	vals := []float64{math.NaN(), math.Inf(1), math.Inf(-1), 1.0}
 	for i, v := range vals {
-		if err := c.Append(int64(i*1000), v); err != nil {
+		if err := c.Append(int64(i*1000), v, int64(i)); err != nil {
 			t.Fatalf("Append %d: %v", i, err)
 		}
 	}
@@ -169,7 +169,7 @@ func TestChunk_RoundTrip_NaNAndInf(t *testing.T) {
 func TestChunk_SealByCount(t *testing.T) {
 	c := chunk.NewChunk()
 	for i := 0; i < 120; i++ {
-		if err := c.Append(int64(i*1000), float64(i)); err != nil {
+		if err := c.Append(int64(i*1000), float64(i), int64(i)); err != nil {
 			t.Fatalf("Append %d: %v", i, err)
 		}
 	}
@@ -179,27 +179,27 @@ func TestChunk_SealByCount(t *testing.T) {
 	if c.NumSamples() != 120 {
 		t.Errorf("NumSamples() = %d, want 120", c.NumSamples())
 	}
-	if err := c.Append(120000, 120.0); err != chunk.ErrChunkFull {
+	if err := c.Append(120000, 120.0, 120); err != chunk.ErrChunkFull {
 		t.Errorf("121st Append: got %v, want ErrChunkFull", err)
 	}
 }
 
 func TestChunk_SealByTimeSpan(t *testing.T) {
 	c := chunk.NewChunk()
-	if err := c.Append(0, 1.0); err != nil {
+	if err := c.Append(0, 1.0, 1); err != nil {
 		t.Fatalf("first Append: %v", err)
 	}
 	if c.Sealed() {
 		t.Error("should not be sealed after 1 sample")
 	}
 	// 2 hours + 1 ms
-	if err := c.Append(7_200_001, 2.0); err != nil {
+	if err := c.Append(7_200_001, 2.0, 2); err != nil {
 		t.Fatalf("second Append: %v", err)
 	}
 	if !c.Sealed() {
 		t.Error("chunk should be sealed after 2-hour span")
 	}
-	if err := c.Append(14_400_000, 3.0); err != chunk.ErrChunkFull {
+	if err := c.Append(14_400_000, 3.0, 3); err != chunk.ErrChunkFull {
 		t.Errorf("3rd Append on sealed chunk: got %v, want ErrChunkFull", err)
 	}
 	if c.MinTs() != 0 {
@@ -226,7 +226,7 @@ func TestChunk_SealByTimeSpan(t *testing.T) {
 
 func TestChunk_SingleSample(t *testing.T) {
 	c := chunk.NewChunk()
-	if err := c.Append(5000, 3.14); err != nil {
+	if err := c.Append(5000, 3.14, 1); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 	it := c.Iterator()
@@ -264,8 +264,8 @@ func TestChunk_BytesFromBytes_RoundTrip(t *testing.T) {
 	want := []sample{
 		{1000, 1.1}, {2000, 2.2}, {3000, 3.3}, {4000, 4.4}, {5000, 5.5},
 	}
-	for _, s := range want {
-		if err := c.Append(s.ts, s.val); err != nil {
+	for i, s := range want {
+		if err := c.Append(s.ts, s.val, int64(i)); err != nil {
 			t.Fatalf("Append: %v", err)
 		}
 	}
@@ -297,6 +297,9 @@ func TestChunk_BytesFromBytes_RoundTrip(t *testing.T) {
 		gotTs, gotVal := it.At()
 		if gotTs != s.ts || gotVal != s.val {
 			t.Errorf("sample %d: got (%d, %f), want (%d, %f)", i, gotTs, gotVal, s.ts, s.val)
+		}
+		if it.Gen() != int64(i) {
+			t.Errorf("sample %d: gen = %d, want %d", i, it.Gen(), int64(i))
 		}
 	}
 	if it.Next() {
@@ -355,7 +358,9 @@ func TestChunk_FromBytes_CorruptPayload(t *testing.T) {
 	// The eager decoder must return an error rather than silently succeeding.
 	data := make([]byte, 18+4) // header + 4 bytes of garbage (zeros)
 	// minTs = 1000, maxTs = 5000, numSamples = 5
-	putUint64BE := func(b []byte, v uint64) { b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7] = byte(v>>56), byte(v>>48), byte(v>>40), byte(v>>32), byte(v>>24), byte(v>>16), byte(v>>8), byte(v) }
+	putUint64BE := func(b []byte, v uint64) {
+		b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7] = byte(v>>56), byte(v>>48), byte(v>>40), byte(v>>32), byte(v>>24), byte(v>>16), byte(v>>8), byte(v)
+	}
 	putUint64BE(data[0:8], 1000)
 	putUint64BE(data[8:16], 5000)
 	data[16], data[17] = 0, 5 // numSamples = 5
@@ -370,12 +375,12 @@ func TestChunk_FromBytes_WrongSampleCount(t *testing.T) {
 	// Serialize a 3-sample chunk, then doctor the numSamples header field to 5.
 	c := chunk.NewChunk()
 	for i := 0; i < 3; i++ {
-		if err := c.Append(int64((i+1)*1000), float64(i)); err != nil {
+		if err := c.Append(int64((i+1)*1000), float64(i), int64(i)); err != nil {
 			t.Fatalf("Append %d: %v", i, err)
 		}
 	}
 	data := c.Bytes()
-	data[16], data[17] = 0, 5 // claim 5 samples when only 3 are encoded
+	data[17], data[18] = 0, 5 // v1 numSamples is at [17:19]; claim 5 when only 3 are encoded
 	_, err := chunk.FromBytes(data)
 	if err == nil {
 		t.Error("expected error for mismatched sample count, got nil")
@@ -386,13 +391,13 @@ func TestChunk_FromBytes_WrongMinMax(t *testing.T) {
 	// Serialize a real chunk, then corrupt the minTs header field.
 	c := chunk.NewChunk()
 	for i := 0; i < 3; i++ {
-		if err := c.Append(int64((i+1)*1000), float64(i)); err != nil {
+		if err := c.Append(int64((i+1)*1000), float64(i), int64(i)); err != nil {
 			t.Fatalf("Append %d: %v", i, err)
 		}
 	}
 	data := c.Bytes()
-	// Overwrite minTs with an obviously wrong value (0 instead of 1000)
-	for i := 0; i < 8; i++ {
+	// Overwrite minTs (v1 layout: [1:9], after the magic byte) with 0 instead of 1000.
+	for i := 1; i < 9; i++ {
 		data[i] = 0
 	}
 	_, err := chunk.FromBytes(data)
@@ -405,7 +410,7 @@ func TestChunk_FromBytes_TrailingGarbage(t *testing.T) {
 	// A valid serialized chunk with extra bytes appended must be rejected.
 	c := chunk.NewChunk()
 	for i := 0; i < 5; i++ {
-		if err := c.Append(int64((i+1)*1000), float64(i)); err != nil {
+		if err := c.Append(int64((i+1)*1000), float64(i), int64(i)); err != nil {
 			t.Fatalf("Append %d: %v", i, err)
 		}
 	}
@@ -420,7 +425,7 @@ func TestChunk_FromBytes_TrailingGarbage(t *testing.T) {
 func TestChunk_BytesFromBytes_SealedByCount(t *testing.T) {
 	c := chunk.NewChunk()
 	for i := 0; i < 120; i++ {
-		if err := c.Append(int64(i*1000), float64(i)); err != nil {
+		if err := c.Append(int64(i*1000), float64(i), int64(i)); err != nil {
 			t.Fatalf("Append %d: %v", i, err)
 		}
 	}
