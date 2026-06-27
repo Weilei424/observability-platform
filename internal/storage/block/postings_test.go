@@ -41,7 +41,7 @@ func sealedChunk(t *testing.T, ts int64) *chunk.Chunk {
 	t.Helper()
 	c := chunk.NewChunk()
 	for i := int64(0); i < 120; i++ { // fill to the 120-sample seal threshold
-		if err := c.Append(ts+i, float64(i)); err != nil {
+		if err := c.Append(ts+i, float64(i), i); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 	}

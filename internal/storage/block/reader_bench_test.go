@@ -14,7 +14,7 @@ import (
 func benchSealedChunk() *chunk.Chunk {
 	c := chunk.NewChunk()
 	for i := int64(0); i < 120; i++ {
-		_ = c.Append(1000+i, float64(i))
+		_ = c.Append(1000+i, float64(i), i)
 	}
 	return c
 }

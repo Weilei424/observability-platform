@@ -12,8 +12,8 @@ import (
 func makeChunk(t *testing.T, samples [][2]int64) *chunk.Chunk {
 	t.Helper()
 	c := chunk.NewChunk()
-	for _, s := range samples {
-		if err := c.Append(s[0], float64(s[1])); err != nil {
+	for i, s := range samples {
+		if err := c.Append(s[0], float64(s[1]), int64(i)); err != nil {
 			t.Fatalf("chunk.Append: %v", err)
 		}
 	}
