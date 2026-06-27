@@ -797,18 +797,28 @@ func validateBlockSeries(r *block.Reader) error {
 }
 
 // validateBlockChunks decodes every chunk in the block so that corruption in the
-// chunks file is detected. OpenReader and validateBlockSeries only check the
-// index/postings; chunks are read lazily at query time. This is run on a
-// compaction survivor before its Sources are trusted (and deleted), so a survivor
-// with a valid index but a corrupt chunks file cannot destroy the only good copy.
+// chunks file is detected, and cross-checks the persisted Meta.MaxGen against the
+// generations actually stored. OpenReader and validateBlockSeries only check the
+// index/postings; chunks are read lazily at query time. This is run on a compaction
+// survivor before its Sources are trusted (and deleted), so a survivor with a valid
+// index but corrupt chunks — or a corrupt MaxGen (which seeds the startup generation
+// counter) — cannot destroy the only good copy or break future overwrite precedence.
 // ReadChunk decodes and validates each payload via chunk.FromBytes.
 func validateBlockChunks(r *block.Reader) error {
+	var maxGen int64
 	for _, se := range r.Series() {
 		for _, ref := range se.Chunks {
-			if _, err := r.ReadChunk(ref); err != nil {
+			c, err := r.ReadChunk(ref)
+			if err != nil {
 				return fmt.Errorf("series %d chunk: %w", se.ID, err)
 			}
+			if g := c.MaxGen(); g > maxGen {
+				maxGen = g
+			}
 		}
+	}
+	if maxGen != r.Meta().MaxGen {
+		return fmt.Errorf("meta MaxGen %d disagrees with stored generations (max %d)", r.Meta().MaxGen, maxGen)
 	}
 	return nil
 }
