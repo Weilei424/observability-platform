@@ -1,6 +1,7 @@
 package chunk_test
 
 import (
+	"encoding/binary"
 	"math"
 	"testing"
 
@@ -310,38 +311,50 @@ func TestChunk_BytesFromBytes_RoundTrip(t *testing.T) {
 	}
 }
 
+// v1Header builds the 26-byte generation-aware chunk header (magic + fields).
+func v1Header(minTs, maxTs int64, numSamples uint16, bitstreamLen uint32) []byte {
+	h := make([]byte, 26)
+	h[0], h[1], h[2], h[3] = 0x9C, 'C', 'H', 0x01
+	binary.BigEndian.PutUint64(h[4:12], uint64(minTs))
+	binary.BigEndian.PutUint64(h[12:20], uint64(maxTs))
+	binary.BigEndian.PutUint16(h[20:22], numSamples)
+	binary.BigEndian.PutUint32(h[22:26], bitstreamLen)
+	return h
+}
+
 func TestChunk_FromBytes_TooShort(t *testing.T) {
-	_, err := chunk.FromBytes([]byte{0x00, 0x01})
+	// Correct magic but fewer than the 26 header bytes.
+	_, err := chunk.FromBytes([]byte{0x9C, 'C', 'H', 0x01, 0x00})
 	if err == nil {
 		t.Error("expected error for truncated data, got nil")
 	}
 }
 
+func TestChunk_FromBytes_RejectsUnknownFormat(t *testing.T) {
+	// A 26+ byte payload without the magic prefix (e.g. a pre-generation chunk) is rejected.
+	if _, err := chunk.FromBytes(make([]byte, 30)); err == nil {
+		t.Error("expected error for chunk without the v1 magic, got nil")
+	}
+}
+
 func TestChunk_FromBytes_ZeroSamplesNonEmptyPayload(t *testing.T) {
-	// numSamples=0 header with a non-empty payload is corrupt.
-	data := make([]byte, 18+4) // header-only + 4 garbage bytes
-	// minTs=0, maxTs=0, numSamples=0 (all zeros already), payload=[0,0,0,0]
-	_, err := chunk.FromBytes(data)
-	if err == nil {
+	// numSamples=0 with a non-empty bitstream is corrupt.
+	data := append(v1Header(0, 0, 0, 4), 0, 0, 0, 0)
+	if _, err := chunk.FromBytes(data); err == nil {
 		t.Error("expected error for numSamples=0 with non-empty payload, got nil")
 	}
 }
 
 func TestChunk_FromBytes_ZeroSamplesNonZeroMinMax(t *testing.T) {
-	// numSamples=0 header with non-zero minTs is corrupt.
-	data := make([]byte, 18) // header only, no payload
-	// Set minTs=1000 but numSamples=0
-	data[7] = 0xe8 // big-endian 1000 in last byte of uint64
-	_, err := chunk.FromBytes(data)
-	if err == nil {
+	// numSamples=0 with a non-zero minTs is corrupt.
+	if _, err := chunk.FromBytes(v1Header(1000, 0, 0, 0)); err == nil {
 		t.Error("expected error for numSamples=0 with non-zero minTs, got nil")
 	}
 }
 
 func TestChunk_FromBytes_ZeroSamplesValid(t *testing.T) {
-	// numSamples=0, minTs=0, maxTs=0, empty payload — this is a valid empty chunk.
-	data := make([]byte, 18)
-	c, err := chunk.FromBytes(data)
+	// A freshly serialized empty chunk round-trips to a valid empty chunk.
+	c, err := chunk.FromBytes(chunk.NewChunk().Bytes())
 	if err != nil {
 		t.Fatalf("unexpected error for valid empty chunk: %v", err)
 	}
@@ -354,19 +367,9 @@ func TestChunk_FromBytes_ZeroSamplesValid(t *testing.T) {
 }
 
 func TestChunk_FromBytes_CorruptPayload(t *testing.T) {
-	// Build a valid header declaring 5 samples but supply a zeroed payload.
-	// The eager decoder must return an error rather than silently succeeding.
-	data := make([]byte, 18+4) // header + 4 bytes of garbage (zeros)
-	// minTs = 1000, maxTs = 5000, numSamples = 5
-	putUint64BE := func(b []byte, v uint64) {
-		b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7] = byte(v>>56), byte(v>>48), byte(v>>40), byte(v>>32), byte(v>>24), byte(v>>16), byte(v>>8), byte(v)
-	}
-	putUint64BE(data[0:8], 1000)
-	putUint64BE(data[8:16], 5000)
-	data[16], data[17] = 0, 5 // numSamples = 5
-	// payload is all zeros — too short to encode 5 samples
-	_, err := chunk.FromBytes(data)
-	if err == nil {
+	// A header declaring 5 samples with a 4-byte zero bitstream cannot decode.
+	data := append(v1Header(1000, 5000, 5, 4), 0, 0, 0, 0)
+	if _, err := chunk.FromBytes(data); err == nil {
 		t.Error("expected error for corrupt payload, got nil")
 	}
 }
@@ -380,9 +383,8 @@ func TestChunk_FromBytes_WrongSampleCount(t *testing.T) {
 		}
 	}
 	data := c.Bytes()
-	data[17], data[18] = 0, 5 // v1 numSamples is at [17:19]; claim 5 when only 3 are encoded
-	_, err := chunk.FromBytes(data)
-	if err == nil {
+	data[20], data[21] = 0, 5 // numSamples is at [20:22]; claim 5 when only 3 are encoded
+	if _, err := chunk.FromBytes(data); err == nil {
 		t.Error("expected error for mismatched sample count, got nil")
 	}
 }
@@ -396,12 +398,10 @@ func TestChunk_FromBytes_WrongMinMax(t *testing.T) {
 		}
 	}
 	data := c.Bytes()
-	// Overwrite minTs (v1 layout: [1:9], after the magic byte) with 0 instead of 1000.
-	for i := 1; i < 9; i++ {
+	for i := 4; i < 12; i++ { // minTs occupies [4:12]
 		data[i] = 0
 	}
-	_, err := chunk.FromBytes(data)
-	if err == nil {
+	if _, err := chunk.FromBytes(data); err == nil {
 		t.Error("expected error for wrong minTs in header, got nil")
 	}
 }
@@ -414,11 +414,24 @@ func TestChunk_FromBytes_TrailingGarbage(t *testing.T) {
 			t.Fatalf("Append %d: %v", i, err)
 		}
 	}
-	data := c.Bytes()
-	data = append(data, 0x00, 0xff) // trailing garbage
-	_, err := chunk.FromBytes(data)
-	if err == nil {
+	data := append(c.Bytes(), 0x00, 0xff) // trailing garbage
+	if _, err := chunk.FromBytes(data); err == nil {
 		t.Error("expected error for trailing garbage bytes, got nil")
+	}
+}
+
+func TestChunk_FromBytes_RejectsOutOfRangeGeneration(t *testing.T) {
+	// Replace a single-sample chunk's generation section with a uvarint exceeding MaxInt64.
+	c := chunk.NewChunk()
+	if err := c.Append(1000, 1.0, 5); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	data := c.Bytes()
+	genStart := 26 + int(binary.BigEndian.Uint32(data[22:26]))
+	overflow := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01} // > math.MaxInt64
+	corrupted := append(append([]byte{}, data[:genStart]...), overflow...)
+	if _, err := chunk.FromBytes(corrupted); err == nil {
+		t.Error("expected error for out-of-range generation, got nil")
 	}
 }
 
