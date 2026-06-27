@@ -33,16 +33,30 @@ type memorySeries struct {
 // MemoryStore is a chunk-backed in-memory Ingester. Samples are encoded using
 // Gorilla/XOR compression inside sealed and unsealed chunks. Safe for concurrent use.
 type MemoryStore struct {
-	mu     sync.RWMutex
-	series map[SeriesID]*memorySeries
-	idx    *index.MemPostings
+	mu      sync.RWMutex
+	series  map[SeriesID]*memorySeries
+	idx     *index.MemPostings
+	nextGen int64 // monotonic write-generation assigned to each appended sample
 }
 
 // NewMemoryStore returns an empty MemoryStore.
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		series: make(map[SeriesID]*memorySeries),
-		idx:    index.NewMemPostings(),
+		series:  make(map[SeriesID]*memorySeries),
+		idx:     index.NewMemPostings(),
+		nextGen: 1, // generation 0 is reserved for legacy (pre-generation) chunks
+	}
+}
+
+// EnsureGenFloor raises the write-generation counter so the next assigned
+// generation is at least floor. Called at startup with one past the highest
+// generation persisted in any block, so replayed and newly appended samples always
+// outrank stored block data for last-write-wins.
+func (s *MemoryStore) EnsureGenFloor(floor int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if floor > s.nextGen {
+		s.nextGen = floor
 	}
 }
 
@@ -79,7 +93,9 @@ func (s *MemoryStore) appendInternal(labels Labels, timestampMs int64, value flo
 		ms.headSeg = walSeg
 	}
 
-	return ms.chunks[len(ms.chunks)-1].Append(timestampMs, value)
+	gen := s.nextGen
+	s.nextGen++
+	return ms.chunks[len(ms.chunks)-1].Append(timestampMs, value, gen)
 }
 
 // OldestHeadSegment returns the smallest WAL segment index across all series
@@ -186,9 +202,6 @@ func (s *MemoryStore) QueryInstant(id SeriesID, tMs int64) (Sample, bool, error)
 
 	var best Sample
 	found := false
-	// Chunks are iterated in insertion (oldest-first) order, which ensures that
-	// later-inserted samples in later chunks overwrite earlier ones for equal
-	// timestamps, preserving last-write-wins semantics.
 	for _, c := range ms.chunks {
 		if c.NumSamples() == 0 || c.MinTs() > tMs {
 			continue
@@ -196,9 +209,14 @@ func (s *MemoryStore) QueryInstant(id SeriesID, tMs int64) (Sample, bool, error)
 		it := c.Iterator()
 		for it.Next() {
 			ts, val := it.At()
-			// Accept this sample if it is the latest (or equal-ts latest inserted) at or before tMs
-			if ts <= tMs && (!found || ts >= best.TimestampMs) {
-				best = Sample{SeriesID: id, TimestampMs: ts, Value: val}
+			if ts > tMs {
+				continue
+			}
+			gen := it.Gen()
+			// Latest timestamp wins; for an equal timestamp the higher generation
+			// (later write) wins.
+			if !found || ts > best.TimestampMs || (ts == best.TimestampMs && gen > best.Gen) {
+				best = Sample{SeriesID: id, TimestampMs: ts, Value: val, Gen: gen}
 				found = true
 			}
 		}
@@ -228,24 +246,26 @@ func (s *MemoryStore) QueryRange(id SeriesID, startMs, endMs int64) ([]Sample, e
 		for it.Next() {
 			ts, val := it.At()
 			if ts >= startMs && ts <= endMs {
-				result = append(result, Sample{SeriesID: id, TimestampMs: ts, Value: val})
+				result = append(result, Sample{SeriesID: id, TimestampMs: ts, Value: val, Gen: it.Gen()})
 			}
 		}
 	}
 
-	// Stable sort preserves insertion order among equal timestamps (needed for dedup below)
 	sort.SliceStable(result, func(i, j int) bool {
 		return result[i].TimestampMs < result[j].TimestampMs
 	})
 
-	// Dedup: for equal timestamps keep the last occurrence (last-write-wins via stable sort)
+	// Dedup: for equal timestamps keep the highest generation (last-write-wins).
 	if len(result) > 1 {
 		// deduped aliases result's backing array; i always advances ahead of len(deduped),
 		// so no element is read after it has been overwritten — safe in-place compaction.
 		deduped := result[:1]
 		for i := 1; i < len(result); i++ {
-			if result[i].TimestampMs == deduped[len(deduped)-1].TimestampMs {
-				deduped[len(deduped)-1] = result[i]
+			last := &deduped[len(deduped)-1]
+			if result[i].TimestampMs == last.TimestampMs {
+				if result[i].Gen > last.Gen {
+					*last = result[i]
+				}
 			} else {
 				deduped = append(deduped, result[i])
 			}
