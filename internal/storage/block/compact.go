@@ -11,28 +11,25 @@ import (
 // tmpDir + atomic rename, identical to Writer.Commit), and returns the new
 // block's Meta. Sources are not modified or deleted. For each series present in
 // any source, all samples across all sources are merged, sorted by timestamp,
-// deduplicated (later source wins on equal timestamps), and re-encoded into
-// fresh chunks. The merged block's Level is one above the highest source level;
-// Sources lists the source block IDs; Sequence is the max source sequence so the
-// merged block keeps the same last-write-wins precedence its newest source had.
+// deduplicated keeping the highest per-sample write generation on equal
+// timestamps, and re-encoded into fresh chunks that preserve each surviving
+// sample's generation. The merged block's Level is one above the highest source
+// level; Sources lists the source block IDs; MaxGen is computed by the Writer.
 //
-// "Later source wins" is resolved by write-generation: sources are ordered by
-// Sequence ascending (MinTime ascending as a fallback for equal/legacy
-// sequences), so the source written latest wins an equal timestamp — matching
-// BlockStore's query-time dedup, which orders blocks the same way.
+// Resolving equal timestamps by per-sample generation (rather than block order)
+// makes compaction match query-time last-write-wins exactly, even when a partial
+// compaction leaves an overlapping, intermediate-generation block behind.
 func Compact(blocksDir, tmpDir string, sources []*Reader) (Meta, error) {
 	if len(sources) < 2 {
 		return Meta{}, fmt.Errorf("block: Compact requires at least 2 sources, got %d", len(sources))
 	}
 
+	// Sort sources by MinTime only for deterministic series/output order; dedup
+	// precedence is per-sample generation, independent of source order.
 	ordered := make([]*Reader, len(sources))
 	copy(ordered, sources)
 	sort.SliceStable(ordered, func(i, j int) bool {
-		mi, mj := ordered[i].Meta(), ordered[j].Meta()
-		if mi.Sequence != mj.Sequence {
-			return mi.Sequence < mj.Sequence
-		}
-		return mi.MinTime < mj.MinTime
+		return ordered[i].Meta().MinTime < ordered[j].Meta().MinTime
 	})
 
 	type seriesAgg struct {
@@ -42,7 +39,6 @@ func Compact(blocksDir, tmpDir string, sources []*Reader) (Meta, error) {
 	aggByID := make(map[uint64]*seriesAgg)
 	var order []uint64 // first-seen order, for deterministic block output
 	maxLevel := 0
-	var maxSeq int64
 	sourceIDs := make([]string, 0, len(ordered))
 
 	for _, r := range ordered {
@@ -50,9 +46,6 @@ func Compact(blocksDir, tmpDir string, sources []*Reader) (Meta, error) {
 		sourceIDs = append(sourceIDs, m.BlockID)
 		if lvl := m.EffectiveLevel(); lvl > maxLevel {
 			maxLevel = lvl
-		}
-		if m.Sequence > maxSeq {
-			maxSeq = m.Sequence
 		}
 		for _, se := range r.Series() {
 			agg, ok := aggByID[se.ID]
@@ -71,7 +64,7 @@ func Compact(blocksDir, tmpDir string, sources []*Reader) (Meta, error) {
 				it := c.Iterator()
 				for it.Next() {
 					ts, v := it.At()
-					agg.samples = append(agg.samples, sample{ts: ts, val: v})
+					agg.samples = append(agg.samples, sample{ts: ts, val: v, gen: it.Gen()})
 				}
 				if err := it.Err(); err != nil {
 					return Meta{}, fmt.Errorf("block: compact decode chunk for series %d: %w", se.ID, err)
@@ -85,7 +78,6 @@ func Compact(blocksDir, tmpDir string, sources []*Reader) (Meta, error) {
 		return Meta{}, err
 	}
 	w.SetCompaction(maxLevel+1, sourceIDs)
-	w.SetSequence(maxSeq)
 
 	for _, id := range order {
 		chunks := rechunk(aggByID[id].samples)
@@ -109,12 +101,13 @@ func Compact(blocksDir, tmpDir string, sources []*Reader) (Meta, error) {
 type sample struct {
 	ts  int64
 	val float64
+	gen int64
 }
 
-// rechunk sorts samples by timestamp, deduplicates equal timestamps (last
-// occurrence wins — later source wins because sources were appended in Sequence
-// then MinTime ascending order), and encodes them into chunks using the same
-// 120-sample / 2h sealing rule as the head. Returns nil for no samples.
+// rechunk sorts samples by timestamp, deduplicates equal timestamps keeping the
+// highest write generation (last-write-wins), and encodes the survivors into
+// chunks using the same 120-sample / 2h sealing rule as the head, preserving each
+// sample's generation. Returns nil for no samples.
 func rechunk(samples []sample) []*chunk.Chunk {
 	if len(samples) == 0 {
 		return nil
@@ -122,8 +115,11 @@ func rechunk(samples []sample) []*chunk.Chunk {
 	sort.SliceStable(samples, func(i, j int) bool { return samples[i].ts < samples[j].ts })
 	deduped := samples[:1]
 	for i := 1; i < len(samples); i++ {
-		if samples[i].ts == deduped[len(deduped)-1].ts {
-			deduped[len(deduped)-1] = samples[i]
+		last := &deduped[len(deduped)-1]
+		if samples[i].ts == last.ts {
+			if samples[i].gen > last.gen {
+				*last = samples[i]
+			}
 		} else {
 			deduped = append(deduped, samples[i])
 		}
@@ -137,7 +133,7 @@ func rechunk(samples []sample) []*chunk.Chunk {
 			chunks = append(chunks, cur)
 		}
 		// Append only fails on a sealed chunk, which the guard above prevents.
-		_ = cur.Append(s.ts, s.val)
+		_ = cur.Append(s.ts, s.val, s.gen)
 	}
 	return chunks
 }
