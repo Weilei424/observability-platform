@@ -60,7 +60,7 @@ func sealedChunk(t *testing.T) *chunk.Chunk {
 	t.Helper()
 	c := chunk.NewChunk()
 	for i := int64(0); i < 120; i++ {
-		if err := c.Append(1000+i, float64(i)); err != nil {
+		if err := c.Append(1000+i, float64(i), i); err != nil {
 			t.Fatalf("chunk append: %v", err)
 		}
 	}
@@ -598,6 +598,29 @@ func TestNewBlockStore_CorruptSurvivor_PreservesSources(t *testing.T) {
 	}
 }
 
+// TestNewBlockStore_CorruptSurvivorChunks_PreservesSources is the regression for
+// trusting a survivor on index validation alone: a merged block with a valid index
+// but a corrupt chunks file must NOT reclaim its sources. Chunks are read lazily,
+// so only deep chunk validation catches this before deletion.
+func TestNewBlockStore_CorruptSurvivorChunks_PreservesSources(t *testing.T) {
+	dir := t.TempDir()
+	s1, s2, mergedID, blocksDir, _ := makeCrashState(t, dir)
+
+	// Truncate the merged block's chunks file; index and postings stay valid.
+	if err := os.WriteFile(filepath.Join(blocksDir, mergedID, "chunks"), []byte{}, 0o644); err != nil {
+		t.Fatalf("corrupt chunks: %v", err)
+	}
+
+	if _, err := metrics.NewBlockStore(dir); err == nil {
+		t.Fatal("NewBlockStore: want error from survivor with corrupt chunks, got nil")
+	}
+	for _, id := range []string{s1, s2} {
+		if _, err := os.Stat(filepath.Join(blocksDir, id)); err != nil {
+			t.Fatalf("source %s was reclaimed despite corrupt survivor chunks: %v", id, err)
+		}
+	}
+}
+
 // TestNewBlockStore_CorruptSupersededSource_Recovers verifies the converse: when
 // the survivor is valid, a corrupt source it supersedes is reclaimed without
 // failing startup, and the merged data stays queryable.
@@ -754,8 +777,8 @@ func TestBlockStore_LastWriteWins_ConsistentAcrossRuntimeRestartCompaction(t *te
 	if err != nil {
 		t.Fatalf("NewBlockStore: %v", err)
 	}
-	flushSamples(t, bs1, "m", a) // sequence 1
-	flushSamples(t, bs1, "m", b) // sequence 2
+	flushSamples(t, bs1, "m", a) // lower generations
+	flushSamples(t, bs1, "m", b) // higher generations (written later)
 	assertWins(bs1, "runtime")
 	_ = bs1.Close()
 
@@ -763,7 +786,7 @@ func TestBlockStore_LastWriteWins_ConsistentAcrossRuntimeRestartCompaction(t *te
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	assertWins(bs2, "restart") // proves load order is by sequence, not MinTime
+	assertWins(bs2, "restart") // winner is decided by per-sample generation, not load order
 
 	infos := bs2.BlockInfos()
 	if len(infos) != 2 {
@@ -785,6 +808,75 @@ func TestBlockStore_LastWriteWins_ConsistentAcrossRuntimeRestartCompaction(t *te
 		t.Fatalf("after compaction+restart blocks = %d, want 1", got)
 	}
 	assertWins(bs3, "post-compaction restart")
+}
+
+// onlyNewBlockID returns the one block ID in bs not already in known, recording it.
+func onlyNewBlockID(t *testing.T, bs *metrics.BlockStore, known map[string]bool) string {
+	t.Helper()
+	for _, info := range bs.BlockInfos() {
+		if !known[info.ID] {
+			known[info.ID] = true
+			return info.ID
+		}
+	}
+	t.Fatal("no new block found")
+	return ""
+}
+
+// TestBlockStore_PartialCompaction_PreservesLastWriteWins is the regression for the
+// corner a single per-block generation cannot resolve: compaction merges block A
+// (old value of series x) with an unrelated, newer block B, while block C — holding
+// a newer correction of x — is left out of the group. Per-sample generations keep
+// C's correction winning after the merge; a per-block generation on the merged
+// block (max of A and B) would wrongly outrank C.
+func TestBlockStore_PartialCompaction_PreservesLastWriteWins(t *testing.T) {
+	dir := t.TempDir()
+	bs, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+	defer bs.Close()
+
+	const T = int64(1_000_000)
+	known := map[string]bool{}
+
+	// Block A: series x, original value at T (lowest generations).
+	aSamples := [][2]int64{{T, 1}}
+	for i := int64(1); i < 120; i++ {
+		aSamples = append(aSamples, [2]int64{T + i*1000, 0})
+	}
+	flushSamples(t, bs, "x", aSamples)
+	idA := onlyNewBlockID(t, bs, known)
+
+	// Block C: series x, newer correction at T (higher generations than A).
+	cSamples := [][2]int64{{T, 2}}
+	for i := int64(1); i < 120; i++ {
+		cSamples = append(cSamples, [2]int64{5_000_000 + i*1000, 0})
+	}
+	flushSamples(t, bs, "x", cSamples)
+	_ = onlyNewBlockID(t, bs, known) // block C — intentionally excluded from compaction
+
+	// Block B: unrelated series y, newest of all (highest generations).
+	ySamples := make([][2]int64, 0, 120)
+	for i := int64(0); i < 120; i++ {
+		ySamples = append(ySamples, [2]int64{7_000_000 + i*1000, 0})
+	}
+	flushSamples(t, bs, "y", ySamples)
+	idB := onlyNewBlockID(t, bs, known)
+
+	// Compact A + B only, leaving C (the newer correction of x) behind.
+	group := []string{idA, idB}
+	if n, err := bs.CompactOnce(func([]block.BlockInfo) [][]string { return [][]string{group} }); err != nil || n != 1 {
+		t.Fatalf("CompactOnce = %d, %v; want 1, nil", n, err)
+	}
+
+	got, err := bs.QueryRange(metricFingerprint(t, "x"), T, T)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
+	if len(got) != 1 || got[0].Value != 2 {
+		t.Fatalf("x@T after partial compaction = %v, want value 2 (the newer correction must still win)", got)
+	}
 }
 
 // TestBlockStore_CompactOnce_PreservesLabelIndex verifies the merged block's
@@ -867,6 +959,53 @@ func TestBlockStore_ApplyRetention_DeleteFailureKeepsReadable(t *testing.T) {
 	}
 	if len(rng) != 120 {
 		t.Fatalf("after failed deletion query = %d samples, want 120 (still readable)", len(rng))
+	}
+}
+
+// TestBlockStore_ApplyRetention_CleanupFailureSurfaced forces the post-rename
+// RemoveAll to fail and asserts the failure is returned (not swallowed) while the
+// block still counts as reclaimed and leaves the live set.
+func TestBlockStore_ApplyRetention_CleanupFailureSurfaced(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("runs as root; directory permissions are not enforced")
+	}
+	dir := t.TempDir()
+	bs, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+	defer bs.Close()
+	flushOneBlock(t, bs, "m", 0)
+
+	// Inject an undeletable subtree: a read-only directory containing a file. The
+	// block dir itself stays writable, so renaming it into tmp/ succeeds, but the
+	// recursive RemoveAll of the reclaimed copy fails on the read-only subdir.
+	blockID := bs.BlockInfos()[0].ID
+	badDir := filepath.Join(dir, "metrics", "blocks", blockID, "baddir")
+	if err := os.Mkdir(badDir, 0o755); err != nil {
+		t.Fatalf("mkdir baddir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(badDir, "f"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write baddir file: %v", err)
+	}
+	if err := os.Chmod(badDir, 0o555); err != nil {
+		t.Fatalf("chmod baddir: %v", err)
+	}
+	// Restore perms so t.TempDir cleanup can remove the reclaimed tmp copy.
+	t.Cleanup(func() {
+		_ = os.Chmod(badDir, 0o755)
+		_ = os.Chmod(filepath.Join(dir, "metrics", "tmp", blockID, "baddir"), 0o755)
+	})
+
+	n, err := bs.ApplyRetention(time.UnixMilli(10_000_000), time.Millisecond)
+	if err == nil {
+		t.Fatal("ApplyRetention: want a surfaced cleanup error, got nil")
+	}
+	if n != 1 {
+		t.Fatalf("ApplyRetention deleted=%d, want 1 (reclaimed from the live set)", n)
+	}
+	if got := len(bs.BlockInfos()); got != 0 {
+		t.Fatalf("after reclaim blocks = %d, want 0 (gone from live set)", got)
 	}
 }
 
