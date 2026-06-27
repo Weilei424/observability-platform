@@ -18,11 +18,11 @@ type Meta struct {
 	CreatedAt  time.Time `json:"created_at"`
 	Level      int       `json:"level"`             // 1 = freshly flushed head block; N = compacted
 	Sources    []string  `json:"sources,omitempty"` // block IDs merged into this block
-	// Sequence is a monotonic write-generation stamp used to resolve last-write-wins
-	// for duplicate timestamps across blocks. A flush assigns max(existing)+1; a
-	// compaction inherits max(source sequences). Blocks written before this field
-	// existed unmarshal as 0; ordering falls back to MinTime for equal sequences.
-	Sequence int64 `json:"sequence"`
+	// MaxGen is the maximum per-sample write generation stored in this block. At
+	// startup it seeds the in-memory generation counter (one past the max across
+	// all blocks) so replayed and new writes always outrank persisted data for
+	// last-write-wins. Blocks written before generations existed unmarshal as 0.
+	MaxGen int64 `json:"max_gen"`
 }
 
 // EffectiveLevel returns the compaction level, treating a missing/zero level
