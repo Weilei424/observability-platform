@@ -13,7 +13,13 @@ import (
 // any source, all samples across all sources are merged, sorted by timestamp,
 // deduplicated (later source wins on equal timestamps), and re-encoded into
 // fresh chunks. The merged block's Level is one above the highest source level;
-// Sources lists the source block IDs.
+// Sources lists the source block IDs; Sequence is the max source sequence so the
+// merged block keeps the same last-write-wins precedence its newest source had.
+//
+// "Later source wins" is resolved by write-generation: sources are ordered by
+// Sequence ascending (MinTime ascending as a fallback for equal/legacy
+// sequences), so the source written latest wins an equal timestamp — matching
+// BlockStore's query-time dedup, which orders blocks the same way.
 func Compact(blocksDir, tmpDir string, sources []*Reader) (Meta, error) {
 	if len(sources) < 2 {
 		return Meta{}, fmt.Errorf("block: Compact requires at least 2 sources, got %d", len(sources))
@@ -22,7 +28,11 @@ func Compact(blocksDir, tmpDir string, sources []*Reader) (Meta, error) {
 	ordered := make([]*Reader, len(sources))
 	copy(ordered, sources)
 	sort.SliceStable(ordered, func(i, j int) bool {
-		return ordered[i].Meta().MinTime < ordered[j].Meta().MinTime
+		mi, mj := ordered[i].Meta(), ordered[j].Meta()
+		if mi.Sequence != mj.Sequence {
+			return mi.Sequence < mj.Sequence
+		}
+		return mi.MinTime < mj.MinTime
 	})
 
 	type seriesAgg struct {
@@ -32,6 +42,7 @@ func Compact(blocksDir, tmpDir string, sources []*Reader) (Meta, error) {
 	aggByID := make(map[uint64]*seriesAgg)
 	var order []uint64 // first-seen order, for deterministic block output
 	maxLevel := 0
+	var maxSeq int64
 	sourceIDs := make([]string, 0, len(ordered))
 
 	for _, r := range ordered {
@@ -39,6 +50,9 @@ func Compact(blocksDir, tmpDir string, sources []*Reader) (Meta, error) {
 		sourceIDs = append(sourceIDs, m.BlockID)
 		if lvl := m.EffectiveLevel(); lvl > maxLevel {
 			maxLevel = lvl
+		}
+		if m.Sequence > maxSeq {
+			maxSeq = m.Sequence
 		}
 		for _, se := range r.Series() {
 			agg, ok := aggByID[se.ID]
@@ -71,6 +85,7 @@ func Compact(blocksDir, tmpDir string, sources []*Reader) (Meta, error) {
 		return Meta{}, err
 	}
 	w.SetCompaction(maxLevel+1, sourceIDs)
+	w.SetSequence(maxSeq)
 
 	for _, id := range order {
 		chunks := rechunk(aggByID[id].samples)
@@ -97,9 +112,9 @@ type sample struct {
 }
 
 // rechunk sorts samples by timestamp, deduplicates equal timestamps (last
-// occurrence wins — later source wins because sources were appended MinTime
-// ascending), and encodes them into chunks using the same 120-sample / 2h
-// sealing rule as the head. Returns nil for no samples.
+// occurrence wins — later source wins because sources were appended in Sequence
+// then MinTime ascending order), and encodes them into chunks using the same
+// 120-sample / 2h sealing rule as the head. Returns nil for no samples.
 func rechunk(samples []sample) []*chunk.Chunk {
 	if len(samples) == 0 {
 		return nil
