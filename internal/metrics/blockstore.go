@@ -81,7 +81,27 @@ func NewBlockStore(dataDir string) (*BlockStore, error) {
 		opened[e.Name()] = r
 	}
 
-	// Superseded sources come only from survivors that opened AND validated.
+	// Before trusting a survivor's Sources, deep-validate its chunks: index and
+	// postings can be intact while the chunks file is truncated or corrupt, and
+	// chunks are only read lazily at query time. Validate just survivors
+	// (Sources != nil) to bound startup cost; a corrupt survivor is demoted to
+	// failed so it cannot authorize deletion of its sources.
+	var corruptSurvivors []string
+	for name, r := range opened {
+		if len(r.Meta().Sources) == 0 {
+			continue
+		}
+		if err := validateBlockChunks(r); err != nil {
+			_ = r.Close()
+			failed[name] = err
+			corruptSurvivors = append(corruptSurvivors, name)
+		}
+	}
+	for _, name := range corruptSurvivors {
+		delete(opened, name)
+	}
+
+	// Superseded sources come only from survivors that opened AND fully validated.
 	superseded := make(map[string]struct{})
 	for _, r := range opened {
 		for _, src := range r.Meta().Sources {
@@ -121,14 +141,26 @@ func NewBlockStore(dataDir string) (*BlockStore, error) {
 	for _, r := range opened {
 		readers = append(readers, r)
 	}
-	sort.Slice(readers, func(i, j int) bool { return lessGeneration(readers[i], readers[j]) })
+	sort.Slice(readers, func(i, j int) bool { return readers[i].Meta().MinTime < readers[j].Meta().MinTime })
 
-	return &BlockStore{
+	// Seed the in-memory generation counter past the highest generation persisted
+	// in any block, so replayed and newly appended samples always outrank stored
+	// block data for last-write-wins.
+	var maxGen int64
+	for _, r := range readers {
+		if g := r.Meta().MaxGen; g > maxGen {
+			maxGen = g
+		}
+	}
+
+	bs := &BlockStore{
 		mem:      NewMemoryStore(),
 		blocks:   readers,
 		blockDir: blockDir,
 		tmpDir:   tmpDir,
-	}, nil
+	}
+	bs.mem.EnsureGenFloor(maxGen + 1)
+	return bs, nil
 }
 
 // Append adds a sample to the in-memory store.
@@ -322,23 +354,19 @@ func dirSizeBytes(dir string) int64 {
 }
 
 // QueryInstant returns the latest sample with timestamp ≤ tMs for the given
-// series, searching both memory and all loaded blocks. Memory wins for equal
-// timestamps. Returns an error if any block chunk cannot be read.
+// series, searching both memory and all loaded blocks. For an equal timestamp the
+// highest write generation wins (memory outranks blocks because its generations
+// are seeded past every block's). Returns an error if any block chunk cannot be read.
 func (bs *BlockStore) QueryInstant(id SeriesID, tMs int64) (Sample, bool, error) {
 	bs.mu.RLock()
 	defer bs.mu.RUnlock()
 
-	memBest, memFound, err := bs.mem.QueryInstant(id, tMs)
+	best, found, err := bs.mem.QueryInstant(id, tMs)
 	if err != nil {
 		return Sample{}, false, err
 	}
 
-	// Resolve the latest block sample at or before tMs. Blocks are iterated in
-	// ascending write-generation order, and an equal timestamp uses >= so the
-	// higher-generation (later-written) block wins the tie — matching QueryRange
-	// and block compaction.
-	var blkBest Sample
-	blkFound := false
+	// Latest timestamp wins; an equal timestamp is broken by highest generation.
 	for _, r := range bs.blocks {
 		if r.Meta().MinTime > tMs {
 			continue
@@ -355,27 +383,23 @@ func (bs *BlockStore) QueryInstant(id SeriesID, tMs int64) (Sample, bool, error)
 			it := c.Iterator()
 			for it.Next() {
 				ts, val := it.At()
-				if ts <= tMs && (!blkFound || ts >= blkBest.TimestampMs) {
-					blkBest = Sample{SeriesID: id, TimestampMs: ts, Value: val}
-					blkFound = true
+				if ts > tMs {
+					continue
+				}
+				gen := it.Gen()
+				if !found || ts > best.TimestampMs || (ts == best.TimestampMs && gen > best.Gen) {
+					best = Sample{SeriesID: id, TimestampMs: ts, Value: val, Gen: gen}
+					found = true
 				}
 			}
 		}
 	}
-
-	// Memory holds the newest writes, so it wins an equal timestamp against blocks.
-	if memFound && (!blkFound || memBest.TimestampMs >= blkBest.TimestampMs) {
-		return memBest, true, nil
-	}
-	if blkFound {
-		return blkBest, true, nil
-	}
-	return Sample{}, false, nil
+	return best, found, nil
 }
 
 // QueryRange returns all samples for series id with startMs ≤ ts ≤ endMs,
-// merging memory and block results. Results are sorted by timestamp;
-// duplicate timestamps are deduplicated (memory wins over block).
+// merging memory and block results. Results are sorted by timestamp; duplicate
+// timestamps are deduplicated keeping the highest write generation (last-write-wins).
 // Returns nil, nil if the series is unknown in both blocks and memory; returns a
 // non-nil empty slice if the series is known but has no in-range samples.
 // Returns an error if any block chunk cannot be read.
@@ -412,7 +436,7 @@ func (bs *BlockStore) QueryRange(id SeriesID, startMs, endMs int64) ([]Sample, e
 			for it.Next() {
 				ts, val := it.At()
 				if ts >= startMs && ts <= endMs {
-					result = append(result, Sample{SeriesID: id, TimestampMs: ts, Value: val})
+					result = append(result, Sample{SeriesID: id, TimestampMs: ts, Value: val, Gen: it.Gen()})
 				}
 			}
 		}
@@ -433,32 +457,19 @@ func (bs *BlockStore) QueryRange(id SeriesID, startMs, endMs int64) ([]Sample, e
 		return result[i].TimestampMs < result[j].TimestampMs
 	})
 
-	// Dedup: for equal timestamps keep the last occurrence (memory wins).
+	// Dedup: for equal timestamps keep the highest generation (last-write-wins).
 	deduped := result[:1]
 	for i := 1; i < len(result); i++ {
-		if result[i].TimestampMs == deduped[len(deduped)-1].TimestampMs {
-			deduped[len(deduped)-1] = result[i]
+		last := &deduped[len(deduped)-1]
+		if result[i].TimestampMs == last.TimestampMs {
+			if result[i].Gen > last.Gen {
+				*last = result[i]
+			}
 		} else {
 			deduped = append(deduped, result[i])
 		}
 	}
 	return deduped, nil
-}
-
-// nextSequence returns one past the highest loaded block sequence — the
-// write-generation stamp for the next flushed block. Callers hold flushMu, so the
-// block set cannot change between this read and the subsequent append, keeping the
-// stamp strictly greater than every existing block's.
-func (bs *BlockStore) nextSequence() int64 {
-	bs.mu.RLock()
-	defer bs.mu.RUnlock()
-	var max int64
-	for _, r := range bs.blocks {
-		if s := r.Meta().Sequence; s > max {
-			max = s
-		}
-	}
-	return max + 1
 }
 
 // FlushBlock writes all sealed chunks from memory into a new immutable block.
@@ -478,7 +489,6 @@ func (bs *BlockStore) FlushBlock() (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("blockstore: new writer: %w", err)
 	}
-	w.SetSequence(bs.nextSequence())
 
 	for _, sc := range snapshot {
 		pairs := labelsToPairs(sc.Labels)
@@ -504,9 +514,7 @@ func (bs *BlockStore) FlushBlock() (bool, error) {
 	// This ensures no query window where the data is visible in neither source.
 	// Queries that snapshot the block list before this point still see the sealed
 	// chunks in memory; queries that snapshot after may briefly see both, which
-	// is handled correctly by the existing dedup pass (memory wins on ties).
-	// The new block carries the highest sequence (nextSequence = max+1), so
-	// appending it keeps bs.blocks ordered by lessGeneration.
+	// is handled correctly by the existing dedup pass (highest generation wins).
 	bs.mu.Lock()
 	bs.blocks = append(bs.blocks, newReader)
 	bs.mu.Unlock()
@@ -578,9 +586,6 @@ func (bs *BlockStore) CompactOnce(plan func([]block.BlockInfo) [][]string) (int,
 			}
 		}
 		kept = append(kept, newReader)
-		// The merged block inherits max(source sequences), which need not exceed
-		// every kept block's, so restore the lessGeneration ordering invariant.
-		sort.Slice(kept, func(i, j int) bool { return lessGeneration(kept[i], kept[j]) })
 		bs.blocks = kept
 		bs.mu.Unlock()
 
@@ -617,6 +622,9 @@ func (bs *BlockStore) ApplyRetention(now time.Time, retention time.Duration) (in
 	bs.flushMu.Lock()
 	defer bs.flushMu.Unlock()
 
+	// Retry physical cleanup of any tmp leftovers a prior pass could not remove.
+	sweepTmpDir(bs.tmpDir)
+
 	var reclaimed []*block.Reader
 	var firstErr error
 	bs.mu.Lock()
@@ -641,11 +649,36 @@ func (bs *BlockStore) ApplyRetention(now time.Time, retention time.Duration) (in
 	bs.blocks = kept
 	bs.mu.Unlock()
 
+	// Finish reclaimed blocks outside the lock. A physical-cleanup failure is
+	// surfaced (not swallowed): the block is already gone from the live set and
+	// counts as reclaimed, and the next pass's sweep plus startup GC retry removal.
+	var cleanupErr error
 	for _, r := range reclaimed {
 		_ = r.Close()
-		_ = os.RemoveAll(filepath.Join(bs.tmpDir, r.Meta().BlockID))
+		if err := os.RemoveAll(filepath.Join(bs.tmpDir, r.Meta().BlockID)); err != nil && cleanupErr == nil {
+			cleanupErr = fmt.Errorf("blockstore: remove reclaimed block %s from tmp: %w", r.Meta().BlockID, err)
+		}
 	}
-	return len(reclaimed), firstErr
+	if firstErr != nil {
+		return len(reclaimed), firstErr
+	}
+	return len(reclaimed), cleanupErr
+}
+
+// sweepTmpDir best-effort removes leftover subdirectories under tmpDir: orphaned
+// flush/compaction work dirs and reclaimed blocks whose final RemoveAll failed on
+// an earlier pass. Safe to call while holding flushMu, when no writer is using
+// tmpDir.
+func sweepTmpDir(tmpDir string) {
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			_ = os.RemoveAll(filepath.Join(tmpDir, e.Name()))
+		}
+	}
 }
 
 // readerByID returns the loaded reader for id, or nil. Caller holds bs.mu.
@@ -744,31 +777,6 @@ func deleteWALSegmentsUpTo(walDir string, maxIdx int) error {
 
 // --- helpers ---
 
-// closeReaders closes every reader, used to release already-opened blocks when
-// NewBlockStore aborts partway through loading.
-func closeReaders(readers []*block.Reader) {
-	for _, r := range readers {
-		_ = r.Close()
-	}
-}
-
-// lessGeneration orders readers by write-generation: Sequence ascending, then
-// MinTime, then BlockID for determinism. BlockStore keeps bs.blocks in this order
-// so that query-time dedup (last occurrence wins) and block compaction agree on
-// last-write-wins precedence: the later-written block always sorts last and wins
-// an equal timestamp. Blocks predating the Sequence field carry 0 and fall back
-// to MinTime ordering (the prior behavior).
-func lessGeneration(a, b *block.Reader) bool {
-	ma, mb := a.Meta(), b.Meta()
-	if ma.Sequence != mb.Sequence {
-		return ma.Sequence < mb.Sequence
-	}
-	if ma.MinTime != mb.MinTime {
-		return ma.MinTime < mb.MinTime
-	}
-	return ma.BlockID < mb.BlockID
-}
-
 // validateBlockSeries checks that every series in a freshly opened block has a
 // well-formed label set whose fingerprint equals the stored series ID. The
 // fingerprint check lives here (not in block.OpenReader) because fingerprinting
@@ -783,6 +791,23 @@ func validateBlockSeries(r *block.Reader) error {
 		}
 		if uint64(labels.Fingerprint()) != se.ID {
 			return fmt.Errorf("series %d label set fingerprints to %d", se.ID, uint64(labels.Fingerprint()))
+		}
+	}
+	return nil
+}
+
+// validateBlockChunks decodes every chunk in the block so that corruption in the
+// chunks file is detected. OpenReader and validateBlockSeries only check the
+// index/postings; chunks are read lazily at query time. This is run on a
+// compaction survivor before its Sources are trusted (and deleted), so a survivor
+// with a valid index but a corrupt chunks file cannot destroy the only good copy.
+// ReadChunk decodes and validates each payload via chunk.FromBytes.
+func validateBlockChunks(r *block.Reader) error {
+	for _, se := range r.Series() {
+		for _, ref := range se.Chunks {
+			if _, err := r.ReadChunk(ref); err != nil {
+				return fmt.Errorf("series %d chunk: %w", se.ID, err)
+			}
 		}
 	}
 	return nil
