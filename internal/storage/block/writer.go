@@ -44,6 +44,7 @@ type Writer struct {
 	numSamples int
 	level      int      // 0 → Commit writes 1; set by SetCompaction for compacted blocks
 	sources    []string // source block IDs when this block is a compaction output
+	sequence   int64    // write-generation stamp; set by SetSequence (0 if unset)
 }
 
 // NewWriter creates a Writer that writes to a temp directory and renames to
@@ -73,6 +74,13 @@ func NewWriter(blocksDir, tmpDir string) (*Writer, error) {
 func (w *Writer) SetCompaction(level int, sources []string) {
 	w.level = level
 	w.sources = sources
+}
+
+// SetSequence records the write-generation stamp to write into this block's
+// meta.json. Call before Commit. A flush passes max(existing)+1; a compaction
+// passes max(source sequences). Left unset, the block's sequence is 0.
+func (w *Writer) SetSequence(seq int64) {
+	w.sequence = seq
 }
 
 // AddSeries enqueues one series with its sealed chunks for writing. The labels
@@ -139,6 +147,7 @@ func (w *Writer) Commit() (Meta, error) {
 		CreatedAt:  time.Now().UTC(),
 		Level:      level,
 		Sources:    w.sources,
+		Sequence:   w.sequence,
 	}
 	if err := writeMeta(w.workDir, meta); err != nil {
 		return Meta{}, err
