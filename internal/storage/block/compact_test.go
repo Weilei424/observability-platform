@@ -94,47 +94,47 @@ func TestCompact_MergesSharedSeries_NoDataLoss(t *testing.T) {
 	}
 }
 
-func TestCompact_DedupsEqualTimestamps_LaterSourceWins(t *testing.T) {
+func TestCompact_DedupsEqualTimestamps_HigherGenerationWins(t *testing.T) {
 	dir := t.TempDir()
 	blocks, tmp := filepath.Join(dir, "blocks"), filepath.Join(dir, "tmp")
 	lbl := []block.LabelPair{{Name: "__name__", Value: "m"}}
-	type sd = struct {
-		labels  []block.LabelPair
-		samples [][2]int64
-	}
-	r1 := writeBlock(t, blocks, tmp, map[uint64]sd{1: {lbl, [][2]int64{{1000, 10}}}}) // MinTime 1000
-	r2 := writeBlock(t, blocks, tmp, map[uint64]sd{1: {lbl, [][2]int64{{1000, 99}}}}) // MinTime 1000 too
 
-	// Same MinTime: tie broken by input order after stable sort — give r2 a later
-	// sample so its MinTime is higher and it sorts last. Use distinct windows:
-	r2b := writeBlock(t, blocks, tmp, map[uint64]sd{1: {lbl, [][2]int64{{1000, 99}, {5000, 1}}}})
-	_ = r2
+	// Two blocks share ts=1000; the sample written later (higher generation) wins,
+	// independent of the order the sources are passed to Compact.
+	older := writeBlockSeq(t, blocks, tmp, 1, 1, lbl, [][2]int64{{1000, 10}})
+	newer := writeBlockSeq(t, blocks, tmp, 2, 1, lbl, [][2]int64{{1000, 99}})
 
 	out := filepath.Join(dir, "out")
-	meta, err := block.Compact(out, tmp, []*block.Reader{r1, r2b})
+	meta, err := block.Compact(out, tmp, []*block.Reader{newer, older}) // newer first on purpose
 	if err != nil {
 		t.Fatalf("Compact: %v", err)
 	}
-	merged, _ := block.OpenReader(filepath.Join(out, meta.BlockID))
+	merged, err := block.OpenReader(filepath.Join(out, meta.BlockID))
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
 	got := readAll(t, merged, 1)
-	// ts=1000 should resolve to the later source (r2b): both r1 and r2b have the
-	// same MinTime (1000), so the stable sort preserves input order and r2b (passed
-	// second as [r1, r2b]) remains the later source → keep value 99.
-	if got[0][0] != 1000 || got[0][1] != 99 {
-		t.Fatalf("ts=1000 resolved to %v, want value 99", got[0])
+	if len(got) != 1 || got[0][0] != 1000 || got[0][1] != 99 {
+		t.Fatalf("ts=1000 resolved to %v, want [[1000 99]] (higher generation wins)", got)
 	}
 }
 
-// writeBlockSeq writes a one-series block stamped with an explicit write-generation
-// sequence, returning an open Reader.
-func writeBlockSeq(t *testing.T, blocks, tmp string, seq int64, id uint64, lbl []block.LabelPair, samples [][2]int64) *block.Reader {
+// writeBlockSeq writes a one-series block whose samples all carry write generation
+// gen, returning an open Reader. Used to give compaction sources distinct
+// generations independent of their time bounds.
+func writeBlockSeq(t *testing.T, blocks, tmp string, gen int64, id uint64, lbl []block.LabelPair, samples [][2]int64) *block.Reader {
 	t.Helper()
 	w, err := block.NewWriter(blocks, tmp)
 	if err != nil {
 		t.Fatalf("NewWriter: %v", err)
 	}
-	w.SetSequence(seq)
-	if err := w.AddSeries(id, lbl, []*chunk.Chunk{makeChunk(t, samples)}); err != nil {
+	c := chunk.NewChunk()
+	for _, s := range samples {
+		if err := c.Append(s[0], float64(s[1]), gen); err != nil {
+			t.Fatalf("chunk.Append: %v", err)
+		}
+	}
+	if err := w.AddSeries(id, lbl, []*chunk.Chunk{c}); err != nil {
 		t.Fatalf("AddSeries: %v", err)
 	}
 	meta, err := w.Commit()
@@ -148,12 +148,12 @@ func writeBlockSeq(t *testing.T, blocks, tmp string, seq int64, id uint64, lbl [
 	return r
 }
 
-// TestCompact_DedupResolvedBySequence_NotMinTime proves equal-timestamp dedup is
-// decided by write-generation (Sequence), not time bounds. The newer block (seq 2)
+// TestCompact_DedupResolvedByGeneration_NotMinTime proves equal-timestamp dedup is
+// decided by per-sample write generation, not time bounds. The newer block (gen 2)
 // deliberately has the SMALLER MinTime — as happens when a correction arrives with
 // an out-of-order earlier sample — so a MinTime-ordered merge would wrongly keep
 // the older value.
-func TestCompact_DedupResolvedBySequence_NotMinTime(t *testing.T) {
+func TestCompact_DedupResolvedByGeneration_NotMinTime(t *testing.T) {
 	dir := t.TempDir()
 	blocks, tmp := filepath.Join(dir, "blocks"), filepath.Join(dir, "tmp")
 	lbl := []block.LabelPair{{Name: "__name__", Value: "m"}}
@@ -167,8 +167,8 @@ func TestCompact_DedupResolvedBySequence_NotMinTime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Compact: %v", err)
 	}
-	if meta.Sequence != 2 {
-		t.Fatalf("merged sequence = %d, want 2 (max of sources)", meta.Sequence)
+	if meta.MaxGen != 2 {
+		t.Fatalf("merged MaxGen = %d, want 2 (max sample generation)", meta.MaxGen)
 	}
 	merged, err := block.OpenReader(filepath.Join(out, meta.BlockID))
 	if err != nil {
@@ -181,7 +181,7 @@ func TestCompact_DedupResolvedBySequence_NotMinTime(t *testing.T) {
 	}
 	for i := range want {
 		if got[i] != want[i] {
-			t.Fatalf("sample %d = %v, want %v (ts=100 must resolve to the higher-sequence block)", i, got[i], want[i])
+			t.Fatalf("sample %d = %v, want %v (ts=100 must resolve to the higher-generation block)", i, got[i], want[i])
 		}
 	}
 }
