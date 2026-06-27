@@ -1,6 +1,7 @@
 package metrics_test
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sort"
@@ -617,6 +618,42 @@ func TestNewBlockStore_CorruptSurvivorChunks_PreservesSources(t *testing.T) {
 	for _, id := range []string{s1, s2} {
 		if _, err := os.Stat(filepath.Join(blocksDir, id)); err != nil {
 			t.Fatalf("source %s was reclaimed despite corrupt survivor chunks: %v", id, err)
+		}
+	}
+}
+
+// TestNewBlockStore_CorruptSurvivorMaxGen_PreservesSources verifies that a survivor
+// whose persisted MaxGen disagrees with its stored generations is rejected (rather
+// than trusted to seed the generation counter and authorize source deletion).
+func TestNewBlockStore_CorruptSurvivorMaxGen_PreservesSources(t *testing.T) {
+	dir := t.TempDir()
+	s1, s2, mergedID, blocksDir, _ := makeCrashState(t, dir)
+
+	// Corrupt the merged block's persisted MaxGen so it disagrees with its chunks.
+	metaPath := filepath.Join(blocksDir, mergedID, "meta.json")
+	raw, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatalf("read meta: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("unmarshal meta: %v", err)
+	}
+	m["max_gen"] = 999999
+	out, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal meta: %v", err)
+	}
+	if err := os.WriteFile(metaPath, out, 0o644); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+
+	if _, err := metrics.NewBlockStore(dir); err == nil {
+		t.Fatal("NewBlockStore: want error from survivor with corrupt MaxGen, got nil")
+	}
+	for _, id := range []string{s1, s2} {
+		if _, err := os.Stat(filepath.Join(blocksDir, id)); err != nil {
+			t.Fatalf("source %s was reclaimed despite corrupt survivor MaxGen: %v", id, err)
 		}
 	}
 }
