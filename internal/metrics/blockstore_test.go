@@ -539,3 +539,408 @@ func TestBlockStore_StartupGC_RemovesSupersededSources(t *testing.T) {
 		t.Fatalf("after GC query = %d samples, want 240", len(got))
 	}
 }
+
+// makeCrashState flushes two source blocks and compacts them into a merged block
+// while leaving the sources on disk — the exact state a crash between
+// block.Compact and source deletion produces. Returns the source IDs, the merged
+// meta, and the blocks/tmp dirs.
+func makeCrashState(t *testing.T, dir string) (s1, s2 string, mergedID, blocksDir, tmpDir string) {
+	t.Helper()
+	bs, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+	flushOneBlock(t, bs, "m", 0)
+	flushOneBlock(t, bs, "m", 200000)
+	infos := bs.BlockInfos()
+	s1, s2 = infos[0].ID, infos[1].ID
+	blocksDir = filepath.Join(dir, "metrics", "blocks")
+	tmpDir = filepath.Join(dir, "metrics", "tmp")
+
+	r1, err := block.OpenReader(filepath.Join(blocksDir, s1))
+	if err != nil {
+		t.Fatalf("open s1: %v", err)
+	}
+	r2, err := block.OpenReader(filepath.Join(blocksDir, s2))
+	if err != nil {
+		t.Fatalf("open s2: %v", err)
+	}
+	meta, err := block.Compact(blocksDir, tmpDir, []*block.Reader{r1, r2})
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	_ = r1.Close()
+	_ = r2.Close()
+	_ = bs.Close()
+	return s1, s2, meta.BlockID, blocksDir, tmpDir
+}
+
+// TestNewBlockStore_CorruptSurvivor_PreservesSources is the regression for the
+// startup-GC data-loss bug: when a compacted block is corrupt, its source blocks
+// must NOT be reclaimed (they are the only recoverable copy). Startup fails, but
+// the data survives for a later repair.
+func TestNewBlockStore_CorruptSurvivor_PreservesSources(t *testing.T) {
+	dir := t.TempDir()
+	s1, s2, mergedID, blocksDir, _ := makeCrashState(t, dir)
+
+	// Corrupt the merged block's index so it cannot open/validate.
+	if err := os.WriteFile(filepath.Join(blocksDir, mergedID, "index"), []byte("garbage"), 0o644); err != nil {
+		t.Fatalf("corrupt index: %v", err)
+	}
+
+	if _, err := metrics.NewBlockStore(dir); err == nil {
+		t.Fatal("NewBlockStore: want error from corrupt survivor, got nil")
+	}
+	for _, id := range []string{s1, s2} {
+		if _, err := os.Stat(filepath.Join(blocksDir, id)); err != nil {
+			t.Fatalf("source %s was reclaimed despite a corrupt survivor: %v", id, err)
+		}
+	}
+}
+
+// TestNewBlockStore_CorruptSupersededSource_Recovers verifies the converse: when
+// the survivor is valid, a corrupt source it supersedes is reclaimed without
+// failing startup, and the merged data stays queryable.
+func TestNewBlockStore_CorruptSupersededSource_Recovers(t *testing.T) {
+	dir := t.TempDir()
+	s1, _, mergedID, blocksDir, _ := makeCrashState(t, dir)
+
+	// Corrupt a source; the valid merged block supersedes it.
+	if err := os.WriteFile(filepath.Join(blocksDir, s1, "index"), []byte("garbage"), 0o644); err != nil {
+		t.Fatalf("corrupt source index: %v", err)
+	}
+
+	bs, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+	defer bs.Close()
+	infos := bs.BlockInfos()
+	if len(infos) != 1 || infos[0].ID != mergedID {
+		t.Fatalf("after recovery blocks = %+v, want only merged %s", infos, mergedID)
+	}
+	got, err := bs.QueryRange(metricFingerprint(t, "m"), 0, 400000)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
+	if len(got) != 240 {
+		t.Fatalf("after recovery query = %d samples, want 240", len(got))
+	}
+}
+
+// flushSamples appends the given (ts,value) samples for one series and flushes a
+// block. The caller must supply enough samples (>=120) to seal a chunk.
+func flushSamples(t *testing.T, bs *metrics.BlockStore, name string, samples [][2]int64) {
+	t.Helper()
+	lbls := makeLabels(t, map[string]string{"__name__": name})
+	for _, s := range samples {
+		if err := bs.Append(lbls, s[0], float64(s[1])); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	ok, err := bs.FlushBlock()
+	if err != nil {
+		t.Fatalf("FlushBlock: %v", err)
+	}
+	if !ok {
+		t.Fatalf("FlushBlock: expected a sealed flush (need >=120 samples to seal)")
+	}
+}
+
+// flushLabeledBlock appends 120 samples for each label set, then flushes them as
+// one block.
+func flushLabeledBlock(t *testing.T, bs *metrics.BlockStore, base int64, labelSets ...map[string]string) {
+	t.Helper()
+	for _, ls := range labelSets {
+		lbls := makeLabels(t, ls)
+		for i := 0; i < 120; i++ {
+			if err := bs.Append(lbls, base+int64(i)*1000, float64(i)); err != nil {
+				t.Fatalf("Append: %v", err)
+			}
+		}
+	}
+	ok, err := bs.FlushBlock()
+	if err != nil {
+		t.Fatalf("FlushBlock: %v", err)
+	}
+	if !ok {
+		t.Fatalf("FlushBlock: expected a sealed flush")
+	}
+}
+
+func countDirs(t *testing.T, dir string) int {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir %s: %v", dir, err)
+	}
+	n := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			n++
+		}
+	}
+	return n
+}
+
+func selectHosts(t *testing.T, bs *metrics.BlockStore) []string {
+	t.Helper()
+	ms, err := bs.SelectSeries(metrics.Selector{MetricName: "m"})
+	if err != nil {
+		t.Fatalf("SelectSeries: %v", err)
+	}
+	set := make(map[string]struct{})
+	for _, s := range ms {
+		set[s.Labels.Map()["host"]] = struct{}{}
+	}
+	out := make([]string, 0, len(set))
+	for h := range set {
+		out = append(out, h)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestBlockStore_LastWriteWins_ConsistentAcrossRuntimeRestartCompaction proves
+// that for a duplicate timestamp written across two blocks, the later-written
+// block wins identically at runtime, after a restart, and after compaction. The
+// newer block deliberately has the smaller MinTime (an out-of-order correction),
+// so a MinTime-based ordering would diverge between these three paths.
+func TestBlockStore_LastWriteWins_ConsistentAcrossRuntimeRestartCompaction(t *testing.T) {
+	dir := t.TempDir()
+	const T = int64(1_000_000)
+
+	a := make([][2]int64, 0, 120)
+	for i := 0; i < 120; i++ {
+		a = append(a, [2]int64{T + int64(i)*1000, int64(100 + i)}) // T -> 100
+	}
+	b := [][2]int64{{1, 7}, {T, 999}} // out-of-order ts=1 makes B.MinTime < A.MinTime; T -> 999
+	for i := 0; i < 118; i++ {
+		b = append(b, [2]int64{3_000_000 + int64(i)*1000, int64(i)})
+	}
+
+	id := metricFingerprint(t, "m")
+	assertWins := func(bs *metrics.BlockStore, phase string) {
+		t.Helper()
+		s, found, err := bs.QueryInstant(id, T)
+		if err != nil || !found {
+			t.Fatalf("%s: QueryInstant(T) found=%v err=%v", phase, found, err)
+		}
+		if s.Value != 999 {
+			t.Fatalf("%s: QueryInstant(T)=%v, want 999 (later-written block must win)", phase, s.Value)
+		}
+		rng, err := bs.QueryRange(id, T, T)
+		if err != nil {
+			t.Fatalf("%s: QueryRange: %v", phase, err)
+		}
+		if len(rng) != 1 || rng[0].Value != 999 {
+			t.Fatalf("%s: QueryRange(T,T)=%v, want single value 999", phase, rng)
+		}
+	}
+
+	bs1, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+	flushSamples(t, bs1, "m", a) // sequence 1
+	flushSamples(t, bs1, "m", b) // sequence 2
+	assertWins(bs1, "runtime")
+	_ = bs1.Close()
+
+	bs2, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	assertWins(bs2, "restart") // proves load order is by sequence, not MinTime
+
+	infos := bs2.BlockInfos()
+	if len(infos) != 2 {
+		t.Fatalf("want 2 blocks before compaction, got %d", len(infos))
+	}
+	group := []string{infos[0].ID, infos[1].ID}
+	if n, err := bs2.CompactOnce(func([]block.BlockInfo) [][]string { return [][]string{group} }); err != nil || n != 1 {
+		t.Fatalf("CompactOnce = %d, %v; want 1, nil", n, err)
+	}
+	assertWins(bs2, "post-compaction")
+	_ = bs2.Close()
+
+	bs3, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("reopen after compaction: %v", err)
+	}
+	defer bs3.Close()
+	if got := len(bs3.BlockInfos()); got != 1 {
+		t.Fatalf("after compaction+restart blocks = %d, want 1", got)
+	}
+	assertWins(bs3, "post-compaction restart")
+}
+
+// TestBlockStore_CompactOnce_PreservesLabelIndex verifies the merged block's
+// regenerated postings/index answer label queries identically to the sources.
+func TestBlockStore_CompactOnce_PreservesLabelIndex(t *testing.T) {
+	dir := t.TempDir()
+	bs, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+	defer bs.Close()
+
+	flushLabeledBlock(t, bs, 0,
+		map[string]string{"__name__": "m", "host": "a"},
+		map[string]string{"__name__": "m", "host": "b"})
+	flushLabeledBlock(t, bs, 200000,
+		map[string]string{"__name__": "m", "host": "a"},
+		map[string]string{"__name__": "m", "host": "c"})
+
+	wantHosts := []string{"a", "b", "c"}
+	if before := selectHosts(t, bs); !equalStrings(before, wantHosts) {
+		t.Fatalf("pre-compaction hosts = %v, want %v", before, wantHosts)
+	}
+
+	infos := bs.BlockInfos()
+	group := []string{infos[0].ID, infos[1].ID}
+	if n, err := bs.CompactOnce(func([]block.BlockInfo) [][]string { return [][]string{group} }); err != nil || n != 1 {
+		t.Fatalf("CompactOnce = %d, %v; want 1, nil", n, err)
+	}
+
+	if got := selectHosts(t, bs); !equalStrings(got, wantHosts) {
+		t.Fatalf("post-compaction SelectSeries hosts = %v, want %v", got, wantHosts)
+	}
+	if got := bs.LabelValues("host"); !equalStrings(got, wantHosts) {
+		t.Fatalf("post-compaction LabelValues(host) = %v, want %v", got, wantHosts)
+	}
+	only, err := bs.SelectSeries(metrics.Selector{MetricName: "m", Matchers: []metrics.Matcher{{Name: "host", Value: "b"}}})
+	if err != nil {
+		t.Fatalf("SelectSeries(host=b): %v", err)
+	}
+	if len(only) != 1 {
+		t.Fatalf("post-compaction SelectSeries(host=b) = %d series, want 1", len(only))
+	}
+}
+
+// TestBlockStore_ApplyRetention_DeleteFailureKeepsReadable forces the reclaim
+// rename to fail and asserts the block stays in the live set and queryable, and
+// that the reported deletion count is 0.
+func TestBlockStore_ApplyRetention_DeleteFailureKeepsReadable(t *testing.T) {
+	dir := t.TempDir()
+	bs, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+	defer bs.Close()
+	flushOneBlock(t, bs, "m", 0) // block MaxTime 119000
+
+	// Replace tmp/ with a regular file so renaming blocks/<id> -> tmp/<id> fails.
+	tmpDir := filepath.Join(dir, "metrics", "tmp")
+	if err := os.RemoveAll(tmpDir); err != nil {
+		t.Fatalf("rm tmp: %v", err)
+	}
+	if err := os.WriteFile(tmpDir, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write tmp file: %v", err)
+	}
+
+	n, err := bs.ApplyRetention(time.UnixMilli(10_000_000), time.Millisecond)
+	if err == nil {
+		t.Fatal("ApplyRetention: want a deletion error, got nil")
+	}
+	if n != 0 {
+		t.Fatalf("ApplyRetention deleted=%d, want 0 (deletion failed)", n)
+	}
+	if got := len(bs.BlockInfos()); got != 1 {
+		t.Fatalf("after failed deletion blocks = %d, want 1 (must stay readable)", got)
+	}
+	rng, err := bs.QueryRange(metricFingerprint(t, "m"), 0, 200000)
+	if err != nil {
+		t.Fatalf("QueryRange after failed deletion: %v", err)
+	}
+	if len(rng) != 120 {
+		t.Fatalf("after failed deletion query = %d samples, want 120 (still readable)", len(rng))
+	}
+}
+
+// TestBlockStore_ApplyRetention_ConcurrentQueriesNeverError exercises the
+// lock-drain: queries issued continuously while retention deletes blocks never error.
+func TestBlockStore_ApplyRetention_ConcurrentQueriesNeverError(t *testing.T) {
+	dir := t.TempDir()
+	bs, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+	defer bs.Close()
+	flushOneBlock(t, bs, "m", 0)
+	flushOneBlock(t, bs, "m", 200000)
+	id := metricFingerprint(t, "m")
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				if _, err := bs.QueryRange(id, 0, 400000); err != nil {
+					t.Errorf("query during retention errored: %v", err)
+					return
+				}
+			}
+		}
+	}()
+	if _, err := bs.ApplyRetention(time.UnixMilli(10_000_000), time.Millisecond); err != nil {
+		t.Fatalf("ApplyRetention: %v", err)
+	}
+	close(stop)
+	wg.Wait()
+}
+
+// TestBlockStore_Deletion_LeavesNoPartialDir asserts compaction source deletion
+// and retention deletion both leave the blocks and tmp directories clean.
+func TestBlockStore_Deletion_LeavesNoPartialDir(t *testing.T) {
+	dir := t.TempDir()
+	bs, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+	defer bs.Close()
+	blocksDir := filepath.Join(dir, "metrics", "blocks")
+	tmpDir := filepath.Join(dir, "metrics", "tmp")
+
+	flushOneBlock(t, bs, "m", 0)
+	flushOneBlock(t, bs, "m", 200000)
+
+	infos := bs.BlockInfos()
+	group := []string{infos[0].ID, infos[1].ID}
+	if n, err := bs.CompactOnce(func([]block.BlockInfo) [][]string { return [][]string{group} }); err != nil || n != 1 {
+		t.Fatalf("CompactOnce = %d, %v; want 1, nil", n, err)
+	}
+	if got := countDirs(t, blocksDir); got != 1 {
+		t.Fatalf("after compaction blocks/ has %d dirs, want 1 (sources safe-deleted)", got)
+	}
+	if got := countDirs(t, tmpDir); got != 0 {
+		t.Fatalf("after compaction tmp/ has %d dirs, want 0", got)
+	}
+
+	if _, err := bs.ApplyRetention(time.UnixMilli(10_000_000), time.Millisecond); err != nil {
+		t.Fatalf("ApplyRetention: %v", err)
+	}
+	if got := countDirs(t, blocksDir); got != 0 {
+		t.Fatalf("after retention blocks/ has %d dirs, want 0", got)
+	}
+	if got := countDirs(t, tmpDir); got != 0 {
+		t.Fatalf("after retention tmp/ has %d dirs, want 0", got)
+	}
+}
