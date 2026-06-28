@@ -87,15 +87,15 @@ func (s *WALStore) LabelValues(n string) []string { return s.store.LabelValues(n
 // checkpoint. The safe deletion boundary is determined by OldestHeadSegment: the
 // oldest WAL segment that contains samples for any current head chunk. Segments
 // strictly before that boundary are covered entirely by persisted blocks and can
-// be deleted. Returns nil without touching checkpoint or WAL when no sealed chunks
-// exist.
-func (s *WALStore) FlushBlock() error {
+// be deleted. Returns (false, nil) without touching checkpoint or WAL when no
+// sealed chunks exist; (true, nil) when a block was written.
+func (s *WALStore) FlushBlock() (bool, error) {
 	wrote, err := s.store.FlushBlock()
 	if err != nil {
-		return fmt.Errorf("walstore: flush block: %w", err)
+		return false, fmt.Errorf("walstore: flush block: %w", err)
 	}
 	if !wrote {
-		return nil
+		return false, nil
 	}
 
 	if s.testBeforeCheckpoint != nil {
@@ -119,14 +119,14 @@ func (s *WALStore) FlushBlock() error {
 
 	checkpointPath := filepath.Join(s.dataDir, "metrics", "checkpoint")
 	if err := os.WriteFile(checkpointPath, []byte(strconv.Itoa(safeDelete)), 0o644); err != nil {
-		return fmt.Errorf("walstore: write checkpoint: %w", err)
+		return false, fmt.Errorf("walstore: write checkpoint: %w", err)
 	}
 
 	if err := deleteWALSegmentsUpTo(s.walDir, safeDelete); err != nil {
-		return fmt.Errorf("walstore: delete covered WAL segments: %w", err)
+		return false, fmt.Errorf("walstore: delete covered WAL segments: %w", err)
 	}
 
-	return nil
+	return true, nil
 }
 
 // WALBytes returns the total on-disk size of the WAL segment directory, used by
