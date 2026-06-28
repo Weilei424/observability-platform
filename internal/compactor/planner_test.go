@@ -26,6 +26,31 @@ func TestPlan_GroupsTwoAlignedBlocks(t *testing.T) {
 	}
 }
 
+// TestPlan_PromotesToHigherTier exercises multi-tier promotion across successive
+// calls: a lower-tier merge produces a block that then becomes eligible at the next
+// tier alongside a wider block excluded from the lower tier.
+func TestPlan_PromotesToHigherTier(t *testing.T) {
+	ranges := []int64{100, 400}
+	infos := []block.BlockInfo{
+		{ID: "a", MinTime: 0, MaxTime: 40},
+		{ID: "b", MinTime: 50, MaxTime: 90},
+		{ID: "c", MinTime: 100, MaxTime: 390}, // span 290 ≥ 100: not tier-100 eligible, fits a 400 window
+	}
+	// First call: only a,b qualify, at tier 100.
+	if g := Plan(infos, ranges); len(g) != 1 || len(g[0]) != 2 || g[0][0] != "a" || g[0][1] != "b" {
+		t.Fatalf("first Plan = %v, want [[a b]] at tier 100", g)
+	}
+	// After a,b merge into m (span 90), m and c promote to tier 400 (c is still not
+	// tier-100 eligible, so a 2-block group can only form at tier 400).
+	infos2 := []block.BlockInfo{
+		{ID: "m", MinTime: 0, MaxTime: 90},
+		{ID: "c", MinTime: 100, MaxTime: 390},
+	}
+	if g := Plan(infos2, ranges); len(g) != 1 || len(g[0]) != 2 {
+		t.Fatalf("second Plan = %v, want one tier-400 group of 2 (promotion)", g)
+	}
+}
+
 func TestPlan_SkipsStraddlingBlock(t *testing.T) {
 	// "b" straddles the window boundary at 100 → not eligible; only 1 block in
 	// window 0 → no group.
