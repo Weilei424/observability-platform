@@ -140,7 +140,7 @@ func TestWALStore_FlushBlock_HeadFence(t *testing.T) {
 	}
 
 	// Flush: writes the sealed chunk (samples 0–119) to a block.
-	if err := store.FlushBlock(); err != nil {
+	if _, err := store.FlushBlock(); err != nil {
 		t.Fatalf("FlushBlock: %v", err)
 	}
 	if err := w1.Close(); err != nil {
@@ -259,7 +259,7 @@ func TestLabelIndex_IngestFlushRestartQuery(t *testing.T) {
 			t.Fatalf("append: %v", err)
 		}
 	}
-	if err := s1.FlushBlock(); err != nil {
+	if _, err := s1.FlushBlock(); err != nil {
 		t.Fatalf("FlushBlock: %v", err)
 	}
 	_ = bs1.Close()

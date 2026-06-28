@@ -197,7 +197,7 @@ func TestAppendFlush_AcknowledgedSamplesSurvive(t *testing.T) {
 	go func() {
 		defer flushWg.Done()
 		for {
-			if err := store.FlushBlock(); err != nil {
+			if _, err := store.FlushBlock(); err != nil {
 				t.Errorf("FlushBlock: %v", err)
 			}
 			select {
@@ -385,7 +385,8 @@ func TestAppendMu_FlushBlockWaitsForInFlightAppend(t *testing.T) {
 	// reaches appendMu acquisition.
 	flushDone := make(chan error, 1)
 	go func() {
-		flushDone <- store.FlushBlock()
+		_, ferr := store.FlushBlock()
+		flushDone <- ferr
 	}()
 
 	// Wait for FlushBlock to reach appendMu.Lock() — this is deterministic.

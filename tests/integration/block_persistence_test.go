@@ -40,7 +40,7 @@ func TestBlockPersistence_IngestFlushRestartQuery(t *testing.T) {
 
 	// --- Phase B: replay WAL into a fresh store, flush to block ---
 	ws := buildWALStore(t, dataDir, walDir)
-	if err := ws.FlushBlock(); err != nil {
+	if _, err := ws.FlushBlock(); err != nil {
 		t.Fatalf("FlushBlock: %v", err)
 	}
 
