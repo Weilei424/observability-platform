@@ -1,12 +1,18 @@
 package metrics
 
 import (
+	"errors"
 	"sort"
 	"sync"
 
 	"github.com/masonwheeler/observability-platform/internal/storage/chunk"
 	"github.com/masonwheeler/observability-platform/internal/storage/index"
 )
+
+// ErrGenerationExhausted is returned by Append when the write-generation counter
+// has reached chunk.MaxGeneration. It signals an explicit (astronomically unlikely)
+// generation-space exhaustion rather than silently rejecting every write.
+var ErrGenerationExhausted = errors.New("metrics: write generation space exhausted")
 
 // Ingester accepts metric samples for storage.
 type Ingester interface {
@@ -79,6 +85,12 @@ func (s *MemoryStore) appendInternal(labels Labels, timestampMs int64, value flo
 	id := labels.Fingerprint()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Refuse before any mutation once the counter would exceed the bound, so
+	// exhaustion is an explicit error rather than a silently-rejected append.
+	if s.nextGen > chunk.MaxGeneration {
+		return ErrGenerationExhausted
+	}
 
 	ms, ok := s.series[id]
 	if !ok {
