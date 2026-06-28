@@ -420,6 +420,19 @@ func TestChunk_FromBytes_TrailingGarbage(t *testing.T) {
 	}
 }
 
+func TestChunk_Append_RejectsOutOfRangeGeneration(t *testing.T) {
+	c := chunk.NewChunk()
+	if err := c.Append(1000, 1.0, -1); err == nil {
+		t.Error("expected error for negative generation, got nil")
+	}
+	if err := c.Append(1000, 1.0, int64(1)<<62+1); err == nil {
+		t.Error("expected error for too-large generation, got nil")
+	}
+	if c.NumSamples() != 0 {
+		t.Errorf("rejected appends left %d samples, want 0", c.NumSamples())
+	}
+}
+
 func TestChunk_FromBytes_RejectsOutOfRangeGeneration(t *testing.T) {
 	// Replace a single-sample chunk's generation section with a uvarint exceeding MaxInt64.
 	c := chunk.NewChunk()
