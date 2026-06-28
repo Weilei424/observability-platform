@@ -465,6 +465,46 @@ func TestBlockStore_CompactOnce_ConcurrentQueriesNeverError(t *testing.T) {
 	wg.Wait()
 }
 
+// TestBlockStore_CompactOnce_ConcurrentQueriesSeeAllSamples asserts queries issued
+// continuously during compaction never miss samples: the two source blocks hold 240
+// samples total and every concurrent query returns exactly 240, before, during, and
+// after the merge.
+func TestBlockStore_CompactOnce_ConcurrentQueriesSeeAllSamples(t *testing.T) {
+	bs, _ := metrics.NewBlockStore(t.TempDir())
+	flushOneBlock(t, bs, "m", 0)      // 120 samples, ts 0..119000
+	flushOneBlock(t, bs, "m", 200000) // 120 samples, ts 200000..319000
+	all := []string{bs.BlockInfos()[0].ID, bs.BlockInfos()[1].ID}
+	id := metricFingerprint(t, "m")
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				got, err := bs.QueryRange(id, 0, 400000)
+				if err != nil {
+					t.Errorf("query during compaction errored: %v", err)
+					return
+				}
+				if len(got) != 240 {
+					t.Errorf("query during compaction returned %d samples, want 240 (no data missed)", len(got))
+					return
+				}
+			}
+		}
+	}()
+	if _, err := bs.CompactOnce(func([]block.BlockInfo) [][]string { return [][]string{all} }); err != nil {
+		t.Fatalf("CompactOnce: %v", err)
+	}
+	close(stop)
+	wg.Wait()
+}
+
 func TestBlockStore_ApplyRetention_Boundary(t *testing.T) {
 	bs, _ := metrics.NewBlockStore(t.TempDir())
 	flushOneBlock(t, bs, "m", 0) // block MaxTime = 119000
