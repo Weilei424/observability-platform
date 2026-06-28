@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/masonwheeler/observability-platform/internal/metrics"
+	"github.com/masonwheeler/observability-platform/internal/storage/chunk"
 	"github.com/masonwheeler/observability-platform/internal/storage/wal"
 )
 
@@ -17,6 +18,37 @@ func (f *failingWriter) WriteRecord(_ []wal.LabelPair, _ int64, _ float64) error
 }
 
 func (f *failingWriter) SegmentIndex() int { return 0 }
+
+// countingWriter records how many WAL records were written.
+type countingWriter struct{ writes int }
+
+func (c *countingWriter) WriteRecord(_ []wal.LabelPair, _ int64, _ float64) error {
+	c.writes++
+	return nil
+}
+
+func (c *countingWriter) SegmentIndex() int { return 0 }
+
+// TestWALStore_GenerationExhausted_SkipsWALWrite verifies an exhausted-generation
+// write is refused before its WAL record is persisted, so it cannot grow an
+// undeletable WAL.
+func TestWALStore_GenerationExhausted_SkipsWALWrite(t *testing.T) {
+	dir := t.TempDir()
+	bs, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+	bs.MemStore().EnsureGenFloor(chunk.MaxGeneration + 1) // exhaust the counter
+	cw := &countingWriter{}
+	ws := metrics.NewWALStore(cw, bs, dir)
+
+	if err := ws.Append(makeLabels(t, map[string]string{"__name__": "m"}), 1000, 1.0); !errors.Is(err, metrics.ErrGenerationExhausted) {
+		t.Errorf("Append = %v, want ErrGenerationExhausted", err)
+	}
+	if cw.writes != 0 {
+		t.Errorf("WriteRecord called %d times on an exhausted write, want 0 (no WAL growth)", cw.writes)
+	}
+}
 
 func TestWALStore_AppendFailsWhenWALFails(t *testing.T) {
 	dataDir := t.TempDir()
