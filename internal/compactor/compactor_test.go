@@ -12,7 +12,25 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/observability"
 	"github.com/masonwheeler/observability-platform/internal/storage/wal"
+	"github.com/prometheus/client_golang/prometheus"
 )
+
+// counterValue returns the current value of the named counter from reg.
+func counterValue(t *testing.T, reg *prometheus.Registry, name string) float64 {
+	t.Helper()
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() == name {
+			if m := mf.GetMetric(); len(m) > 0 {
+				return m[0].GetCounter().GetValue()
+			}
+		}
+	}
+	return 0
+}
 
 func newStores(t *testing.T, dir string) (*metrics.WALStore, *metrics.BlockStore) {
 	t.Helper()
@@ -90,7 +108,7 @@ func TestCompactor_RunOnce_FlushesCompactsAndQueryable(t *testing.T) {
 func TestCompactor_RunOnce_RetentionDeletesExpired(t *testing.T) {
 	dir := t.TempDir()
 	ws, bs := newStores(t, dir)
-	_, mx := observability.NewRegistry(bs, bs)
+	reg, mx := observability.NewRegistry(bs, bs)
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	ingestSealedBlock(t, ws, "m", 0) // block MaxTime 119000
@@ -104,6 +122,9 @@ func TestCompactor_RunOnce_RetentionDeletesExpired(t *testing.T) {
 
 	if got := len(bs.BlockInfos()); got != 0 {
 		t.Fatalf("after retention blocks = %d, want 0", got)
+	}
+	if v := counterValue(t, reg, "obs_retention_deleted_blocks_total"); v != 1 {
+		t.Errorf("RetentionDeletedTotal = %v, want 1", v)
 	}
 }
 
@@ -185,6 +206,58 @@ func TestCompactor_RunOnce_FlushesOnWALBytesThreshold(t *testing.T) {
 	c.RunOnce(context.Background())
 	if got := len(bs.BlockInfos()); got != 1 {
 		t.Fatalf("WAL-bytes threshold did not flush: blocks = %d, want 1", got)
+	}
+}
+
+// TestCompactor_RunOnce_NoOpFlushNotCounted verifies an idle interval tick whose
+// flush writes no block does not inflate obs_flushes_total.
+func TestCompactor_RunOnce_NoOpFlushNotCounted(t *testing.T) {
+	dir := t.TempDir()
+	ws, bs := newStores(t, dir)
+	reg, mx := observability.NewRegistry(bs, bs)
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	c := compactor.New(ws, bs, ws, time.Now, testConfig(), mx, log) // FlushInterval 0 → always due
+
+	// No sealed chunks: the flush is a no-op and must not be counted.
+	c.RunOnce(context.Background())
+	if v := counterValue(t, reg, "obs_flushes_total"); v != 0 {
+		t.Errorf("FlushesTotal after no-op flush = %v, want 0", v)
+	}
+
+	// A real flush increments the counter.
+	ingestSealedBlock(t, ws, "m", 0)
+	c.RunOnce(context.Background())
+	if v := counterValue(t, reg, "obs_flushes_total"); v != 1 {
+		t.Errorf("FlushesTotal after one real flush = %v, want 1", v)
+	}
+}
+
+// TestCompactor_RunOnce_MetricsReflectMaintenance asserts the flush and compaction
+// counters hold the expected values after a known maintenance sequence (two flushes
+// that are then compacted into one block).
+func TestCompactor_RunOnce_MetricsReflectMaintenance(t *testing.T) {
+	dir := t.TempDir()
+	ws, bs := newStores(t, dir)
+	reg, mx := observability.NewRegistry(bs, bs)
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	c := compactor.New(ws, bs, ws, time.Now, testConfig(), mx, log) // Retention 0
+
+	ingestSealedBlock(t, ws, "m", 0)
+	c.RunOnce(context.Background())
+	ingestSealedBlock(t, ws, "m", 1_000_000)
+	c.RunOnce(context.Background())
+
+	if v := counterValue(t, reg, "obs_flushes_total"); v != 2 {
+		t.Errorf("FlushesTotal = %v, want 2", v)
+	}
+	if v := counterValue(t, reg, "obs_compactions_total"); v != 1 {
+		t.Errorf("CompactionsTotal = %v, want 1", v)
+	}
+	if v := counterValue(t, reg, "obs_flush_failures_total"); v != 0 {
+		t.Errorf("FlushFailuresTotal = %v, want 0", v)
+	}
+	if v := counterValue(t, reg, "obs_compaction_failures_total"); v != 0 {
+		t.Errorf("CompactionFailuresTotal = %v, want 0", v)
 	}
 }
 
