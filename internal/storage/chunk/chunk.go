@@ -19,6 +19,10 @@ const (
 	// chunkHeaderLen is the fixed-size header preceding the bitstream:
 	// magic(4) | minTs(8) | maxTs(8) | numSamples(2) | bitstreamLen(4).
 	chunkHeaderLen = 26
+
+	// maxGeneration bounds a sample's write generation well below math.MaxInt64 so
+	// that seeding the startup counter (highest generation + 1) can never overflow.
+	maxGeneration = int64(1) << 62
 )
 
 // chunkMagicV1 prefixes every generation-aware chunk. It is an explicit multi-byte
@@ -192,7 +196,7 @@ func decodeGens(data []byte, count int) ([]int64, error) {
 			if n <= 0 {
 				return nil, fmt.Errorf("chunk.FromBytes: bad generation varint at sample 0")
 			}
-			if v > math.MaxInt64 {
+			if v > uint64(maxGeneration) {
 				return nil, fmt.Errorf("chunk.FromBytes: generation at sample 0 out of range")
 			}
 			gens = append(gens, int64(v))
@@ -208,8 +212,8 @@ func decodeGens(data []byte, count int) ([]int64, error) {
 		if (d > 0 && sum < prev) || (d < 0 && sum > prev) {
 			return nil, fmt.Errorf("chunk.FromBytes: generation overflow at sample %d", i)
 		}
-		if sum < 0 {
-			return nil, fmt.Errorf("chunk.FromBytes: negative generation %d at sample %d", sum, i)
+		if sum < 0 || sum > maxGeneration {
+			return nil, fmt.Errorf("chunk.FromBytes: generation %d at sample %d out of range", sum, i)
 		}
 		gens = append(gens, sum)
 		pos += n
@@ -228,6 +232,9 @@ func decodeGens(data []byte, count int) ([]int64, error) {
 func (c *Chunk) Append(tsMs int64, val float64, gen int64) error {
 	if c.sealed {
 		return ErrChunkFull
+	}
+	if gen < 0 || gen > maxGeneration {
+		return fmt.Errorf("chunk: generation %d out of range [0, %d]", gen, maxGeneration)
 	}
 	c.gens = append(c.gens, gen)
 	if gen > c.maxGen {
