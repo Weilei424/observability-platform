@@ -98,6 +98,17 @@ func NewBlockStore(dataDir string) (*BlockStore, error) {
 			corrupt = append(corrupt, name)
 			continue
 		}
+		// A survivor authorizes deleting its sources, so require its independently
+		// persisted MaxGen to agree with the generations reconstructed from its
+		// chunks. Syntactically valid generation corruption would otherwise pass and
+		// destroy recoverable source blocks. (Ordinary flush blocks rely on the
+		// reconstructed value only; a stale MaxGen there is harmless.)
+		if len(r.Meta().Sources) > 0 && mg != r.Meta().MaxGen {
+			_ = r.Close()
+			failed[name] = fmt.Errorf("survivor MaxGen %d disagrees with stored generations (max %d)", r.Meta().MaxGen, mg)
+			corrupt = append(corrupt, name)
+			continue
+		}
 		maxGenByBlock[name] = mg
 	}
 	for _, name := range corrupt {
