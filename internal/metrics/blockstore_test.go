@@ -622,15 +622,28 @@ func TestNewBlockStore_CorruptSurvivorChunks_PreservesSources(t *testing.T) {
 	}
 }
 
-// TestNewBlockStore_CorruptSurvivorMaxGen_PreservesSources verifies that a survivor
-// whose persisted MaxGen disagrees with its stored generations is rejected (rather
-// than trusted to seed the generation counter and authorize source deletion).
-func TestNewBlockStore_CorruptSurvivorMaxGen_PreservesSources(t *testing.T) {
+// TestNewBlockStore_ReconstructsGenFloorFromChunks verifies the generation floor is
+// rebuilt from the generations actually stored in each block's chunks, not from a
+// (here, understated) persisted Meta.MaxGen — so a new write still outranks the
+// persisted sample at the same timestamp.
+func TestNewBlockStore_ReconstructsGenFloorFromChunks(t *testing.T) {
 	dir := t.TempDir()
-	s1, s2, mergedID, blocksDir, _ := makeCrashState(t, dir)
+	bs, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
 
-	// Corrupt the merged block's persisted MaxGen so it disagrees with its chunks.
-	metaPath := filepath.Join(blocksDir, mergedID, "meta.json")
+	const T = int64(1_000_000)
+	samples := [][2]int64{{T, 10}}
+	for i := int64(1); i < 120; i++ {
+		samples = append(samples, [2]int64{T + i*1000, 0})
+	}
+	flushSamples(t, bs, "m", samples) // block's max generation is well above its T sample's
+	blockID := bs.BlockInfos()[0].ID
+	_ = bs.Close()
+
+	// Understate the persisted MaxGen; a trust-meta floor would seed far too low.
+	metaPath := filepath.Join(dir, "metrics", "blocks", blockID, "meta.json")
 	raw, err := os.ReadFile(metaPath)
 	if err != nil {
 		t.Fatalf("read meta: %v", err)
@@ -639,7 +652,7 @@ func TestNewBlockStore_CorruptSurvivorMaxGen_PreservesSources(t *testing.T) {
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatalf("unmarshal meta: %v", err)
 	}
-	m["max_gen"] = 999999
+	m["max_gen"] = 0
 	out, err := json.Marshal(m)
 	if err != nil {
 		t.Fatalf("marshal meta: %v", err)
@@ -648,13 +661,20 @@ func TestNewBlockStore_CorruptSurvivorMaxGen_PreservesSources(t *testing.T) {
 		t.Fatalf("write meta: %v", err)
 	}
 
-	if _, err := metrics.NewBlockStore(dir); err == nil {
-		t.Fatal("NewBlockStore: want error from survivor with corrupt MaxGen, got nil")
+	bs2, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
 	}
-	for _, id := range []string{s1, s2} {
-		if _, err := os.Stat(filepath.Join(blocksDir, id)); err != nil {
-			t.Fatalf("source %s was reclaimed despite corrupt survivor MaxGen: %v", id, err)
-		}
+	defer bs2.Close()
+	if err := bs2.Append(makeLabels(t, map[string]string{"__name__": "m"}), T, 99); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	got, err := bs2.QueryRange(metricFingerprint(t, "m"), T, T)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
+	if len(got) != 1 || got[0].Value != 99 {
+		t.Fatalf("m@T = %v, want value 99 (new write must outrank the persisted sample via the reconstructed floor)", got)
 	}
 }
 
