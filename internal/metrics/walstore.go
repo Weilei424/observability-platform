@@ -54,6 +54,13 @@ func NewWALStore(w wal.RecordWriter, store *BlockStore, dataDir string) *WALStor
 func (s *WALStore) Append(labels Labels, tsMs int64, value float64) error {
 	s.appendMu.Lock()
 	defer s.appendMu.Unlock()
+	// Preflight under appendMu: refuse an exhausted-generation write before
+	// persisting its WAL record, so repeated rejections cannot grow an undeletable
+	// WAL with records that can never be flushed. The check-then-write is atomic
+	// against concurrent appends because they all serialize on appendMu.
+	if s.store.GenerationExhausted() {
+		return ErrGenerationExhausted
+	}
 	walSeg := s.w.SegmentIndex()
 	if err := s.w.WriteRecord(labelsToWALPairs(labels), tsMs, value); err != nil {
 		return err
