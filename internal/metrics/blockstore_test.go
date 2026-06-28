@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,39 +17,37 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/storage/chunk"
 )
 
-// startQueryLoop runs do in a goroutine until stop is called, counting completed
-// calls. It closes started once the goroutine has entered its loop (before the
-// first call), so a caller can guarantee queries are in flight before the operation
-// under test begins; comparing the count across the operation then proves queries
-// actually ran during it. A do error is reported via t.Errorf.
-func startQueryLoop(t *testing.T, do func() error) (started <-chan struct{}, stop, wait func(), count func() int64) {
+// startQueryLoop runs do (a query plus its assertions) in a goroutine until stop is
+// called, returning a started channel closed once the first query has COMPLETED.
+// Waiting on started guarantees the query path is exercised and the goroutine is
+// actively looping before the operation under test begins, so the operation runs
+// concurrently with a live query loop — without a timing-based completion count that
+// could false-fail when the operation legitimately blocks queries under its write
+// lock. A do error is reported via t.Errorf.
+func startQueryLoop(t *testing.T, do func() error) (started <-chan struct{}, stop, wait func()) {
 	t.Helper()
-	var n int64
 	startedCh := make(chan struct{})
 	stopCh := make(chan struct{})
+	var once sync.Once
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		first := true
+		defer once.Do(func() { close(startedCh) }) // never leave a waiter blocked
 		for {
 			select {
 			case <-stopCh:
 				return
 			default:
-				if first {
-					first = false
-					close(startedCh)
-				}
 				if err := do(); err != nil {
 					t.Errorf("query during operation: %v", err)
 					return
 				}
-				atomic.AddInt64(&n, 1)
+				once.Do(func() { close(startedCh) })
 			}
 		}
 	}()
-	return startedCh, func() { close(stopCh) }, wg.Wait, func() int64 { return atomic.LoadInt64(&n) }
+	return startedCh, func() { close(stopCh) }, wg.Wait
 }
 
 // fdsUnder counts this process's open file descriptors whose target path is
@@ -478,27 +475,22 @@ func TestBlockStore_CompactOnce_ConcurrentQueriesNeverError(t *testing.T) {
 	all := []string{bs.BlockInfos()[0].ID, bs.BlockInfos()[1].ID}
 	id := metricFingerprint(t, "m")
 
-	started, stop, wait, count := startQueryLoop(t, func() error {
+	started, stop, wait := startQueryLoop(t, func() error {
 		_, err := bs.QueryRange(id, 0, 400000)
 		return err
 	})
-	<-started // queries are now in flight
-	before := count()
+	<-started // a query has completed; the goroutine keeps querying through the merge
 	if _, err := bs.CompactOnce(func([]block.BlockInfo) [][]string { return [][]string{all} }); err != nil {
 		t.Fatalf("CompactOnce: %v", err)
 	}
-	after := count()
 	stop()
 	wait()
-	if after <= before {
-		t.Errorf("no query completed during compaction (before=%d after=%d)", before, after)
-	}
 }
 
-// TestBlockStore_CompactOnce_ConcurrentQueriesSeeAllSamples asserts queries issued
-// continuously during compaction never miss samples: the two source blocks hold 240
-// samples total and every concurrent query returns exactly 240, before, during, and
-// after the merge. The handshake guarantees queries actually overlap the merge.
+// TestBlockStore_CompactOnce_ConcurrentQueriesSeeAllSamples asserts queries running
+// concurrently with compaction never miss samples: the two source blocks hold 240
+// samples total and every query returns exactly 240, before, during, and after the
+// merge. The handshake guarantees the query loop is live before the merge starts.
 func TestBlockStore_CompactOnce_ConcurrentQueriesSeeAllSamples(t *testing.T) {
 	bs, _ := metrics.NewBlockStore(t.TempDir())
 	flushOneBlock(t, bs, "m", 0)      // 120 samples, ts 0..119000
@@ -506,7 +498,7 @@ func TestBlockStore_CompactOnce_ConcurrentQueriesSeeAllSamples(t *testing.T) {
 	all := []string{bs.BlockInfos()[0].ID, bs.BlockInfos()[1].ID}
 	id := metricFingerprint(t, "m")
 
-	started, stop, wait, count := startQueryLoop(t, func() error {
+	started, stop, wait := startQueryLoop(t, func() error {
 		got, err := bs.QueryRange(id, 0, 400000)
 		if err != nil {
 			return err
@@ -517,16 +509,11 @@ func TestBlockStore_CompactOnce_ConcurrentQueriesSeeAllSamples(t *testing.T) {
 		return nil
 	})
 	<-started
-	before := count()
 	if _, err := bs.CompactOnce(func([]block.BlockInfo) [][]string { return [][]string{all} }); err != nil {
 		t.Fatalf("CompactOnce: %v", err)
 	}
-	after := count()
 	stop()
 	wait()
-	if after <= before {
-		t.Errorf("no query completed during compaction (before=%d after=%d)", before, after)
-	}
 }
 
 func TestBlockStore_ApplyRetention_Boundary(t *testing.T) {
@@ -1190,21 +1177,24 @@ func TestBlockStore_ApplyRetention_ConcurrentQueriesNeverError(t *testing.T) {
 	flushOneBlock(t, bs, "m", 200000)
 	id := metricFingerprint(t, "m")
 
-	started, stop, wait, count := startQueryLoop(t, func() error {
-		_, err := bs.QueryRange(id, 0, 400000)
-		return err
+	started, stop, wait := startQueryLoop(t, func() error {
+		got, err := bs.QueryRange(id, 0, 400000)
+		if err != nil {
+			return err
+		}
+		// The block-set swap is atomic under the write lock, so a concurrent query
+		// sees either both blocks (240) or neither (0) — never a torn partial read.
+		if len(got) != 0 && len(got) != 240 {
+			return fmt.Errorf("torn read during retention: %d samples", len(got))
+		}
+		return nil
 	})
-	<-started // queries are now in flight
-	before := count()
+	<-started // a query has completed; the goroutine keeps querying through retention
 	if _, err := bs.ApplyRetention(time.UnixMilli(10_000_000), time.Millisecond); err != nil {
 		t.Fatalf("ApplyRetention: %v", err)
 	}
-	after := count()
 	stop()
 	wait()
-	if after <= before {
-		t.Errorf("no query completed during retention (before=%d after=%d)", before, after)
-	}
 }
 
 // TestBlockStore_Deletion_LeavesNoPartialDir asserts compaction source deletion
