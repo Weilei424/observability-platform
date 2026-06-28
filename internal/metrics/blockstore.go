@@ -81,23 +81,26 @@ func NewBlockStore(dataDir string) (*BlockStore, error) {
 		opened[e.Name()] = r
 	}
 
-	// Before trusting a survivor's Sources, deep-validate its chunks: index and
-	// postings can be intact while the chunks file is truncated or corrupt, and
-	// chunks are only read lazily at query time. Validate just survivors
-	// (Sources != nil) to bound startup cost; a corrupt survivor is demoted to
-	// failed so it cannot authorize deletion of its sources.
-	var corruptSurvivors []string
+	// Deep-validate every opened block's chunks and reconstruct its true maximum
+	// generation from them. Index and postings can be intact while the chunks file
+	// is truncated or corrupt, and chunks are read lazily at query time. Doing this
+	// for every block (a) lets a corrupt survivor be demoted before its Sources are
+	// trusted, and (b) makes the generation floor depend on the generations actually
+	// stored, never on a possibly-corrupt Meta.MaxGen. A block whose chunks cannot be
+	// decoded is demoted to failed.
+	maxGenByBlock := make(map[string]int64, len(opened))
+	var corrupt []string
 	for name, r := range opened {
-		if len(r.Meta().Sources) == 0 {
-			continue
-		}
-		if err := validateBlockChunks(r); err != nil {
+		mg, err := validateBlockChunks(r)
+		if err != nil {
 			_ = r.Close()
 			failed[name] = err
-			corruptSurvivors = append(corruptSurvivors, name)
+			corrupt = append(corrupt, name)
+			continue
 		}
+		maxGenByBlock[name] = mg
 	}
-	for _, name := range corruptSurvivors {
+	for _, name := range corrupt {
 		delete(opened, name)
 	}
 
@@ -143,12 +146,13 @@ func NewBlockStore(dataDir string) (*BlockStore, error) {
 	}
 	sort.Slice(readers, func(i, j int) bool { return readers[i].Meta().MinTime < readers[j].Meta().MinTime })
 
-	// Seed the in-memory generation counter past the highest generation persisted
-	// in any block, so replayed and newly appended samples always outrank stored
-	// block data for last-write-wins.
+	// Seed the in-memory generation counter past the highest generation actually
+	// stored in any kept block (reconstructed above from chunks, not trusted from
+	// meta), so replayed and newly appended samples always outrank stored block data
+	// for last-write-wins.
 	var maxGen int64
 	for _, r := range readers {
-		if g := r.Meta().MaxGen; g > maxGen {
+		if g := maxGenByBlock[r.Meta().BlockID]; g > maxGen {
 			maxGen = g
 		}
 	}
@@ -796,31 +800,26 @@ func validateBlockSeries(r *block.Reader) error {
 	return nil
 }
 
-// validateBlockChunks decodes every chunk in the block so that corruption in the
-// chunks file is detected, and cross-checks the persisted Meta.MaxGen against the
-// generations actually stored. OpenReader and validateBlockSeries only check the
-// index/postings; chunks are read lazily at query time. This is run on a compaction
-// survivor before its Sources are trusted (and deleted), so a survivor with a valid
-// index but corrupt chunks — or a corrupt MaxGen (which seeds the startup generation
-// counter) — cannot destroy the only good copy or break future overwrite precedence.
-// ReadChunk decodes and validates each payload via chunk.FromBytes.
-func validateBlockChunks(r *block.Reader) error {
+// validateBlockChunks decodes every chunk in the block and returns the maximum
+// generation actually stored. OpenReader and validateBlockSeries only check the
+// index/postings; chunks are read lazily at query time. Run for every block at load
+// so (a) a corrupt survivor is demoted before its Sources are trusted (and deleted),
+// and (b) the generation floor is reconstructed from real generations rather than a
+// possibly-corrupt Meta.MaxGen. ReadChunk validates each payload via chunk.FromBytes.
+func validateBlockChunks(r *block.Reader) (int64, error) {
 	var maxGen int64
 	for _, se := range r.Series() {
 		for _, ref := range se.Chunks {
 			c, err := r.ReadChunk(ref)
 			if err != nil {
-				return fmt.Errorf("series %d chunk: %w", se.ID, err)
+				return 0, fmt.Errorf("series %d chunk: %w", se.ID, err)
 			}
 			if g := c.MaxGen(); g > maxGen {
 				maxGen = g
 			}
 		}
 	}
-	if maxGen != r.Meta().MaxGen {
-		return fmt.Errorf("meta MaxGen %d disagrees with stored generations (max %d)", r.Meta().MaxGen, maxGen)
-	}
-	return nil
+	return maxGen, nil
 }
 
 func blockPairsToLabels(pairs []block.LabelPair) (Labels, error) {
