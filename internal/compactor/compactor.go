@@ -10,8 +10,10 @@ import (
 )
 
 // Flusher flushes sealed head chunks to a new block and advances the WAL checkpoint.
+// It reports whether a block was actually written (false for a no-op when no sealed
+// chunks exist) so the maintenance loop counts only real flushes.
 type Flusher interface {
-	FlushBlock() error
+	FlushBlock() (bool, error)
 }
 
 // WALSizer reports the WAL's current on-disk size.
@@ -88,13 +90,16 @@ func (c *Compactor) maybeFlush() {
 	if !due {
 		return
 	}
-	if err := c.flusher.FlushBlock(); err != nil {
+	wrote, err := c.flusher.FlushBlock()
+	if err != nil {
 		c.metrics.FlushFailuresTotal.Inc()
 		c.log.Warn("flush failed", slog.String("error", err.Error()))
 		return
 	}
-	c.metrics.FlushesTotal.Inc()
 	c.lastFlush = c.clock()
+	if wrote {
+		c.metrics.FlushesTotal.Inc()
+	}
 }
 
 func (c *Compactor) compactToStable(ctx context.Context) {
@@ -136,7 +141,7 @@ func (c *Compactor) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			if err := c.flusher.FlushBlock(); err != nil {
+			if _, err := c.flusher.FlushBlock(); err != nil {
 				c.log.Warn("final flush failed", slog.String("error", err.Error()))
 			}
 			return
