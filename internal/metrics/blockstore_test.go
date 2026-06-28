@@ -2,6 +2,7 @@ package metrics_test
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -619,6 +620,52 @@ func TestNewBlockStore_CorruptSurvivorChunks_PreservesSources(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(blocksDir, id)); err != nil {
 			t.Fatalf("source %s was reclaimed despite corrupt survivor chunks: %v", id, err)
 		}
+	}
+}
+
+// TestNewBlockStore_CorruptSurvivorMaxGen_PreservesSources verifies that a survivor
+// whose persisted MaxGen disagrees with its reconstructed generations is rejected
+// (rather than trusted to authorize deletion of recoverable source blocks).
+func TestNewBlockStore_CorruptSurvivorMaxGen_PreservesSources(t *testing.T) {
+	dir := t.TempDir()
+	s1, s2, mergedID, blocksDir, _ := makeCrashState(t, dir)
+
+	metaPath := filepath.Join(blocksDir, mergedID, "meta.json")
+	raw, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatalf("read meta: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("unmarshal meta: %v", err)
+	}
+	m["max_gen"] = 999999 // disagrees with the survivor's actual chunk generations
+	out, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal meta: %v", err)
+	}
+	if err := os.WriteFile(metaPath, out, 0o644); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+
+	if _, err := metrics.NewBlockStore(dir); err == nil {
+		t.Fatal("NewBlockStore: want error from survivor with corrupt MaxGen, got nil")
+	}
+	for _, id := range []string{s1, s2} {
+		if _, err := os.Stat(filepath.Join(blocksDir, id)); err != nil {
+			t.Fatalf("source %s reclaimed despite corrupt survivor MaxGen: %v", id, err)
+		}
+	}
+}
+
+// TestMemoryStore_RejectsAppendWhenGenerationExhausted verifies the counter
+// reaching the generation bound is an explicit error, not a silent write rejection.
+func TestMemoryStore_RejectsAppendWhenGenerationExhausted(t *testing.T) {
+	ms := metrics.NewMemoryStore()
+	ms.EnsureGenFloor(chunk.MaxGeneration + 1) // simulate an exhausted counter
+	err := ms.Append(makeLabels(t, map[string]string{"__name__": "m"}), 1000, 1.0)
+	if !errors.Is(err, metrics.ErrGenerationExhausted) {
+		t.Errorf("Append at exhausted generation = %v, want ErrGenerationExhausted", err)
 	}
 }
 
