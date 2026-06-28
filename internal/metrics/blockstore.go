@@ -196,6 +196,12 @@ func (bs *BlockStore) OldestHeadSegment() int {
 	return bs.mem.OldestHeadSegment()
 }
 
+// GenerationExhausted reports whether the in-memory write-generation counter is
+// exhausted (see MemoryStore.GenerationExhausted).
+func (bs *BlockStore) GenerationExhausted() bool {
+	return bs.mem.GenerationExhausted()
+}
+
 // SelectSeries returns all series matching sel from memory and all loaded
 // blocks, resolved via label-index postings. Results are deduplicated by
 // series fingerprint (memory wins). A postings read failure in any block is
