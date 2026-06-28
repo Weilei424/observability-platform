@@ -240,10 +240,10 @@ Design: `docs/superpowers/specs/2026-06-25-phase-3.4-compaction-retention-design
 - [x] Add `internal/compactor` tiered time-aligned planner (`Ranges`, `Plan`) — merge ≥2 aligned blocks below the tier range, smallest tier first
 - [x] Add `internal/compactor` maintenance scheduler (`RunOnce`/`Run`: flush-if-due → compact-to-stable → retention) with metrics
 - [x] Wire graceful lifecycle in `cmd/server/main.go` — signal context, `http.Server.Shutdown`, background compactor goroutine, final flush, close WAL + block readers
-- [x] Unit tests: compaction does not lose data (planner; `block.Compact` merge/dedup, generation-ordered last-write-wins, re-chunk seal boundaries; `CompactOnce` query- and label-index-equivalence)
+- [x] Unit tests: compaction does not lose data (planner window/tier rules + multi-tier promotion across calls; `block.Compact` shared- and disjoint-series merge/dedup, generation-ordered last-write-wins, re-chunk seal boundaries by both 120-sample count and 2h span; `CompactOnce` query- and label-index-equivalence)
 - [x] Unit tests: retention boundary behavior (exact cutoff, `retention=0` no-op, safe-delete leaves no partial dir, rename-failure keeps the block readable with an accurate count, post-rename cleanup failure is surfaced not swallowed)
-- [x] Concurrency test: queries during `CompactOnce` and `ApplyRetention` never error (lock-drain)
-- [x] Unit tests: flush triggers fire per-condition (interval, sealed-chunk threshold, WAL-bytes threshold)
+- [x] Concurrency test: queries during `CompactOnce` and `ApplyRetention` never error (lock-drain) and never miss samples (a query under concurrent compaction always returns the full set)
+- [x] Unit tests: flush triggers fire per-condition (interval, sealed-chunk threshold, WAL-bytes threshold); a no-op flush is not counted as a successful flush; flush/compaction/retention counters hold expected values after a known maintenance run
 - [x] Unit tests: last-write-wins consistent across runtime/restart/compaction, including a partial compaction that leaves an overlapping newer-generation block out of the group; chunk generation round-trip; startup preserves source blocks when a compacted survivor is corrupt in its index OR chunks (and reclaims a corrupt source under a valid survivor)
 - [x] Integration test: compacted data remains queryable, including across restart + startup GC convergence
 
