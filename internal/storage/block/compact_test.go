@@ -232,6 +232,74 @@ func TestCompact_RechunkSealsAtSampleBoundary(t *testing.T) {
 	}
 }
 
+// TestCompact_DisjointSeries_AllPreserved verifies that series present in only one
+// source survive the merge with all their samples.
+func TestCompact_DisjointSeries_AllPreserved(t *testing.T) {
+	dir := t.TempDir()
+	blocks, tmp := filepath.Join(dir, "blocks"), filepath.Join(dir, "tmp")
+	la := []block.LabelPair{{Name: "__name__", Value: "a"}}
+	lb := []block.LabelPair{{Name: "__name__", Value: "b"}}
+	r1 := writeBlockSeq(t, blocks, tmp, 1, 1, la, [][2]int64{{1000, 10}, {2000, 20}})
+	r2 := writeBlockSeq(t, blocks, tmp, 2, 2, lb, [][2]int64{{3000, 30}, {4000, 40}})
+
+	out := filepath.Join(dir, "out")
+	meta, err := block.Compact(out, tmp, []*block.Reader{r1, r2})
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if meta.NumSeries != 2 {
+		t.Errorf("merged NumSeries = %d, want 2", meta.NumSeries)
+	}
+	merged, err := block.OpenReader(filepath.Join(out, meta.BlockID))
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	if got := readAll(t, merged, 1); len(got) != 2 || got[0] != [2]int64{1000, 10} || got[1] != [2]int64{2000, 20} {
+		t.Fatalf("series 1 = %v, want [[1000 10] [2000 20]]", got)
+	}
+	if got := readAll(t, merged, 2); len(got) != 2 || got[0] != [2]int64{3000, 30} || got[1] != [2]int64{4000, 40} {
+		t.Fatalf("series 2 = %v, want [[3000 30] [4000 40]]", got)
+	}
+}
+
+// TestCompact_RechunkSealsAtTimeSpan verifies the merged block re-chunks at the
+// 2-hour span boundary (not just the 120-sample count boundary).
+func TestCompact_RechunkSealsAtTimeSpan(t *testing.T) {
+	dir := t.TempDir()
+	blocks, tmp := filepath.Join(dir, "blocks"), filepath.Join(dir, "tmp")
+	lbl := []block.LabelPair{{Name: "__name__", Value: "m"}}
+	// Three samples spanning > 2h: rechunk must seal by time, not count.
+	r1 := writeBlockSeq(t, blocks, tmp, 1, 1, lbl, [][2]int64{{0, 1}})
+	r2 := writeBlockSeq(t, blocks, tmp, 2, 1, lbl, [][2]int64{{7_200_001, 2}, {7_200_002, 3}})
+
+	out := filepath.Join(dir, "out")
+	meta, err := block.Compact(out, tmp, []*block.Reader{r1, r2})
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	merged, err := block.OpenReader(filepath.Join(out, meta.BlockID))
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	se, ok := merged.SeriesByID(1)
+	if !ok {
+		t.Fatal("series 1 missing from merged block")
+	}
+	if len(se.Chunks) != 2 {
+		t.Fatalf("merged series has %d chunks, want 2 (sealed at the 2-hour span)", len(se.Chunks))
+	}
+	c0, err := merged.ReadChunk(se.Chunks[0])
+	if err != nil {
+		t.Fatalf("ReadChunk: %v", err)
+	}
+	if c0.NumSamples() != 2 { // [0, 7_200_001] fills the chunk up to the 2h boundary
+		t.Errorf("first merged chunk has %d samples, want 2", c0.NumSamples())
+	}
+	if total := len(readAll(t, merged, 1)); total != 3 {
+		t.Errorf("merged total samples = %d, want 3", total)
+	}
+}
+
 func TestCompact_LabelMismatchSameID_Errors(t *testing.T) {
 	dir := t.TempDir()
 	blocks, tmp := filepath.Join(dir, "blocks"), filepath.Join(dir, "tmp")
