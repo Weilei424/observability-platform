@@ -3,11 +3,13 @@ package metrics_test
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +17,41 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/storage/block"
 	"github.com/masonwheeler/observability-platform/internal/storage/chunk"
 )
+
+// startQueryLoop runs do in a goroutine until stop is called, counting completed
+// calls. It closes started once the goroutine has entered its loop (before the
+// first call), so a caller can guarantee queries are in flight before the operation
+// under test begins; comparing the count across the operation then proves queries
+// actually ran during it. A do error is reported via t.Errorf.
+func startQueryLoop(t *testing.T, do func() error) (started <-chan struct{}, stop, wait func(), count func() int64) {
+	t.Helper()
+	var n int64
+	startedCh := make(chan struct{})
+	stopCh := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		first := true
+		for {
+			select {
+			case <-stopCh:
+				return
+			default:
+				if first {
+					first = false
+					close(startedCh)
+				}
+				if err := do(); err != nil {
+					t.Errorf("query during operation: %v", err)
+					return
+				}
+				atomic.AddInt64(&n, 1)
+			}
+		}
+	}()
+	return startedCh, func() { close(stopCh) }, wg.Wait, func() int64 { return atomic.LoadInt64(&n) }
+}
 
 // fdsUnder counts this process's open file descriptors whose target path is
 // under dir, via /proc/self/fd. The test is skipped on platforms without it.
@@ -441,34 +478,27 @@ func TestBlockStore_CompactOnce_ConcurrentQueriesNeverError(t *testing.T) {
 	all := []string{bs.BlockInfos()[0].ID, bs.BlockInfos()[1].ID}
 	id := metricFingerprint(t, "m")
 
-	stop := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-				if _, err := bs.QueryRange(id, 0, 400000); err != nil {
-					t.Errorf("query during compaction errored: %v", err)
-					return
-				}
-			}
-		}
-	}()
+	started, stop, wait, count := startQueryLoop(t, func() error {
+		_, err := bs.QueryRange(id, 0, 400000)
+		return err
+	})
+	<-started // queries are now in flight
+	before := count()
 	if _, err := bs.CompactOnce(func([]block.BlockInfo) [][]string { return [][]string{all} }); err != nil {
 		t.Fatalf("CompactOnce: %v", err)
 	}
-	close(stop)
-	wg.Wait()
+	after := count()
+	stop()
+	wait()
+	if after <= before {
+		t.Errorf("no query completed during compaction (before=%d after=%d)", before, after)
+	}
 }
 
 // TestBlockStore_CompactOnce_ConcurrentQueriesSeeAllSamples asserts queries issued
 // continuously during compaction never miss samples: the two source blocks hold 240
 // samples total and every concurrent query returns exactly 240, before, during, and
-// after the merge.
+// after the merge. The handshake guarantees queries actually overlap the merge.
 func TestBlockStore_CompactOnce_ConcurrentQueriesSeeAllSamples(t *testing.T) {
 	bs, _ := metrics.NewBlockStore(t.TempDir())
 	flushOneBlock(t, bs, "m", 0)      // 120 samples, ts 0..119000
@@ -476,33 +506,27 @@ func TestBlockStore_CompactOnce_ConcurrentQueriesSeeAllSamples(t *testing.T) {
 	all := []string{bs.BlockInfos()[0].ID, bs.BlockInfos()[1].ID}
 	id := metricFingerprint(t, "m")
 
-	stop := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-				got, err := bs.QueryRange(id, 0, 400000)
-				if err != nil {
-					t.Errorf("query during compaction errored: %v", err)
-					return
-				}
-				if len(got) != 240 {
-					t.Errorf("query during compaction returned %d samples, want 240 (no data missed)", len(got))
-					return
-				}
-			}
+	started, stop, wait, count := startQueryLoop(t, func() error {
+		got, err := bs.QueryRange(id, 0, 400000)
+		if err != nil {
+			return err
 		}
-	}()
+		if len(got) != 240 {
+			return fmt.Errorf("returned %d samples, want 240 (no data missed)", len(got))
+		}
+		return nil
+	})
+	<-started
+	before := count()
 	if _, err := bs.CompactOnce(func([]block.BlockInfo) [][]string { return [][]string{all} }); err != nil {
 		t.Fatalf("CompactOnce: %v", err)
 	}
-	close(stop)
-	wg.Wait()
+	after := count()
+	stop()
+	wait()
+	if after <= before {
+		t.Errorf("no query completed during compaction (before=%d after=%d)", before, after)
+	}
 }
 
 func TestBlockStore_ApplyRetention_Boundary(t *testing.T) {
@@ -1166,28 +1190,21 @@ func TestBlockStore_ApplyRetention_ConcurrentQueriesNeverError(t *testing.T) {
 	flushOneBlock(t, bs, "m", 200000)
 	id := metricFingerprint(t, "m")
 
-	stop := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-				if _, err := bs.QueryRange(id, 0, 400000); err != nil {
-					t.Errorf("query during retention errored: %v", err)
-					return
-				}
-			}
-		}
-	}()
+	started, stop, wait, count := startQueryLoop(t, func() error {
+		_, err := bs.QueryRange(id, 0, 400000)
+		return err
+	})
+	<-started // queries are now in flight
+	before := count()
 	if _, err := bs.ApplyRetention(time.UnixMilli(10_000_000), time.Millisecond); err != nil {
 		t.Fatalf("ApplyRetention: %v", err)
 	}
-	close(stop)
-	wg.Wait()
+	after := count()
+	stop()
+	wait()
+	if after <= before {
+		t.Errorf("no query completed during retention (before=%d after=%d)", before, after)
+	}
 }
 
 // TestBlockStore_Deletion_LeavesNoPartialDir asserts compaction source deletion
