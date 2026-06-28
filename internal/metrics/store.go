@@ -66,6 +66,15 @@ func (s *MemoryStore) EnsureGenFloor(floor int64) {
 	}
 }
 
+// GenerationExhausted reports whether the write-generation counter has passed
+// chunk.MaxGeneration, so no further append can be assigned a valid generation.
+// Lets the WAL layer refuse a doomed write before persisting its record.
+func (s *MemoryStore) GenerationExhausted() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.nextGen > chunk.MaxGeneration
+}
+
 // Append adds a sample to the series identified by labels.
 // Samples may be appended out of order; the chunk encodes them in insertion order
 // and QueryRange sorts on read. For equal timestamps, the last written value wins.
