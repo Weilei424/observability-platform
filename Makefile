@@ -1,4 +1,4 @@
-.PHONY: build test lint run local-up local-down smoke help
+.PHONY: build test lint run local-up local-down smoke bench bench-go bench-k6 help
 
 ## build: Compile the backend binary
 build:
@@ -32,7 +32,18 @@ local-down:
 smoke:
 	bash tests/e2e/smoke.sh
 
+## bench-go: Run Go micro-benchmarks (storage/query engine, in-process)
+bench-go:
+	go test -bench=. -benchmem -run='^$$' ./internal/...
+
+## bench-k6: Run end-to-end k6 HTTP load tests (hermetic; builds + starts backend)
+bench-k6:
+	bash bench/run.sh
+
+## bench: Run Go benchmarks and k6 load tests
+bench: bench-go bench-k6
+
 ## help: Show available make targets
 help:
-	@grep -E '^## [a-zA-Z_-]+:' $(MAKEFILE_LIST) | \
+	@grep -E '^## [a-zA-Z0-9_-]+:' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ": "}; {printf "\033[36m%-15s\033[0m %s\n", substr($$1,4), $$2}'
