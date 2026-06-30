@@ -97,6 +97,13 @@ The query API accepts a PromQL subset. Unsupported forms return `400 bad_data`.
 
 Duration units accepted: `ms`, `s`, `m`, `h`, `d`, `w`, `y`.
 
+## Performance
+
+Benchmark methodology and measured results (ingestion throughput, query latency
+percentiles, compression ratios) are in [`PERFORMANCE.md`](PERFORMANCE.md). Run
+`make bench-go` for the in-process engine benchmarks and `make bench-k6` for the
+end-to-end k6 HTTP load tests.
+
 ## Planning Docs
 
 - [`docs/planning/IMPLEMENTATION_PLAN.md`](docs/planning/IMPLEMENTATION_PLAN.md) — phase roadmap with goals and DoD
