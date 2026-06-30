@@ -277,6 +277,23 @@ Required internal metric categories:
 
 ---
 
+## Performance Benchmarks
+
+Two complementary harnesses, split by what each can control:
+
+- **Go `testing.B` benchmarks** live beside the code they measure
+  (`internal/metrics/ingest_bench_test.go`, `internal/metrics/query_bench_test.go`,
+  `internal/storage/chunk/compression_bench_test.go`, plus the existing
+  `*_bench_test.go` select benchmarks). Being in-process, they control storage
+  state directly — `MemoryStore` vs `WALStore`, fsync policy, in-memory vs
+  persisted reads, block count. Benchmarks importing `internal/compactor` use
+  `package metrics_test` to avoid the `compactor → metrics` import cycle.
+- **k6 HTTP load tests** live under `bench/k6/` and measure end-to-end API
+  p50/p95/p99 latency and throughput. `bench/run.sh` (`make bench-k6`) starts a
+  throwaway backend on a temp data dir, seeds it, runs every scenario, and tears
+  down. Curated numbers live in `PERFORMANCE.md`; raw JSON in `bench/results/`
+  (gitignored).
+
 ## Environments
 
 | Environment | Purpose |
