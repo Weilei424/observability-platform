@@ -248,14 +248,38 @@ Design: `docs/superpowers/specs/2026-06-25-phase-3.4-compaction-retention-design
 - [x] Integration test: compacted data remains queryable, including across restart + startup GC convergence
 
 ### Phase 3.5 — Performance Benchmarks
-- [ ] Add k6 or Go benchmark for metrics ingestion throughput
-- [ ] Add benchmark for instant query latency
-- [ ] Add benchmark for range query latency
-- [ ] Track p50/p95/p99 latency
-- [ ] Track samples/sec ingestion throughput
-- [ ] Add `PERFORMANCE.md`
-- [ ] Link `PERFORMANCE.md` from README
-- [ ] Verify benchmark commands are reproducible locally
+Design: `docs/superpowers/specs/2026-06-29-phase-3.5-performance-benchmarks-design.md` · Plan: `docs/superpowers/plans/2026-06-29-phase-3.5-performance-benchmarks.md`
+
+**Go benchmarks (in-process engine; `go test -bench`, deterministic)**
+- [x] `internal/metrics/ingest_bench_test.go` — ingestion throughput: `MemoryStore.Append` encode-only (samples/sec via `b.ReportMetric`), `WALStore.Append` at `wal_sync_every_n=1` (durability cost), fsync-policy sweep {1,16,128}, compaction-on-vs-off during ingest (labeled approximate)
+- [x] `internal/metrics/query_bench_test.go` — instant latency in-memory head vs persisted (flush + reopen, memory drained); range latency across step widths (~60/360/1440 ticks); instant vs block count {1,4,16}; driven through `QueryEngine.EvalInstant`/`EvalRange`; persisted bench `b.Fatal`s on empty match set
+- [x] `internal/storage/chunk/compression_bench_test.go` — encode/decode throughput + bytes/sample ratio (monotonic counter, gauge random-walk, constant)
+- [x] Reference existing `blockstore_bench_test.go` / `index_bench_test.go` / `reader_bench_test.go` (indexed vs full-scan select) results in the report — no duplication
+
+**k6 HTTP load tests (end-to-end; real p50/p95/p99)**
+- [x] `bench/k6/lib.js` — shared base URL, label scheme (query scripts select what `ingest.js` seeds), payload builders, cardinality knobs, `handleSummary()` → `bench/results/`
+- [x] `bench/k6/ingest.js` — concurrent VUs POST batched samples to `/api/v1/ingest/metrics`; req/s, samples/s, p50/p95/p99; `thresholds`; doubles as the seeder; `timestamp_ms = Date.now()`
+- [x] `bench/k6/instant_query.js` — instant-query p50/p95/p99 against seeded series; `check()` on every response
+- [x] `bench/k6/range_query.js` — range-query p50/p95/p99 (1h window / 15s step); `check()` on every response
+- [x] `bench/k6/README.md` — standalone k6 run instructions
+
+**Orchestration & tooling**
+- [x] `bench/run.sh` — resolve k6 (PATH then `$(go env GOPATH)/bin`, else print `go install go.k6.io/k6@latest` and exit non-zero), build server, start on fresh temp data dir + wait `/readyz`, seed, run k6 scenarios → JSON summaries, trap-based teardown
+- [x] Makefile targets: `bench-go`, `bench-k6`, `bench`
+- [x] `.gitignore` += `bench/results/`
+
+**Capture & report**
+- [x] Install k6 via `go install go.k6.io/k6@latest` (fall back to documented k6 template in `PERFORMANCE.md` if the install can't reach the network; note the fallback)
+- [x] Run Go benchmarks + k6 on this machine and capture real numbers
+- [x] `PERFORMANCE.md` — overview, hardware/env (4 vCPU/~6 GB, WSL2, go1.26, date), methodology + layer split, reproduce commands, results tables with real numbers, interpretation, caveats
+- [x] Link `PERFORMANCE.md` from `README.md`
+- [x] `ARCHITECTURE_NOTES.md` — note the Go-bench-vs-k6 split and `bench/` layout under testing/observability
+
+**Verify (Phase 3.5 DoD)**
+- [x] `make bench-go` runs green and prints the custom samples/sec and bytes/sample metrics
+- [x] `bench/run.sh` completes a short smoke profile and produces non-empty `bench/results/*.json`
+- [x] `go build ./...` and `go test ./...` remain green (benchmarks excluded from the default `-run`)
+- [x] Benchmark commands are reproducible locally and documented in `PERFORMANCE.md`
 
 ---
 
