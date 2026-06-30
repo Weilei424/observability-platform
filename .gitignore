@@ -41,3 +41,6 @@ load-generator
 CLAUDE.md
 AGENTS.md
 docs/superpowers/
+
+# Phase 3.5 raw benchmark output (PERFORMANCE.md holds the curated numbers)
+bench/results/
