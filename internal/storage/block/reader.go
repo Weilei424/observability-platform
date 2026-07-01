@@ -90,6 +90,21 @@ func buildSeriesByID(entries []SeriesEntry) (map[uint64]int, error) {
 // Meta returns the block metadata.
 func (r *Reader) Meta() Meta { return r.meta }
 
+// SetReconciledMeta replaces the in-memory metadata after startup has recomputed
+// the block's derived fields (time bounds, sample/series counts) from its actual
+// chunk contents. meta.json's stored values are trusted by queries (block skip),
+// retention (deletion), and compaction source-reclamation; a corrupt or tampered
+// value would silently drop or wrongly delete data. The chunks are the source of
+// truth, so the reconciled values override the file's without rewriting it (the
+// override is recomputed cheaply on every load). The block_id must not change.
+func (r *Reader) SetReconciledMeta(m Meta) error {
+	if m.BlockID != r.meta.BlockID {
+		return fmt.Errorf("block: reconciled meta block_id %q does not match %q", m.BlockID, r.meta.BlockID)
+	}
+	r.meta = m
+	return nil
+}
+
 // Series returns all series entries loaded from the index.
 func (r *Reader) Series() []SeriesEntry { return r.entries }
 
