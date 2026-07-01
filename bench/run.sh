@@ -9,22 +9,30 @@ cd "$ROOT"
 RESULTS_DIR="$ROOT/bench/results"
 K6_DIR="$ROOT/bench/k6"
 
-# Resolve the listen address. Unless the caller pins OBS_HTTP_ADDR, grab an
-# OS-assigned free ephemeral port so the runner can never collide with — and then
-# accidentally benchmark — an unrelated backend already bound to a fixed port.
-free_port() {
-  python3 - <<'PY'
-import socket
-s = socket.socket()
-s.bind(("127.0.0.1", 0))
-print(s.getsockname()[1])
-s.close()
-PY
+# port_refused returns 0 (success) iff nothing accepts a TCP connection on
+# 127.0.0.1:<port>. curl exit 7 is "failed to connect" (port free); any other
+# outcome (connected, timeout) means the port is occupied. Uses only curl, which
+# the runner already requires — no Python or other extra dependency.
+port_refused() {
+  curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$1/" 2>/dev/null
+  [ "$?" -eq 7 ]
 }
+
+# Resolve the listen address. Unless the caller pins OBS_HTTP_ADDR, pick a free
+# port in the dynamic range so the runner never collides with an unrelated backend.
 if [ -n "${OBS_HTTP_ADDR:-}" ]; then
   ADDR="$OBS_HTTP_ADDR"
 else
-  ADDR="127.0.0.1:$(free_port)"
+  PORT=""
+  for _ in $(seq 1 50); do
+    cand=$(( (RANDOM % 16384) + 49152 ))
+    if port_refused "$cand"; then PORT="$cand"; break; fi
+  done
+  if [ -z "$PORT" ]; then
+    echo "could not find a free port in the dynamic range" >&2
+    exit 1
+  fi
+  ADDR="127.0.0.1:$PORT"
 fi
 export BASE_URL="http://${ADDR}"
 
@@ -55,7 +63,17 @@ BIN="$BIN_DIR/obs-server"
 echo ">> building server"
 go build -o "$BIN" ./cmd/server
 
-# 3. Start the server on a fresh data dir.
+# 3. Pre-flight identity guard: if anything already answers on our target address,
+# refuse to start — otherwise a foreign backend (which stays up while our own
+# process fails to bind and then drains through a graceful shutdown) would answer
+# /readyz and we'd unknowingly benchmark it. This, not process liveness, is what
+# guarantees the backend we measure is the one we launched.
+if curl -fsS --max-time 2 "${BASE_URL}/readyz" >/dev/null 2>&1; then
+  echo "a backend is already serving ${BASE_URL}/readyz — refusing to benchmark a foreign process. Free the address or unset OBS_HTTP_ADDR." >&2
+  exit 1
+fi
+
+# 4. Start the server on a fresh data dir.
 DATA_DIR="$(mktemp -d)"
 echo ">> starting server addr=$ADDR data_dir=$DATA_DIR"
 OBS_HTTP_ADDR="$ADDR" OBS_DATA_DIR="$DATA_DIR" OBS_LOG_LEVEL=warn "$BIN" &
@@ -69,8 +87,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# 4. Wait for readiness. Abort if our server process died (e.g. the port was
-# already taken) so we never benchmark an unrelated process answering /readyz.
+# 5. Wait for readiness. Abort if our server process died mid-startup so we never
+# fall through to a stale/foreign responder. (The pre-flight guard above is the
+# primary protection; this liveness check is defense-in-depth.)
 echo ">> waiting for /readyz"
 ready=0
 for _ in $(seq 1 50); do
@@ -127,19 +146,19 @@ run_k6() {
   fi
 }
 
-# 5. Seed a fixed, deterministic dataset (fixed iterations, one sample per series)
+# 6. Seed a fixed, deterministic dataset (fixed iterations, one sample per series)
 # so the query scenarios always run against the same cardinality and history.
 echo ">> k6 seed (deterministic fixed dataset)"
 run_k6 "$K6_DIR/seed.js" "$SEED_VUS" "$SEED_DURATION"
 
-# 6. Query scenarios (run against the seeded dataset).
+# 7. Query scenarios (run against the seeded dataset).
 echo ">> k6 instant_query"
 run_k6 "$K6_DIR/instant_query.js" "$RUN_VUS" "$RUN_DURATION"
 
 echo ">> k6 range_query"
 run_k6 "$K6_DIR/range_query.js" "$RUN_VUS" "$RUN_DURATION"
 
-# 7. Ingest throughput (random live-load model). Runs LAST so its random series
+# 8. Ingest throughput (random live-load model). Runs LAST so its random series
 # and timestamps do not perturb the deterministic dataset the queries measured.
 echo ">> k6 ingest (throughput)"
 run_k6 "$K6_DIR/ingest.js" "$SEED_VUS" "$SEED_DURATION"
