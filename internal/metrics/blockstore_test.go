@@ -907,6 +907,134 @@ func TestNewBlockStore_OlderBlockCannotSupersedeCorrection(t *testing.T) {
 	}
 }
 
+// writeSingleSampleBlock writes a block containing one series (metric name) with a
+// single (ts, val, gen) sample and optional compaction sources, using the block
+// writer directly so a test controls the exact generation and value. Returns the ID.
+func writeSingleSampleBlock(t *testing.T, blocksDir, tmpDir, name string, ts int64, val float64, gen int64, sources []string) string {
+	t.Helper()
+	c := chunk.NewChunk()
+	if err := c.Append(ts, val, gen); err != nil {
+		t.Fatalf("chunk append: %v", err)
+	}
+	w, err := block.NewWriter(blocksDir, tmpDir)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	if len(sources) > 0 {
+		w.SetCompaction(2, sources)
+	}
+	fp := uint64(metricFingerprint(t, name))
+	if err := w.AddSeries(fp, []block.LabelPair{{Name: "__name__", Value: name}}, []*chunk.Chunk{c}); err != nil {
+		t.Fatalf("AddSeries: %v", err)
+	}
+	meta, err := w.Commit()
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	return meta.BlockID
+}
+
+// TestNewBlockStore_EqualGenValueCorruptionKeepsSource is the regression for
+// generation-only containment: a survivor holding the same (ts, generation) as its
+// source but a DIFFERENT value is corrupt, not a faithful copy, and must not
+// authorize deleting the intact source.
+func TestNewBlockStore_EqualGenValueCorruptionKeepsSource(t *testing.T) {
+	dir := t.TempDir()
+	blocksDir := filepath.Join(dir, "metrics", "blocks")
+	tmpDir := filepath.Join(dir, "metrics", "tmp")
+	for _, d := range []string{blocksDir, tmpDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+
+	// Intact source S: m@1000 = 1.0 at generation 5.
+	sID := writeSingleSampleBlock(t, blocksDir, tmpDir, "m", 1000, 1.0, 5, nil)
+	// "Survivor" V: same generation, corrupted value (2.0), naming S as a source.
+	writeSingleSampleBlock(t, blocksDir, tmpDir, "m", 1000, 2.0, 5, []string{sID})
+
+	if _, err := metrics.NewBlockStore(dir); err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(blocksDir, sID)); err != nil {
+		t.Fatalf("intact source %s deleted by an equal-generation value-corrupted survivor: %v", sID, err)
+	}
+}
+
+// compactBlocks opens the given block IDs and merges them with block.Compact,
+// leaving all inputs on disk (the state a crash before source deletion produces).
+// Returns the merged block ID.
+func compactBlocks(t *testing.T, blocksDir, tmpDir string, ids ...string) string {
+	t.Helper()
+	readers := make([]*block.Reader, 0, len(ids))
+	for _, id := range ids {
+		r, err := block.OpenReader(filepath.Join(blocksDir, id))
+		if err != nil {
+			t.Fatalf("open %s: %v", id, err)
+		}
+		readers = append(readers, r)
+	}
+	meta, err := block.Compact(blocksDir, tmpDir, readers)
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	for _, r := range readers {
+		_ = r.Close()
+	}
+	return meta.BlockID
+}
+
+// TestNewBlockStore_NestedCompactionChainFullyReclaimed is the regression for
+// order-dependent startup GC: a two-level compaction chain (top ⊇ L1,L2 and
+// L1 ⊇ S1,S2, L2 ⊇ S3,S4) left entirely on disk must reclaim every superseded
+// block regardless of map iteration order, leaving only the top block.
+func TestNewBlockStore_NestedCompactionChainFullyReclaimed(t *testing.T) {
+	dir := t.TempDir()
+	bs, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+	flushOneBlock(t, bs, "m", 0)      // S1: ts 0..119000
+	flushOneBlock(t, bs, "m", 200000) // S2
+	flushOneBlock(t, bs, "m", 400000) // S3
+	flushOneBlock(t, bs, "m", 600000) // S4
+	infos := bs.BlockInfos()
+	sort.Slice(infos, func(i, j int) bool { return infos[i].MinTime < infos[j].MinTime })
+	if len(infos) != 4 {
+		t.Fatalf("setup: want 4 source blocks, got %d", len(infos))
+	}
+	s1, s2, s3, s4 := infos[0].ID, infos[1].ID, infos[2].ID, infos[3].ID
+
+	blocksDir := filepath.Join(dir, "metrics", "blocks")
+	tmpDir := filepath.Join(dir, "metrics", "tmp")
+	l1 := compactBlocks(t, blocksDir, tmpDir, s1, s2)
+	l2 := compactBlocks(t, blocksDir, tmpDir, s3, s4)
+	top := compactBlocks(t, blocksDir, tmpDir, l1, l2)
+	if err := bs.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	reopened, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	infos2 := reopened.BlockInfos()
+	if len(infos2) != 1 || infos2[0].ID != top {
+		ids := make([]string, len(infos2))
+		for i, in := range infos2 {
+			ids[i] = in.ID
+		}
+		t.Fatalf("nested chain not fully reclaimed: kept %v, want only top %s", ids, top)
+	}
+	got, err := reopened.QueryRange(metricFingerprint(t, "m"), 0, 720000)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
+	if len(got) != 480 {
+		t.Fatalf("after reclaim query = %d samples, want 480", len(got))
+	}
+}
+
 // TestNewBlockStore_ReconcilesCorruptMetaTime is the regression for trusting
 // meta.json's derived time/count fields: a tampered max_time must not silently drop
 // the block's data from queries. Startup reconciles the fields against the decoded
