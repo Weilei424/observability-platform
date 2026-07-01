@@ -6,11 +6,18 @@ export const CARDINALITY = parseInt(__ENV.CARDINALITY || '1000', 10);
 export const BATCH = parseInt(__ENV.BATCH || '100', 10);
 export const METRIC_NAME = 'bench_http_requests_total';
 
+// SEED_ITERATIONS covers every series exactly once (BATCH series per iteration).
+// The seed scenario runs as shared-iterations so the persisted dataset is fixed
+// and reproducible — CARDINALITY series, one sample each — independent of machine
+// speed or wall-clock duration.
+export const SEED_ITERATIONS = Math.ceil(CARDINALITY / BATCH);
+
 // Percentiles surfaced in every script's summary.
 export const TREND_STATS = ['avg', 'min', 'med', 'max', 'p(50)', 'p(95)', 'p(99)'];
 
 // buildIngestBody returns a JSON ingest payload of BATCH samples spread across
-// CARDINALITY series. instance has 50 distinct values; series is unique.
+// CARDINALITY series. instance has 50 distinct values; series is unique. Used by
+// the ingest *throughput* scenario, where random series/values model live load.
 export function buildIngestBody(nowMs) {
   const metrics = [];
   for (let i = 0; i < BATCH; i++) {
@@ -20,6 +27,26 @@ export function buildIngestBody(nowMs) {
       labels: { job: 'bench', instance: 'inst-' + (s % 50), series: 's-' + s },
       timestamp_ms: nowMs,
       value: Math.random() * 1000,
+    });
+  }
+  return JSON.stringify({ metrics: metrics });
+}
+
+// buildSeedBody deterministically writes the BATCH series owned by iteration
+// iterIndex: series indices [iterIndex*BATCH, iterIndex*BATCH+BATCH). Each series
+// is written exactly once (indices past CARDINALITY-1 are skipped), so across all
+// SEED_ITERATIONS the persisted dataset is exactly CARDINALITY series × 1 sample.
+// Value is a fixed function of the series index (no randomness).
+export function buildSeedBody(iterIndex, nowMs) {
+  const metrics = [];
+  for (let i = 0; i < BATCH; i++) {
+    const s = iterIndex * BATCH + i;
+    if (s >= CARDINALITY) break;
+    metrics.push({
+      name: METRIC_NAME,
+      labels: { job: 'bench', instance: 'inst-' + (s % 50), series: 's-' + s },
+      timestamp_ms: nowMs,
+      value: s,
     });
   }
   return JSON.stringify({ metrics: metrics });
@@ -61,10 +88,19 @@ export function summaryHandler(name) {
       const s = samples.values;
       lines.push('samples_sent : ' + s.count + ' (' + (s.rate || 0).toFixed(0) + '/s)');
     }
+
+    // Correctness gate: any failed check (e.g. HTTP 200 with an empty result set)
+    // marks the run FAIL. This is written to a status file the runner treats as a
+    // HARD failure, independent of the soft latency thresholds (k6 exit 99).
+    const checks = (data.metrics.checks || {}).values || {};
+    const checksOk = checks.rate === undefined || checks.rate >= 1;
+    lines.push('checks       : ' + (checksOk ? 'OK' : 'FAIL (rate=' + (checks.rate || 0).toFixed(3) + ')'));
     lines.push('');
+
     const out = {};
     out['stdout'] = lines.join('\n') + '\n';
     out['bench/results/' + name + '.json'] = JSON.stringify(data, null, 2);
+    out['bench/results/' + name + '.status'] = checksOk ? 'OK\n' : 'FAIL\n';
     return out;
   };
 }
