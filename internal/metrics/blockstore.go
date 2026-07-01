@@ -154,17 +154,36 @@ func NewBlockStore(dataDir string) (*BlockStore, error) {
 	// converges a crash that left a compacted block beside its sources.
 	//
 	// A source that is still present and valid on disk is only deleted when a
-	// survivor provably contains its data (survivorSupersedesSource); otherwise the
-	// "source" is an unrelated block wrongly named in a tampered/corrupt Sources
-	// list, and deleting it would destroy live data — so we keep it as a live block.
-	// A source that failed to open (corrupt) cannot be inspected; it is reclaimed on
-	// the survivor's say-so as before (deleting already-unreadable data loses
-	// nothing and preserves crash-recovery convergence).
+	// survivor provably contains its samples at ≥ generation (survivorSupersedesSource);
+	// otherwise the "source" is an unrelated/self/older block wrongly named in a
+	// tampered or corrupt Sources list, and deleting it would destroy live data or
+	// resurrect a stale value — so we keep it as a live block. A source that failed to
+	// open (corrupt) cannot be inspected; it is reclaimed on the survivor's say-so as
+	// before (deleting already-unreadable data loses nothing and preserves
+	// crash-recovery convergence).
+	gensCache := make(map[string]map[uint64]map[int64]int64, len(opened))
+	survivorGens := func(sv *block.Reader) (map[uint64]map[int64]int64, error) {
+		id := sv.Meta().BlockID
+		if g, ok := gensCache[id]; ok {
+			return g, nil
+		}
+		g, err := decodeBlockGens(sv)
+		if err != nil {
+			return nil, err
+		}
+		gensCache[id] = g
+		return g, nil
+	}
 	for name := range superseded {
 		if r, ok := opened[name]; ok {
 			verified := false
 			for _, sv := range supersededBy[name] {
-				if survivorSupersedesSource(sv, r) {
+				gens, err := survivorGens(sv)
+				if err != nil {
+					continue // cannot verify against this survivor; try the next
+				}
+				ok, err := survivorSupersedesSource(gens, sv.Meta().BlockID, r)
+				if err == nil && ok {
 					verified = true
 					break
 				}
@@ -627,16 +646,44 @@ func (bs *BlockStore) CompactOnce(plan func([]block.BlockInfo) [][]string) (int,
 		// is deleted: validateBlockSeries only checks label fingerprints, so a
 		// truncated/corrupt chunks file would otherwise pass and we would delete the
 		// sources that still hold the real data.
-		if _, err := validateBlockChunks(newReader); err != nil {
+		st, err := validateBlockChunks(newReader)
+		if err != nil {
 			_ = newReader.Close()
 			_ = bs.safeDeleteBlock(meta.BlockID)
 			return compacted, fmt.Errorf("blockstore: compacted block %s chunks: %w", meta.BlockID, err)
 		}
-		// Guarantee the output actually supersedes each source (every source series
-		// present, time range covered) before reclaiming them — defense in depth
-		// against a compaction bug silently dropping a source's data.
+		// Apply the same integrity checks startup uses before a block authorizes
+		// deleting sources: its persisted MaxGen must equal the reconstructed one, and
+		// its meta must be reconciled to the chunks. Otherwise a syntactically valid
+		// metadata corruption could be installed here, the sources deleted, and the
+		// only remaining block then rejected by the next restart.
+		if st.maxGen != newReader.Meta().MaxGen {
+			_ = newReader.Close()
+			_ = bs.safeDeleteBlock(meta.BlockID)
+			return compacted, fmt.Errorf("blockstore: compacted block %s MaxGen %d disagrees with stored generations (max %d)", meta.BlockID, newReader.Meta().MaxGen, st.maxGen)
+		}
+		if err := reconcileBlockMeta(newReader, st); err != nil {
+			_ = newReader.Close()
+			_ = bs.safeDeleteBlock(meta.BlockID)
+			return compacted, fmt.Errorf("blockstore: compacted block %s reconcile meta: %w", meta.BlockID, err)
+		}
+		// Guarantee the output supersedes each source at ≥ generation for every
+		// sample before reclaiming them — defense in depth against a compaction bug
+		// silently dropping a source's data or a resolved correction.
+		newGens, err := decodeBlockGens(newReader)
+		if err != nil {
+			_ = newReader.Close()
+			_ = bs.safeDeleteBlock(meta.BlockID)
+			return compacted, fmt.Errorf("blockstore: compacted block %s decode: %w", meta.BlockID, err)
+		}
 		for _, src := range sources {
-			if !survivorSupersedesSource(newReader, src) {
+			ok, err := survivorSupersedesSource(newGens, meta.BlockID, src)
+			if err != nil {
+				_ = newReader.Close()
+				_ = bs.safeDeleteBlock(meta.BlockID)
+				return compacted, fmt.Errorf("blockstore: compacted block %s verify source %s: %w", meta.BlockID, src.Meta().BlockID, err)
+			}
+			if !ok {
 				_ = newReader.Close()
 				_ = bs.safeDeleteBlock(meta.BlockID)
 				return compacted, fmt.Errorf("blockstore: compacted block %s does not supersede source %s", meta.BlockID, src.Meta().BlockID)
@@ -938,23 +985,71 @@ func reconcileBlockMeta(r *block.Reader, st blockChunkStats) error {
 	return r.SetReconciledMeta(want)
 }
 
-// survivorSupersedesSource reports whether survivor provably contains source's
-// data: its (chunk-reconciled) time range covers the source's, and every series in
-// the source is present in the survivor. A real compaction survivor is built from
-// its sources, so this always holds for them; it fails for an unrelated block ID
-// injected into a Sources list, preventing that block from being deleted on the
-// say-so of untrusted metadata.
-func survivorSupersedesSource(survivor, source *block.Reader) bool {
-	sm, srcm := survivor.Meta(), source.Meta()
-	if srcm.NumSamples > 0 && (sm.MinTime > srcm.MinTime || sm.MaxTime < srcm.MaxTime) {
-		return false
+// decodeBlockGens decodes every chunk in r into per-series maps of
+// timestamp -> highest write generation stored at that timestamp. This is the
+// ground truth used to prove one block supersedes another (survivorSupersedesSource):
+// presence and generation, not merely metadata, decide reclamation.
+func decodeBlockGens(r *block.Reader) (map[uint64]map[int64]int64, error) {
+	out := make(map[uint64]map[int64]int64, len(r.Series()))
+	for _, se := range r.Series() {
+		m := make(map[int64]int64)
+		for _, ref := range se.Chunks {
+			c, err := r.ReadChunk(ref)
+			if err != nil {
+				return nil, fmt.Errorf("series %d chunk: %w", se.ID, err)
+			}
+			it := c.Iterator()
+			for it.Next() {
+				ts, _ := it.At()
+				g := it.Gen()
+				if cur, ok := m[ts]; !ok || g > cur {
+					m[ts] = g
+				}
+			}
+		}
+		out[se.ID] = m
+	}
+	return out, nil
+}
+
+// survivorSupersedesSource reports whether survivor provably contains every sample
+// in source at an equal-or-higher write generation — the only condition under which
+// deleting source cannot lose data or resurrect a stale value under last-write-wins.
+// survivorGens must be decodeBlockGens(survivor).
+//
+// This is deliberately stricter than metadata/time/series-ID heuristics, which are
+// forgeable from mutable meta.json:
+//   - a self-reference (survivor lists its own ID) is rejected, so a block cannot
+//     authorize deleting itself;
+//   - an older block cannot supersede a newer same-series correction, because the
+//     correction's higher generation is absent from the older block.
+//
+// A genuine compaction survivor is built from its sources with last-write-wins, so
+// it always holds every source sample at ≥ its generation and this passes.
+func survivorSupersedesSource(survivorGens map[uint64]map[int64]int64, survivorID string, source *block.Reader) (bool, error) {
+	if survivorID == source.Meta().BlockID {
+		return false, nil // a block can never be its own source
 	}
 	for _, se := range source.Series() {
-		if _, ok := survivor.SeriesByID(se.ID); !ok {
-			return false
+		sg, ok := survivorGens[se.ID]
+		if !ok {
+			return false, nil // survivor lacks this series entirely
+		}
+		for _, ref := range se.Chunks {
+			c, err := source.ReadChunk(ref)
+			if err != nil {
+				return false, fmt.Errorf("source series %d chunk: %w", se.ID, err)
+			}
+			it := c.Iterator()
+			for it.Next() {
+				ts, _ := it.At()
+				if g, ok := sg[ts]; !ok || g < it.Gen() {
+					return false, nil // sample missing, or survivor's is older
+				}
+			}
 		}
 	}
-	return true
+	return true, nil
 }
 
 func blockPairsToLabels(pairs []block.LabelPair) (Labels, error) {
