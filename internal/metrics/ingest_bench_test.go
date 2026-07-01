@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -110,6 +111,12 @@ func BenchmarkIngest_WALStore_SyncSweep(b *testing.B) {
 // flush+compact loop running versus a quiet baseline. APPROXIMATE: the
 // background goroutine introduces scheduling noise; the number is indicative,
 // not exact.
+//
+// Samples advance the timestamp by 1ms/append (int64(i)) so a flushed block spans
+// only minutes — well under the 2h base compaction range — and successive blocks
+// share the same range window, keeping them eligible to merge. The "compaction=on"
+// case reports a "compactions" metric so the result proves compaction actually ran
+// rather than measuring bare periodic flushing.
 func BenchmarkIngest_CompactionOnOff(b *testing.B) {
 	ranges := compactor.Ranges((2 * time.Hour).Milliseconds(), 4, 3)
 	plan := func(infos []block.BlockInfo) [][]string {
@@ -131,6 +138,7 @@ func BenchmarkIngest_CompactionOnOff(b *testing.B) {
 
 			var stop chan struct{}
 			var wg sync.WaitGroup
+			var compactions int64
 			if withCompaction {
 				stop = make(chan struct{})
 				wg.Add(1)
@@ -143,8 +151,16 @@ func BenchmarkIngest_CompactionOnOff(b *testing.B) {
 						case <-stop:
 							return
 						case <-t.C:
-							_, _ = bs.FlushBlock()
-							_, _ = bs.CompactOnce(plan)
+							if _, err := bs.FlushBlock(); err != nil {
+								b.Errorf("FlushBlock: %v", err)
+								return
+							}
+							n, err := bs.CompactOnce(plan)
+							if err != nil {
+								b.Errorf("CompactOnce: %v", err)
+								return
+							}
+							atomic.AddInt64(&compactions, int64(n))
 						}
 					}
 				}()
@@ -153,7 +169,7 @@ func BenchmarkIngest_CompactionOnOff(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				l := ls[i%len(ls)]
-				if err := bs.Append(l, int64(i)*1000, float64(i)); err != nil {
+				if err := bs.Append(l, int64(i), float64(i)); err != nil {
 					b.Fatalf("Append: %v", err)
 				}
 			}
@@ -163,6 +179,9 @@ func BenchmarkIngest_CompactionOnOff(b *testing.B) {
 				wg.Wait()
 			}
 			b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "samples/sec")
+			if withCompaction {
+				b.ReportMetric(float64(atomic.LoadInt64(&compactions)), "compactions")
+			}
 		})
 	}
 }
