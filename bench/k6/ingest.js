@@ -13,10 +13,12 @@ export const options = {
   },
   summaryTrendStats: TREND_STATS,
   thresholds: {
-    // Generous regression guard, not an SLA: the ingest path fsyncs every record
-    // by default, so absolute latency is high (more so under WSL2). bench/run.sh
-    // also tolerates a thresholds-breached exit so a slow box still records numbers.
-    http_req_duration: ['p(95)<2000'],
+    // Gross-regression guard, not an SLA: the ingest path fsyncs every record by
+    // default, so absolute latency is inherently high and variable (multi-second
+    // under WSL2). The bound is deliberately loose to catch only a large blowup;
+    // a breach fails the run (bench/run.sh), overridable via
+    // BENCH_ALLOW_THRESHOLD_BREACH=1 on a known-slow box.
+    http_req_duration: ['p(95)<8000'],
     http_req_failed: ['rate<0.01'],
   },
 };
