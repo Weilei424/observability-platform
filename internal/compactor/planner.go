@@ -42,7 +42,11 @@ func Plan(infos []block.BlockInfo, ranges []int64) [][]string {
 		groups := make(map[int64][]string)
 		var windowOrder []int64
 		for _, b := range sorted {
-			if b.MaxTime-b.MinTime >= r {
+			// MaxTime >= MinTime for a valid block, so the difference only wraps
+			// negative when the true span overflows int64; treat that as at/above
+			// the range so extreme-timestamp blocks are never mis-grouped.
+			span := b.MaxTime - b.MinTime
+			if span < 0 || span >= r {
 				continue // already at/above this range
 			}
 			if floorDiv(b.MinTime, r) != floorDiv(b.MaxTime, r) {
