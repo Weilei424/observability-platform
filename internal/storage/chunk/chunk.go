@@ -268,7 +268,12 @@ func (c *Chunk) Append(tsMs int64, val float64, gen int64) error {
 	c.writeValueXOR(v)
 	c.lastVal = v
 	c.numSamples++
-	if c.numSamples >= maxSamples || (c.maxTs-c.minTs) >= maxSpanMs {
+	// maxTs >= minTs always holds, so a true span this large only wraps to a
+	// negative value when it exceeds the int64 range (e.g. MinInt64..MaxInt64
+	// timestamps). Treat that overflow as "span exceeded" so extreme timestamps
+	// cannot bypass sealing.
+	span := c.maxTs - c.minTs
+	if c.numSamples >= maxSamples || span < 0 || span >= maxSpanMs {
 		c.sealed = true
 	}
 	return nil
