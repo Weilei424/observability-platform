@@ -709,6 +709,127 @@ func TestNewBlockStore_CorruptSurvivorMaxGen_PreservesSources(t *testing.T) {
 	}
 }
 
+// TestNewBlockStore_InjectedUnrelatedSourceNotDeleted is the regression for
+// trusting Sources metadata blindly: an unrelated block whose ID is injected into a
+// survivor's Sources list must NOT be reclaimed, because the survivor does not
+// actually contain its data. Genuine sources (provably contained) are still
+// reclaimed.
+func TestNewBlockStore_InjectedUnrelatedSourceNotDeleted(t *testing.T) {
+	dir := t.TempDir()
+
+	// An unrelated block U: different metric, disjoint time range.
+	bs, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+	flushOneBlock(t, bs, "unrelated", 500000) // U: ts 500000..619000
+	uID := bs.BlockInfos()[0].ID
+	if err := bs.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Crash state for metric "m": sources s1+s2 merged into mergedID (U untouched).
+	s1, s2, mergedID, blocksDir, _ := makeCrashState(t, dir)
+
+	// Tamper: inject U's ID into the merged block's Sources list.
+	metaPath := filepath.Join(blocksDir, mergedID, "meta.json")
+	raw, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatalf("read meta: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("unmarshal meta: %v", err)
+	}
+	srcs, _ := m["sources"].([]any)
+	m["sources"] = append(srcs, uID)
+	out, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal meta: %v", err)
+	}
+	if err := os.WriteFile(metaPath, out, 0o644); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+
+	reopened, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+
+	// U must survive and stay queryable — it is not superseded by the merged block.
+	if _, err := os.Stat(filepath.Join(blocksDir, uID)); err != nil {
+		t.Fatalf("unrelated block %s deleted via injected Sources metadata: %v", uID, err)
+	}
+	got, err := reopened.QueryRange(metricFingerprint(t, "unrelated"), 500000, 620000)
+	if err != nil {
+		t.Fatalf("QueryRange unrelated: %v", err)
+	}
+	if len(got) != 120 {
+		t.Fatalf("unrelated data = %d samples, want 120", len(got))
+	}
+	// The genuine sources are provably contained, so they are still reclaimed.
+	for _, id := range []string{s1, s2} {
+		if _, err := os.Stat(filepath.Join(blocksDir, id)); err == nil {
+			t.Fatalf("genuine source %s was not reclaimed", id)
+		}
+	}
+}
+
+// TestNewBlockStore_ReconcilesCorruptMetaTime is the regression for trusting
+// meta.json's derived time/count fields: a tampered max_time must not silently drop
+// the block's data from queries. Startup reconciles the fields against the decoded
+// chunks (the source of truth).
+func TestNewBlockStore_ReconcilesCorruptMetaTime(t *testing.T) {
+	dir := t.TempDir()
+	bs, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+	flushOneBlock(t, bs, "m", 0) // ts 0..119000
+	id := bs.BlockInfos()[0].ID
+	if err := bs.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Corrupt max_time (and num_samples) so queries would skip the block and
+	// retention would treat it as ancient.
+	blocksDir := filepath.Join(dir, "metrics", "blocks")
+	metaPath := filepath.Join(blocksDir, id, "meta.json")
+	raw, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatalf("read meta: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("unmarshal meta: %v", err)
+	}
+	m["max_time"] = -1
+	m["num_samples"] = 1
+	out, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal meta: %v", err)
+	}
+	if err := os.WriteFile(metaPath, out, 0o644); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+
+	reopened, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	infos := reopened.BlockInfos()
+	if len(infos) != 1 || infos[0].MinTime != 0 || infos[0].MaxTime != 119000 {
+		t.Fatalf("meta not reconciled: got %+v, want MinTime 0 MaxTime 119000", infos)
+	}
+	got, err := reopened.QueryRange(metricFingerprint(t, "m"), 0, 200000)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
+	if len(got) != 120 {
+		t.Fatalf("query after reconcile = %d samples, want 120 (tampered meta dropped data)", len(got))
+	}
+}
+
 // TestMemoryStore_RejectsAppendWhenGenerationExhausted verifies the counter
 // reaching the generation bound is an explicit error, not a silent write rejection.
 func TestMemoryStore_RejectsAppendWhenGenerationExhausted(t *testing.T) {
