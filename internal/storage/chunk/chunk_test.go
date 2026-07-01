@@ -8,6 +8,26 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/storage/chunk"
 )
 
+// TestChunk_ExtremeTimestampsSeal is the regression for the span-overflow bug: a
+// chunk spanning MinInt64..MaxInt64 has a true span far beyond the two-hour seal
+// threshold, but the naive maxTs-minTs subtraction overflows to a negative value.
+// The sealing check must treat that as span-exceeded, not leave the chunk open.
+func TestChunk_ExtremeTimestampsSeal(t *testing.T) {
+	c := chunk.NewChunk()
+	if err := c.Append(math.MinInt64, 1.0, 1); err != nil {
+		t.Fatalf("Append min: %v", err)
+	}
+	if c.Sealed() {
+		t.Fatal("chunk sealed after a single sample")
+	}
+	if err := c.Append(math.MaxInt64, 2.0, 2); err != nil {
+		t.Fatalf("Append max: %v", err)
+	}
+	if !c.Sealed() {
+		t.Fatal("chunk with a MinInt64..MaxInt64 span was not sealed (span overflow bypassed sealing)")
+	}
+}
+
 // --- round-trip tests ---
 
 func TestChunk_RoundTrip_VariedValues(t *testing.T) {
