@@ -22,15 +22,18 @@ export const options = {
   },
 };
 
-// One fixed timestamp for the whole dataset. Captured once at init so every
-// seeded sample shares it and falls inside the query range windows.
-const SEED_TS = Date.now();
+// setup() runs exactly once (not per-VU) and its return value is passed to every
+// default() invocation, so the whole dataset shares one timestamp. Module-level
+// init would run separately in each VU runtime and yield divergent timestamps.
+export function setup() {
+  return { seedTs: Date.now() };
+}
 
-export default function () {
+export default function (data) {
   // iterationInTest is the scenario-global 0-based iteration index across all VUs,
   // so each series partition is written by exactly one iteration (unlike __ITER,
   // which is per-VU).
-  const body = buildSeedBody(exec.scenario.iterationInTest, SEED_TS);
+  const body = buildSeedBody(exec.scenario.iterationInTest, data.seedTs);
   const res = http.post(BASE_URL + '/api/v1/ingest/metrics', body, {
     headers: { 'Content-Type': 'application/json' },
   });
