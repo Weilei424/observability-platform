@@ -31,10 +31,15 @@ the run (exit 99) unless `BENCH_ALLOW_THRESHOLD_BREACH=1` is set.
 
 ## Example
 
+Seed the deterministic dataset first, then run the query scenarios against it
+(run `ingest.js` only for a standalone throughput measurement — it writes random
+series and is not the seeder):
+
 ```bash
 mkdir -p bench/results
-k6 run -e VUS=10 -e DURATION=30s bench/k6/ingest.js
+k6 run -e VUS=10 bench/k6/seed.js                       # deterministic seed
 k6 run -e VUS=10 -e DURATION=30s bench/k6/instant_query.js
+k6 run -e VUS=10 -e DURATION=30s bench/k6/range_query.js
 ```
 
 JSON summaries are written to `bench/results/<scenario>.json` (gitignored).
