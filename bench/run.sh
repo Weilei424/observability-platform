@@ -8,7 +8,24 @@ cd "$ROOT"
 
 RESULTS_DIR="$ROOT/bench/results"
 K6_DIR="$ROOT/bench/k6"
-ADDR="${OBS_HTTP_ADDR:-127.0.0.1:8089}"
+
+# Resolve the listen address. Unless the caller pins OBS_HTTP_ADDR, grab an
+# OS-assigned free ephemeral port so the runner can never collide with — and then
+# accidentally benchmark — an unrelated backend already bound to a fixed port.
+free_port() {
+  python3 - <<'PY'
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+}
+if [ -n "${OBS_HTTP_ADDR:-}" ]; then
+  ADDR="$OBS_HTTP_ADDR"
+else
+  ADDR="127.0.0.1:$(free_port)"
+fi
 export BASE_URL="http://${ADDR}"
 
 # Profiles (override via env). Defaults are a short smoke profile.
@@ -68,12 +85,20 @@ if [ "$ready" -ne 1 ]; then
   echo "server did not become ready at ${BASE_URL}/readyz" >&2
   exit 1
 fi
+# Close the kill-0/readyz race: if a foreign process answered /readyz while our
+# server was still failing to bind, our PID has since exited. Re-verify it is ours.
+if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+  echo "our server process $SERVER_PID exited despite /readyz responding — a foreign backend owns ${ADDR}" >&2
+  exit 1
+fi
 
-# run_k6 runs one scenario. Two-tier gate:
+# run_k6 runs one scenario. Failure gates (both HARD, per the Phase 3.5 design —
+# "a gross regression fails the k6 run with a non-zero exit code"):
 #   - Correctness (k6 checks): a FAIL status file — written when any check fails,
-#     e.g. HTTP 200 with an empty result set — is always a HARD failure.
-#   - Latency (soft thresholds): a thresholds-breached exit (k6 code 99) is a
-#     non-fatal warning so a slow/loaded box still records numbers.
+#     e.g. HTTP 200 with an empty result set — aborts the run.
+#   - Latency thresholds (k6 exit 99): a breach aborts the run, UNLESS
+#     BENCH_ALLOW_THRESHOLD_BREACH=1, the documented escape hatch for a known-slow
+#     box, which downgrades it to a recorded warning.
 # Any other non-zero exit (script error, connection failure) aborts the run.
 run_k6() {
   local script=$1 vus=$2 dur=$3
@@ -90,7 +115,12 @@ run_k6() {
     exit 1
   fi
   if [ "$rc" -eq 99 ]; then
-    echo "  ⚠ k6 latency thresholds breached for $name (non-fatal; numbers recorded)"
+    if [ "${BENCH_ALLOW_THRESHOLD_BREACH:-0}" = "1" ]; then
+      echo "  ⚠ k6 latency thresholds breached for $name (tolerated via BENCH_ALLOW_THRESHOLD_BREACH=1; numbers recorded)"
+    else
+      echo "k6 latency thresholds breached for $name — regression gate failed. Set BENCH_ALLOW_THRESHOLD_BREACH=1 to tolerate on a known-slow box." >&2
+      exit "$rc"
+    fi
   elif [ "$rc" -ne 0 ]; then
     echo "k6 failed for $name (exit $rc)" >&2
     exit "$rc"
