@@ -158,6 +158,54 @@ func (r *Reader) ReadChunk(ref ChunkRef) (*chunk.Chunk, error) {
 	return chunk.FromBytes(buf)
 }
 
+// ValidateChunkRefs verifies that every series entry's chunk references resolve to
+// a physical chunk record whose 12-byte header (written by the block writer:
+// 8-byte series ID + 4-byte payload length, immediately before the payload) binds
+// it to that exact series and length. The index stores only (offset, length), and
+// ReadChunk reads the payload blindly, so without this check a tampered or corrupt
+// index that swaps two valid chunk refs would silently return one series' samples
+// under another series' labels. Run before a block is trusted or published.
+func (r *Reader) ValidateChunkRefs() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return fmt.Errorf("block: reader is closed")
+	}
+	if r.chunksFile == nil {
+		f, err := os.Open(filepath.Join(r.dir, "chunks"))
+		if err != nil {
+			return fmt.Errorf("block: open chunks file: %w", err)
+		}
+		r.chunksFile = f
+	}
+	fi, err := r.chunksFile.Stat()
+	if err != nil {
+		return fmt.Errorf("block: stat chunks file: %w", err)
+	}
+	size := fi.Size()
+	var hdr [12]byte
+	for _, se := range r.entries {
+		for _, ref := range se.Chunks {
+			// Payload must sit after its header and inside the file.
+			if ref.Offset < 12 || ref.Length == 0 || ref.Offset+int64(ref.Length) > size {
+				return fmt.Errorf("block: series %d chunk ref out of bounds (offset %d len %d, file %d)", se.ID, ref.Offset, ref.Length, size)
+			}
+			if _, err := r.chunksFile.ReadAt(hdr[:], ref.Offset-12); err != nil {
+				return fmt.Errorf("block: series %d read chunk header: %w", se.ID, err)
+			}
+			gotID := binary.BigEndian.Uint64(hdr[:8])
+			gotLen := binary.BigEndian.Uint32(hdr[8:12])
+			if gotID != se.ID {
+				return fmt.Errorf("block: series %d chunk ref points to series %d's payload", se.ID, gotID)
+			}
+			if gotLen != ref.Length {
+				return fmt.Errorf("block: series %d chunk header length %d != ref length %d", se.ID, gotLen, ref.Length)
+			}
+		}
+	}
+	return nil
+}
+
 // Close marks the reader as closed and closes the chunks file if it was opened.
 func (r *Reader) Close() error {
 	r.mu.Lock()
