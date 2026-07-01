@@ -775,6 +775,138 @@ func TestNewBlockStore_InjectedUnrelatedSourceNotDeleted(t *testing.T) {
 	}
 }
 
+// TestNewBlockStore_SelfReferencingSourceNotDeleted is the regression for a block
+// whose Sources list names its own ID: it must not be able to authorize deleting
+// itself. It survives restart with all data intact.
+func TestNewBlockStore_SelfReferencingSourceNotDeleted(t *testing.T) {
+	dir := t.TempDir()
+	bs, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+	flushOneBlock(t, bs, "m", 0) // block A: ts 0..119000
+	aID := bs.BlockInfos()[0].ID
+	if err := bs.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	blocksDir := filepath.Join(dir, "metrics", "blocks")
+	metaPath := filepath.Join(blocksDir, aID, "meta.json")
+	raw, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatalf("read meta: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("unmarshal meta: %v", err)
+	}
+	m["sources"] = []any{aID} // self-reference
+	out, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal meta: %v", err)
+	}
+	if err := os.WriteFile(metaPath, out, 0o644); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+
+	reopened, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(blocksDir, aID)); err != nil {
+		t.Fatalf("self-referencing block %s deleted itself: %v", aID, err)
+	}
+	got, err := reopened.QueryRange(metricFingerprint(t, "m"), 0, 200000)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
+	if len(got) != 120 {
+		t.Fatalf("after restart query = %d samples, want 120", len(got))
+	}
+}
+
+// TestNewBlockStore_OlderBlockCannotSupersedeCorrection is the regression for
+// generation containment: an older block that lists a newer same-series correction
+// block in its Sources must NOT delete it, because it lacks the correction's higher
+// generation. The correction's value must still win after restart.
+func TestNewBlockStore_OlderBlockCannotSupersedeCorrection(t *testing.T) {
+	dir := t.TempDir()
+	bs, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+	lbls := makeLabels(t, map[string]string{"__name__": "m"})
+
+	// appendSealed writes one full (sealable) chunk of 120 samples over the same
+	// timestamps with the given value, then flushes it into a block. Blocks flush
+	// only sealed chunks, so a single sample would not produce a block.
+	appendSealed := func(val float64) {
+		t.Helper()
+		for i := 0; i < 120; i++ {
+			if err := bs.Append(lbls, 1000+int64(i)*1000, val); err != nil {
+				t.Fatalf("Append: %v", err)
+			}
+		}
+		if ok, err := bs.FlushBlock(); err != nil || !ok {
+			t.Fatalf("FlushBlock ok=%v err=%v", ok, err)
+		}
+	}
+
+	// Block A (older): m = 1.0 across ts 1000..120000, lower generations.
+	appendSealed(1.0)
+	aID := bs.BlockInfos()[0].ID
+
+	// Block B (newer): m = 2.0 correction across the same timestamps, higher generations.
+	appendSealed(2.0)
+	var bID string
+	for _, in := range bs.BlockInfos() {
+		if in.ID != aID {
+			bID = in.ID
+		}
+	}
+	if bID == "" {
+		t.Fatal("setup: could not identify newer block")
+	}
+	if err := bs.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Tamper: make the older block A claim the newer correction B as a source.
+	blocksDir := filepath.Join(dir, "metrics", "blocks")
+	metaPath := filepath.Join(blocksDir, aID, "meta.json")
+	raw, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatalf("read meta: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("unmarshal meta: %v", err)
+	}
+	m["sources"] = []any{bID}
+	out, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal meta: %v", err)
+	}
+	if err := os.WriteFile(metaPath, out, 0o644); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+
+	reopened, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(blocksDir, bID)); err != nil {
+		t.Fatalf("newer correction block %s was deleted by an older block: %v", bID, err)
+	}
+	s, found, err := reopened.QueryInstant(metricFingerprint(t, "m"), 1000)
+	if err != nil {
+		t.Fatalf("QueryInstant: %v", err)
+	}
+	if !found || s.Value != 2.0 {
+		t.Fatalf("after restart m@1000 = (found=%v, %v), want the correction 2.0", found, s.Value)
+	}
+}
+
 // TestNewBlockStore_ReconcilesCorruptMetaTime is the regression for trusting
 // meta.json's derived time/count fields: a tampered max_time must not silently drop
 // the block's data from queries. Startup reconciles the fields against the decoded
