@@ -79,6 +79,14 @@ func NewBlockStore(dataDir string) (*BlockStore, error) {
 			failed[e.Name()] = err
 			continue
 		}
+		// Bind each chunk reference to its physical chunk record (series ID + length
+		// in the chunk-file header) so a swapped/corrupt index cannot serve one
+		// series' samples under another's labels.
+		if err := r.ValidateChunkRefs(); err != nil {
+			_ = r.Close()
+			failed[e.Name()] = err
+			continue
+		}
 		opened[e.Name()] = r
 	}
 
@@ -684,6 +692,13 @@ func (bs *BlockStore) CompactOnce(plan func([]block.BlockInfo) [][]string) (int,
 			_ = bs.safeDeleteBlock(meta.BlockID)
 			return compacted, fmt.Errorf("blockstore: compacted block %s: %w", meta.BlockID, err)
 		}
+		// Bind chunk refs to their physical records before the block is published and
+		// its sources deleted (see Reader.ValidateChunkRefs).
+		if err := newReader.ValidateChunkRefs(); err != nil {
+			_ = newReader.Close()
+			_ = bs.safeDeleteBlock(meta.BlockID)
+			return compacted, fmt.Errorf("blockstore: compacted block %s chunk refs: %w", meta.BlockID, err)
+		}
 		// Deep-validate the merged output by decoding every chunk before any source
 		// is deleted: validateBlockSeries only checks label fingerprints, so a
 		// truncated/corrupt chunks file would otherwise pass and we would delete the
@@ -820,10 +835,47 @@ func (bs *BlockStore) ApplyRetention(now time.Time, retention time.Duration) (in
 			cleanupErr = fmt.Errorf("blockstore: remove reclaimed block %s from tmp: %w", r.Meta().BlockID, err)
 		}
 	}
+	// Blocks just left the live set, so a series whose head was drained by an earlier
+	// flush may now have no data anywhere. Drop such series from the in-memory index
+	// so SelectSeries and Cardinality stop reporting them (previously they lingered
+	// until the next restart rebuilt memory from surviving blocks).
+	if len(reclaimed) > 0 {
+		bs.gcEmptyHeadSeries()
+	}
+
 	if firstErr != nil {
 		return len(reclaimed), firstErr
 	}
 	return len(reclaimed), cleanupErr
+}
+
+// gcEmptyHeadSeries removes every empty-head in-memory series that no surviving
+// block covers. Candidates (empty heads) are gathered first, then checked against a
+// snapshot of the live blocks, and only then removed — so the memory and block locks
+// are never held at once, and a concurrent append re-populating a head is caught by
+// RemoveEmptySeries' re-check. Callers hold flushMu, so the block set is stable.
+func (bs *BlockStore) gcEmptyHeadSeries() {
+	candidates := bs.mem.EmptyHeadSeriesIDs()
+	if len(candidates) == 0 {
+		return
+	}
+	bs.mu.RLock()
+	readers := make([]*block.Reader, len(bs.blocks))
+	copy(readers, bs.blocks)
+	bs.mu.RUnlock()
+
+	for _, id := range candidates {
+		covered := false
+		for _, r := range readers {
+			if _, ok := r.SeriesByID(uint64(id)); ok {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			bs.mem.RemoveEmptySeries(id)
+		}
+	}
 }
 
 // sweepTmpDir best-effort removes leftover subdirectories under tmpDir: orphaned
