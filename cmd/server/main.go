@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -102,10 +103,29 @@ func main() {
 		close(compDone)
 	}()
 
-	httpSrv := &http.Server{Addr: cfg.HTTPAddr, Handler: srv}
+	// Bind synchronously so a bind failure (e.g. address already in use) is fatal
+	// immediately, rather than surfacing later during graceful shutdown. With
+	// port 0 the OS assigns a free ephemeral port; ln.Addr() reports the actual
+	// bound address, which we optionally publish to OBS_ADDR_FILE so a supervising
+	// process (e.g. the k6 bench runner) can discover it race-free.
+	ln, err := net.Listen("tcp", cfg.HTTPAddr)
+	if err != nil {
+		log.Error("failed to bind HTTP address", slog.String("addr", cfg.HTTPAddr), slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	boundAddr := ln.Addr().String()
+	if addrFile := os.Getenv("OBS_ADDR_FILE"); addrFile != "" {
+		if err := os.WriteFile(addrFile, []byte(boundAddr+"\n"), 0o644); err != nil {
+			log.Error("failed to write OBS_ADDR_FILE", slog.String("path", addrFile), slog.String("error", err.Error()))
+			_ = ln.Close()
+			os.Exit(1)
+		}
+	}
+
+	httpSrv := &http.Server{Handler: srv}
 	go func() {
-		log.Info("starting server", slog.String("addr", cfg.HTTPAddr), slog.String("data_dir", cfg.DataDir))
-		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Info("starting server", slog.String("addr", boundAddr), slog.String("data_dir", cfg.DataDir))
+		if err := httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Error("server stopped", slog.String("error", err.Error()))
 			stop() // unblock shutdown below
 		}
