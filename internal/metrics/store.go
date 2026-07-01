@@ -186,6 +186,38 @@ func (s *MemoryStore) Cardinality() (series, names, pairs int) {
 	return s.idx.SeriesCount(), s.idx.LabelNameCount(), s.idx.LabelPairCount()
 }
 
+// EmptyHeadSeriesIDs returns the IDs of series whose head has been fully drained
+// (no chunks remain after a flush). Such a series holds no in-memory samples; it is
+// still "active" only while some block covers it. The BlockStore uses this to GC
+// series whose last block was removed by retention (see gcEmptyHeadSeries).
+func (s *MemoryStore) EmptyHeadSeriesIDs() []SeriesID {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var ids []SeriesID
+	for id, ms := range s.series {
+		if len(ms.chunks) == 0 {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// RemoveEmptySeries drops a series and its postings from the in-memory index, but
+// only if its head is still empty (guarding against a sample that arrived after the
+// caller decided to GC it). Returns true if the series was removed. This keeps
+// SelectSeries and Cardinality from reporting a series with no data anywhere.
+func (s *MemoryStore) RemoveEmptySeries(id SeriesID) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ms, ok := s.series[id]
+	if !ok || len(ms.chunks) > 0 {
+		return false
+	}
+	delete(s.series, id)
+	s.idx.Delete(uint64(id), labelsToIndexPairs(ms.labels))
+	return true
+}
+
 func labelsToIndexPairs(l Labels) []index.Pair {
 	m := l.Map()
 	out := make([]index.Pair, 0, len(m))
