@@ -91,8 +91,18 @@ func NewBlockStore(dataDir string) (*BlockStore, error) {
 	maxGenByBlock := make(map[string]int64, len(opened))
 	var corrupt []string
 	for name, r := range opened {
-		mg, err := validateBlockChunks(r)
+		st, err := validateBlockChunks(r)
 		if err != nil {
+			_ = r.Close()
+			failed[name] = err
+			corrupt = append(corrupt, name)
+			continue
+		}
+		// Override meta's derived time/count fields with the chunk-decoded truth so
+		// corrupt or tampered values can no longer silently drop data (queries skip
+		// by MinTime) or trigger wrongful retention deletion (by MaxTime). This also
+		// makes the time bounds trustworthy for the supersede check below.
+		if err := reconcileBlockMeta(r, st); err != nil {
 			_ = r.Close()
 			failed[name] = err
 			corrupt = append(corrupt, name)
@@ -103,23 +113,27 @@ func NewBlockStore(dataDir string) (*BlockStore, error) {
 		// chunks. Syntactically valid generation corruption would otherwise pass and
 		// destroy recoverable source blocks. (Ordinary flush blocks rely on the
 		// reconstructed value only; a stale MaxGen there is harmless.)
-		if len(r.Meta().Sources) > 0 && mg != r.Meta().MaxGen {
+		if len(r.Meta().Sources) > 0 && st.maxGen != r.Meta().MaxGen {
 			_ = r.Close()
-			failed[name] = fmt.Errorf("survivor MaxGen %d disagrees with stored generations (max %d)", r.Meta().MaxGen, mg)
+			failed[name] = fmt.Errorf("survivor MaxGen %d disagrees with stored generations (max %d)", r.Meta().MaxGen, st.maxGen)
 			corrupt = append(corrupt, name)
 			continue
 		}
-		maxGenByBlock[name] = mg
+		maxGenByBlock[name] = st.maxGen
 	}
 	for _, name := range corrupt {
 		delete(opened, name)
 	}
 
 	// Superseded sources come only from survivors that opened AND fully validated.
+	// supersededBy records, per source ID, the survivors that list it, so a present
+	// source can be checked for genuine containment before it is deleted.
 	superseded := make(map[string]struct{})
+	supersededBy := make(map[string][]*block.Reader)
 	for _, r := range opened {
 		for _, src := range r.Meta().Sources {
 			superseded[src] = struct{}{}
+			supersededBy[src] = append(supersededBy[src], r)
 		}
 	}
 
@@ -138,8 +152,26 @@ func NewBlockStore(dataDir string) (*BlockStore, error) {
 
 	// Reclaim superseded sources now that their survivor is proven good. This
 	// converges a crash that left a compacted block beside its sources.
+	//
+	// A source that is still present and valid on disk is only deleted when a
+	// survivor provably contains its data (survivorSupersedesSource); otherwise the
+	// "source" is an unrelated block wrongly named in a tampered/corrupt Sources
+	// list, and deleting it would destroy live data — so we keep it as a live block.
+	// A source that failed to open (corrupt) cannot be inspected; it is reclaimed on
+	// the survivor's say-so as before (deleting already-unreadable data loses
+	// nothing and preserves crash-recovery convergence).
 	for name := range superseded {
 		if r, ok := opened[name]; ok {
+			verified := false
+			for _, sv := range supersededBy[name] {
+				if survivorSupersedesSource(sv, r) {
+					verified = true
+					break
+				}
+			}
+			if !verified {
+				continue // keep the unverified block live; do not delete it
+			}
 			_ = r.Close()
 			delete(opened, name)
 		}
@@ -591,6 +623,25 @@ func (bs *BlockStore) CompactOnce(plan func([]block.BlockInfo) [][]string) (int,
 			_ = bs.safeDeleteBlock(meta.BlockID)
 			return compacted, fmt.Errorf("blockstore: compacted block %s: %w", meta.BlockID, err)
 		}
+		// Deep-validate the merged output by decoding every chunk before any source
+		// is deleted: validateBlockSeries only checks label fingerprints, so a
+		// truncated/corrupt chunks file would otherwise pass and we would delete the
+		// sources that still hold the real data.
+		if _, err := validateBlockChunks(newReader); err != nil {
+			_ = newReader.Close()
+			_ = bs.safeDeleteBlock(meta.BlockID)
+			return compacted, fmt.Errorf("blockstore: compacted block %s chunks: %w", meta.BlockID, err)
+		}
+		// Guarantee the output actually supersedes each source (every source series
+		// present, time range covered) before reclaiming them — defense in depth
+		// against a compaction bug silently dropping a source's data.
+		for _, src := range sources {
+			if !survivorSupersedesSource(newReader, src) {
+				_ = newReader.Close()
+				_ = bs.safeDeleteBlock(meta.BlockID)
+				return compacted, fmt.Errorf("blockstore: compacted block %s does not supersede source %s", meta.BlockID, src.Meta().BlockID)
+			}
+		}
 
 		inGroup := make(map[string]struct{}, len(group))
 		for _, id := range group {
@@ -817,26 +868,93 @@ func validateBlockSeries(r *block.Reader) error {
 	return nil
 }
 
-// validateBlockChunks decodes every chunk in the block and returns the maximum
-// generation actually stored. OpenReader and validateBlockSeries only check the
-// index/postings; chunks are read lazily at query time. Run for every block at load
-// so (a) a corrupt survivor is demoted before its Sources are trusted (and deleted),
-// and (b) the generation floor is reconstructed from real generations rather than a
-// possibly-corrupt Meta.MaxGen. ReadChunk validates each payload via chunk.FromBytes.
-func validateBlockChunks(r *block.Reader) (int64, error) {
-	var maxGen int64
+// blockChunkStats holds the ground-truth figures reconstructed by decoding every
+// chunk in a block: they are what meta.json's derived fields are reconciled
+// against (see reconcileBlockMeta).
+type blockChunkStats struct {
+	maxGen     int64
+	minTs      int64
+	maxTs      int64
+	numSamples int
+	numSeries  int
+	hasSamples bool
+}
+
+// validateBlockChunks decodes every chunk in the block and reconstructs its true
+// stats (max generation, time bounds, sample/series counts). OpenReader and
+// validateBlockSeries only check the index/postings; chunks are read lazily at
+// query time. Run for every block at load so (a) a corrupt survivor is demoted
+// before its Sources are trusted (and deleted), (b) the generation floor is
+// reconstructed from real generations rather than a possibly-corrupt Meta.MaxGen,
+// and (c) meta's time/count fields can be reconciled against reality. ReadChunk
+// validates each payload via chunk.FromBytes.
+func validateBlockChunks(r *block.Reader) (blockChunkStats, error) {
+	st := blockChunkStats{numSeries: len(r.Series())}
 	for _, se := range r.Series() {
 		for _, ref := range se.Chunks {
 			c, err := r.ReadChunk(ref)
 			if err != nil {
-				return 0, fmt.Errorf("series %d chunk: %w", se.ID, err)
+				return blockChunkStats{}, fmt.Errorf("series %d chunk: %w", se.ID, err)
 			}
-			if g := c.MaxGen(); g > maxGen {
-				maxGen = g
+			if c.NumSamples() == 0 {
+				continue
 			}
+			if g := c.MaxGen(); g > st.maxGen {
+				st.maxGen = g
+			}
+			if !st.hasSamples {
+				st.minTs, st.maxTs, st.hasSamples = c.MinTs(), c.MaxTs(), true
+			} else {
+				if c.MinTs() < st.minTs {
+					st.minTs = c.MinTs()
+				}
+				if c.MaxTs() > st.maxTs {
+					st.maxTs = c.MaxTs()
+				}
+			}
+			st.numSamples += c.NumSamples()
 		}
 	}
-	return maxGen, nil
+	return st, nil
+}
+
+// reconcileBlockMeta brings a block's in-memory metadata into agreement with the
+// stats decoded from its chunks. meta.json's MinTime/MaxTime/NumSamples/NumSeries
+// are written from the chunks at flush time (block.Writer), so for an intact block
+// they already match and this is a no-op; any disagreement means the metadata is
+// corrupt or tampered. Because queries skip blocks by MinTime, retention deletes by
+// MaxTime, and source-reclamation trusts these fields, a stale value would silently
+// drop data or delete a block — so we override with the chunk-derived truth
+// (the chunks being authoritative) rather than trust the file.
+func reconcileBlockMeta(r *block.Reader, st blockChunkStats) error {
+	want := r.Meta()
+	if st.hasSamples {
+		want.MinTime, want.MaxTime = st.minTs, st.maxTs
+	} else {
+		want.MinTime, want.MaxTime = 0, 0
+	}
+	want.NumSamples = st.numSamples
+	want.NumSeries = st.numSeries
+	return r.SetReconciledMeta(want)
+}
+
+// survivorSupersedesSource reports whether survivor provably contains source's
+// data: its (chunk-reconciled) time range covers the source's, and every series in
+// the source is present in the survivor. A real compaction survivor is built from
+// its sources, so this always holds for them; it fails for an unrelated block ID
+// injected into a Sources list, preventing that block from being deleted on the
+// say-so of untrusted metadata.
+func survivorSupersedesSource(survivor, source *block.Reader) bool {
+	sm, srcm := survivor.Meta(), source.Meta()
+	if srcm.NumSamples > 0 && (sm.MinTime > srcm.MinTime || sm.MaxTime < srcm.MaxTime) {
+		return false
+	}
+	for _, se := range source.Series() {
+		if _, ok := survivor.SeriesByID(se.ID); !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func blockPairsToLabels(pairs []block.LabelPair) (Labels, error) {
