@@ -68,9 +68,11 @@ func mustParse(b *testing.B, q string) metrics.Expr {
 	return expr
 }
 
-// BenchmarkInstant_InMemory measures EvalInstant over head chunks.
+// BenchmarkInstant_InMemory measures EvalInstant over head chunks. It uses the
+// same 10k series × 120 samples dataset as BenchmarkInstant_Persisted so the two
+// differ only in storage location (head vs block), not in dataset size.
 func BenchmarkInstant_InMemory(b *testing.B) {
-	eng := buildMemEngine(b, 10000, 1)
+	eng := buildMemEngine(b, 10000, 120)
 	expr := mustParse(b, benchSelector)
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -86,8 +88,10 @@ func BenchmarkInstant_InMemory(b *testing.B) {
 }
 
 // BenchmarkInstant_Persisted measures EvalInstant reading only from a persisted
-// block (memory drained by reopen). The empty-result guard proves it is actually
-// reading the block rather than silently matching nothing.
+// block (memory drained by reopen). It uses the same 10k series × 120 samples
+// dataset as BenchmarkInstant_InMemory so the comparison isolates the persistence
+// cost. The empty-result guard proves it is actually reading the block rather
+// than silently matching nothing.
 func BenchmarkInstant_Persisted(b *testing.B) {
 	eng, cleanup := buildPersistedKBlocks(b, 10000, 1)
 	defer cleanup()
