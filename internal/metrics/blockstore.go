@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -153,16 +154,22 @@ func NewBlockStore(dataDir string) (*BlockStore, error) {
 	// Reclaim superseded sources now that their survivor is proven good. This
 	// converges a crash that left a compacted block beside its sources.
 	//
-	// A source that is still present and valid on disk is only deleted when a
-	// survivor provably contains its samples at ≥ generation (survivorSupersedesSource);
-	// otherwise the "source" is an unrelated/self/older block wrongly named in a
-	// tampered or corrupt Sources list, and deleting it would destroy live data or
-	// resurrect a stale value — so we keep it as a live block. A source that failed to
-	// open (corrupt) cannot be inspected; it is reclaimed on the survivor's say-so as
-	// before (deleting already-unreadable data loses nothing and preserves
-	// crash-recovery convergence).
-	gensCache := make(map[string]map[uint64]map[int64]int64, len(opened))
-	survivorGens := func(sv *block.Reader) (map[uint64]map[int64]int64, error) {
+	// Validation is done for the WHOLE graph while every reader is still open, then
+	// deletion happens in a separate phase. Deleting inside the validation loop would
+	// close an intermediate survivor (e.g. a level-1 block that is itself superseded
+	// by a level-2 block) before that survivor's own sources were verified, so a
+	// valid multi-level compaction chain would be reclaimed only partially depending
+	// on map iteration order.
+	//
+	// A present, valid source is only deleted when a survivor provably contains its
+	// samples faithfully at ≥ generation (survivorSupersedesSource); otherwise the
+	// "source" is an unrelated/self/older/corrupted block wrongly named in a tampered
+	// Sources list, and deleting it would destroy live data or resurrect a stale
+	// value — so we keep it live. A source that failed to open (corrupt) cannot be
+	// inspected; it is reclaimed on the survivor's say-so as before (deleting
+	// already-unreadable data loses nothing and preserves crash-recovery convergence).
+	gensCache := make(map[string]map[uint64]map[int64]sampleGV, len(opened))
+	survivorGens := func(sv *block.Reader) (map[uint64]map[int64]sampleGV, error) {
 		id := sv.Meta().BlockID
 		if g, ok := gensCache[id]; ok {
 			return g, nil
@@ -174,22 +181,57 @@ func NewBlockStore(dataDir string) (*BlockStore, error) {
 		gensCache[id] = g
 		return g, nil
 	}
+
+	// Phase 1 (readers open): for each present source, record which survivors
+	// verifiably supersede it. verifiedBy[name] empty (or name absent) means the
+	// block is a retention root — no proven superseder, so it must be kept.
+	verifiedBy := make(map[string][]string)
 	for name := range superseded {
-		if r, ok := opened[name]; ok {
-			verified := false
-			for _, sv := range supersededBy[name] {
-				gens, err := survivorGens(sv)
-				if err != nil {
-					continue // cannot verify against this survivor; try the next
-				}
-				ok, err := survivorSupersedesSource(gens, sv.Meta().BlockID, r)
-				if err == nil && ok {
-					verified = true
+		r, ok := opened[name]
+		if !ok {
+			continue // corrupt/absent source: handled by trust-based reclaim below
+		}
+		for _, sv := range supersededBy[name] {
+			gens, err := survivorGens(sv)
+			if err != nil {
+				continue // cannot verify against this survivor; try the next
+			}
+			ok, err := survivorSupersedesSource(gens, sv.Meta().BlockID, r)
+			if err == nil && ok {
+				verifiedBy[name] = append(verifiedBy[name], sv.Meta().BlockID)
+			}
+		}
+	}
+
+	// Phase 2: a present block is safe to delete only if it reaches a retained root
+	// through verified-superseder edges — i.e. one of its verified superseders is
+	// itself retained or already reclaimable. Propagating outward from the roots (a
+	// fixpoint) guarantees every reclaimed block's data lives on in a retained block,
+	// and refuses to delete both halves of a corrupt mutual-supersession cycle.
+	isRoot := func(id string) bool { _, ok := verifiedBy[id]; return !ok }
+	reclaim := make(map[string]bool)
+	for changed := true; changed; {
+		changed = false
+		for name, svs := range verifiedBy {
+			if reclaim[name] {
+				continue
+			}
+			for _, svID := range svs {
+				if isRoot(svID) || reclaim[svID] {
+					reclaim[name] = true
+					changed = true
 					break
 				}
 			}
-			if !verified {
-				continue // keep the unverified block live; do not delete it
+		}
+	}
+
+	// Phase 3: delete. Present blocks only when marked reclaimable; corrupt/absent
+	// superseded sources are reclaimed on trust (as before).
+	for name := range superseded {
+		if r, ok := opened[name]; ok {
+			if !reclaim[name] {
+				continue // retained: no verified path to a surviving copy
 			}
 			_ = r.Close()
 			delete(opened, name)
@@ -985,14 +1027,21 @@ func reconcileBlockMeta(r *block.Reader, st blockChunkStats) error {
 	return r.SetReconciledMeta(want)
 }
 
+// sampleGV is the winning generation and its raw value bits for one (series, ts).
+type sampleGV struct {
+	gen  int64
+	bits uint64
+}
+
 // decodeBlockGens decodes every chunk in r into per-series maps of
-// timestamp -> highest write generation stored at that timestamp. This is the
-// ground truth used to prove one block supersedes another (survivorSupersedesSource):
-// presence and generation, not merely metadata, decide reclamation.
-func decodeBlockGens(r *block.Reader) (map[uint64]map[int64]int64, error) {
-	out := make(map[uint64]map[int64]int64, len(r.Series()))
+// timestamp -> the highest-generation sample stored there (its generation and raw
+// value bits). This is the ground truth used to prove one block supersedes another
+// (survivorSupersedesSource): presence, generation, and value — not merely
+// metadata — decide reclamation.
+func decodeBlockGens(r *block.Reader) (map[uint64]map[int64]sampleGV, error) {
+	out := make(map[uint64]map[int64]sampleGV, len(r.Series()))
 	for _, se := range r.Series() {
-		m := make(map[int64]int64)
+		m := make(map[int64]sampleGV)
 		for _, ref := range se.Chunks {
 			c, err := r.ReadChunk(ref)
 			if err != nil {
@@ -1000,10 +1049,10 @@ func decodeBlockGens(r *block.Reader) (map[uint64]map[int64]int64, error) {
 			}
 			it := c.Iterator()
 			for it.Next() {
-				ts, _ := it.At()
+				ts, val := it.At()
 				g := it.Gen()
-				if cur, ok := m[ts]; !ok || g > cur {
-					m[ts] = g
+				if cur, ok := m[ts]; !ok || g > cur.gen {
+					m[ts] = sampleGV{gen: g, bits: math.Float64bits(val)}
 				}
 			}
 		}
@@ -1012,21 +1061,26 @@ func decodeBlockGens(r *block.Reader) (map[uint64]map[int64]int64, error) {
 	return out, nil
 }
 
-// survivorSupersedesSource reports whether survivor provably contains every sample
-// in source at an equal-or-higher write generation — the only condition under which
-// deleting source cannot lose data or resurrect a stale value under last-write-wins.
-// survivorGens must be decodeBlockGens(survivor).
+// survivorSupersedesSource reports whether survivor is a faithful, at-least-as-new
+// copy of every sample in source — the only condition under which deleting source
+// cannot lose data or resurrect a stale/corrupt value under last-write-wins. For
+// each source sample the survivor must hold the same (series, ts) with either a
+// strictly higher generation (a legitimately newer write, value may differ) or the
+// same generation AND identical value bits (a faithful copy). survivorGens must be
+// decodeBlockGens(survivor).
 //
 // This is deliberately stricter than metadata/time/series-ID heuristics, which are
 // forgeable from mutable meta.json:
 //   - a self-reference (survivor lists its own ID) is rejected, so a block cannot
 //     authorize deleting itself;
-//   - an older block cannot supersede a newer same-series correction, because the
-//     correction's higher generation is absent from the older block.
+//   - an older block cannot supersede a newer same-series correction (the higher
+//     generation is absent from the older block);
+//   - an equal-generation but value-corrupted survivor cannot delete the intact
+//     source, because the value bits disagree.
 //
 // A genuine compaction survivor is built from its sources with last-write-wins, so
-// it always holds every source sample at ≥ its generation and this passes.
-func survivorSupersedesSource(survivorGens map[uint64]map[int64]int64, survivorID string, source *block.Reader) (bool, error) {
+// it always holds every source sample faithfully at ≥ its generation and this passes.
+func survivorSupersedesSource(survivorGens map[uint64]map[int64]sampleGV, survivorID string, source *block.Reader) (bool, error) {
 	if survivorID == source.Meta().BlockID {
 		return false, nil // a block can never be its own source
 	}
@@ -1042,9 +1096,13 @@ func survivorSupersedesSource(survivorGens map[uint64]map[int64]int64, survivorI
 			}
 			it := c.Iterator()
 			for it.Next() {
-				ts, _ := it.At()
-				if g, ok := sg[ts]; !ok || g < it.Gen() {
+				ts, val := it.At()
+				sv, ok := sg[ts]
+				if !ok || sv.gen < it.Gen() {
 					return false, nil // sample missing, or survivor's is older
+				}
+				if sv.gen == it.Gen() && sv.bits != math.Float64bits(val) {
+					return false, nil // same generation but conflicting value: not a faithful copy
 				}
 			}
 		}
