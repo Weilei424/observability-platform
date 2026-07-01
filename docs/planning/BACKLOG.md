@@ -257,14 +257,15 @@ Design: `docs/superpowers/specs/2026-06-29-phase-3.5-performance-benchmarks-desi
 - [x] Reference existing `blockstore_bench_test.go` / `index_bench_test.go` / `reader_bench_test.go` (indexed vs full-scan select) results in the report — no duplication
 
 **k6 HTTP load tests (end-to-end; real p50/p95/p99)**
-- [x] `bench/k6/lib.js` — shared base URL, label scheme (query scripts select what `ingest.js` seeds), payload builders, cardinality knobs, `handleSummary()` → `bench/results/`
-- [x] `bench/k6/ingest.js` — concurrent VUs POST batched samples to `/api/v1/ingest/metrics`; req/s, samples/s, p50/p95/p99; `thresholds`; doubles as the seeder; `timestamp_ms = Date.now()`
+- [x] `bench/k6/lib.js` — shared base URL, label scheme (query scripts select what `seed.js` seeds), payload builders (random + deterministic), cardinality knobs, `handleSummary()` → `bench/results/` (JSON + correctness `.status` marker)
+- [x] `bench/k6/seed.js` — deterministic `shared-iterations` seed: `CARDINALITY` series × 1 sample at a fixed timestamp, so query scenarios run against a reproducible dataset
+- [x] `bench/k6/ingest.js` — concurrent VUs POST batched samples to `/api/v1/ingest/metrics`; req/s, samples/s, p50/p95/p99; `thresholds`; random live-load throughput (runs after the seed, not the seeder); `timestamp_ms = Date.now()`
 - [x] `bench/k6/instant_query.js` — instant-query p50/p95/p99 against seeded series; `check()` on every response
 - [x] `bench/k6/range_query.js` — range-query p50/p95/p99 (1h window / 15s step); `check()` on every response
 - [x] `bench/k6/README.md` — standalone k6 run instructions
 
 **Orchestration & tooling**
-- [x] `bench/run.sh` — resolve k6 (PATH then `$(go env GOPATH)/bin`, else print `go install go.k6.io/k6@latest` and exit non-zero), build server, start on fresh temp data dir + wait `/readyz`, seed, run k6 scenarios → JSON summaries, trap-based teardown
+- [x] `bench/run.sh` — resolve k6 (PATH then `$(go env GOPATH)/bin`, else print `go install go.k6.io/k6@latest` and exit non-zero), build server, start on a free ephemeral port + fresh temp data dir + wait `/readyz` (aborts if our PID died — no benchmarking a foreign backend), deterministic seed, run k6 query then ingest scenarios → JSON summaries, hard gate on correctness + latency thresholds (`BENCH_ALLOW_THRESHOLD_BREACH=1` to tolerate), trap-based teardown
 - [x] Makefile targets: `bench-go`, `bench-k6`, `bench`
 - [x] `.gitignore` += `bench/results/`
 
