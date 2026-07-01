@@ -35,11 +35,12 @@ throughput scenario (last, so its random series/timestamps don't perturb the
 dataset the queries measured). Raw JSON summaries are written to `bench/results/`
 (gitignored).
 
-**Gating (two tiers):** k6 correctness checks (e.g. non-empty query results) are a
-**hard** gate — a failed check aborts the run via a `.status` marker. Latency
-thresholds are **soft** — a thresholds-breached exit (k6 code 99) is recorded as a
-warning so a slow/loaded box still captures numbers without masking correctness
-regressions.
+**Gating:** both correctness and latency are **hard** gates. A failed k6 check
+(e.g. an empty query result) aborts the run via a `.status` marker; a latency
+threshold breach (k6 exit 99) also aborts. The latency thresholds are loose
+gross-regression bounds, not SLAs. On a known-slow box, set
+`BENCH_ALLOW_THRESHOLD_BREACH=1` to downgrade a latency breach to a recorded
+warning (correctness stays hard).
 
 ## Methodology
 
@@ -113,8 +114,8 @@ reproducible run-to-run.
 | Ingest (`POST /api/v1/ingest/metrics`) | 2.9 | 3,417.0 | 3,445.1 | 3,445.2 |
 
 Ingest throughput: 292.7 samples/s (from the `samples_sent` rate). The ingest
-scenario breaches the soft 2000ms latency threshold on this contended WSL2 box
-(fsync-bound); it is recorded as a warning, and all correctness checks passed.
+scenario is fsync-bound (~3.4s p95 here) and passes under the loose 8000ms
+gross-regression bound; all correctness checks passed.
 
 > **Selector note:** The instant scenario uses `{job="bench"}` (all seeded series,
 > high cardinality); the range scenario uses `{instance="inst-7"}` (~1/50 of series,
