@@ -8,15 +8,18 @@ import (
 )
 
 // fillChunk writes 120 samples (one full chunk) following a value pattern.
-// Generations are 1..120 (all <= chunk.MaxGeneration).
+// Generations are 1..120 (all <= chunk.MaxGeneration). The gauge random-walk uses
+// a locally seeded generator so every call produces byte-identical output and the
+// reported bytes/sample is reproducible across runs.
 func fillChunk(c *chunk.Chunk, pattern string) {
+	r := rand.New(rand.NewSource(1))
 	v := 0.0
 	for i := int64(0); i < 120; i++ {
 		switch pattern {
 		case "counter":
 			v += 1
 		case "gauge":
-			v += rand.NormFloat64()
+			v += r.NormFloat64()
 		case "constant":
 			v = 42.0
 		}
