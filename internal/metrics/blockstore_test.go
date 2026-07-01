@@ -1,6 +1,7 @@
 package metrics_test
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -545,6 +546,39 @@ func TestBlockStore_ApplyRetention_Boundary(t *testing.T) {
 	}
 }
 
+// TestBlockStore_Retention_GCsEmptyHeadSeries is the regression for a flushed-out
+// series lingering in the label index after its only block is deleted by retention:
+// SelectSeries kept matching it and cardinality kept counting it until restart.
+func TestBlockStore_Retention_GCsEmptyHeadSeries(t *testing.T) {
+	bs, err := metrics.NewBlockStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+	flushOneBlock(t, bs, "m", 0) // series m flushed to one block; memory head drained
+
+	sel := metrics.Selector{MetricName: "m"}
+	if matched, err := bs.SelectSeries(sel); err != nil || len(matched) != 1 {
+		t.Fatalf("before retention SelectSeries = %d,%v; want 1,nil", len(matched), err)
+	}
+	if series, _, _ := bs.Cardinality(); series != 1 {
+		t.Fatalf("before retention cardinality series = %d, want 1", series)
+	}
+
+	// Delete the only block (cutoff strictly past its MaxTime of 119000).
+	n, err := bs.ApplyRetention(time.UnixMilli(119002), 1*time.Millisecond)
+	if err != nil || n != 1 {
+		t.Fatalf("ApplyRetention = %d,%v; want 1,nil", n, err)
+	}
+
+	// Without restart, the series must be gone from both the selector and cardinality.
+	if matched, err := bs.SelectSeries(sel); err != nil || len(matched) != 0 {
+		t.Fatalf("after retention SelectSeries = %d,%v; want 0,nil", len(matched), err)
+	}
+	if series, _, _ := bs.Cardinality(); series != 0 {
+		t.Fatalf("after retention cardinality series = %d, want 0", series)
+	}
+}
+
 func TestBlockStore_StartupGC_RemovesSupersededSources(t *testing.T) {
 	dir := t.TempDir()
 	bs, _ := metrics.NewBlockStore(dir)
@@ -1032,6 +1066,91 @@ func TestNewBlockStore_NestedCompactionChainFullyReclaimed(t *testing.T) {
 	}
 	if len(got) != 480 {
 		t.Fatalf("after reclaim query = %d samples, want 480", len(got))
+	}
+}
+
+// TestNewBlockStore_SwappedChunkRefsRejected is the regression for chunk refs not
+// being bound to their physical series records: swapping two valid series' chunk
+// refs in the index (so series A's ref points at series B's payload) must be
+// rejected at load, not silently serve B's samples under A's labels.
+func TestNewBlockStore_SwappedChunkRefsRejected(t *testing.T) {
+	dir := t.TempDir()
+	blocksDir := filepath.Join(dir, "metrics", "blocks")
+	tmpDir := filepath.Join(dir, "metrics", "tmp")
+	for _, d := range []string{blocksDir, tmpDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+
+	pairsOf := func(l metrics.Labels) []block.LabelPair {
+		mp := l.Map()
+		ps := make([]block.LabelPair, 0, len(mp))
+		for k, v := range mp {
+			ps = append(ps, block.LabelPair{Name: k, Value: v})
+		}
+		sort.Slice(ps, func(i, j int) bool { return ps[i].Name < ps[j].Name })
+		return ps
+	}
+
+	laA := makeLabels(t, map[string]string{"__name__": "m", "k": "a"})
+	laB := makeLabels(t, map[string]string{"__name__": "m", "k": "b"})
+	cA := chunk.NewChunk()
+	if err := cA.Append(1000, 1.0, 1); err != nil {
+		t.Fatalf("append A: %v", err)
+	}
+	cB := chunk.NewChunk()
+	if err := cB.Append(1000, 2.0, 2); err != nil {
+		t.Fatalf("append B: %v", err)
+	}
+
+	w, err := block.NewWriter(blocksDir, tmpDir)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	if err := w.AddSeries(uint64(laA.Fingerprint()), pairsOf(laA), []*chunk.Chunk{cA}); err != nil {
+		t.Fatalf("AddSeries A: %v", err)
+	}
+	if err := w.AddSeries(uint64(laB.Fingerprint()), pairsOf(laB), []*chunk.Chunk{cB}); err != nil {
+		t.Fatalf("AddSeries B: %v", err)
+	}
+	meta, err := w.Commit()
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	// Swap the two series' single chunk-ref (offset,length) records in the index, so
+	// each series entry now points at the other's payload.
+	idxPath := filepath.Join(blocksDir, meta.BlockID, "index")
+	raw, err := os.ReadFile(idxPath)
+	if err != nil {
+		t.Fatalf("read index: %v", err)
+	}
+	p := 4 // skip numSeries
+	n := int(binary.BigEndian.Uint32(raw[0:4]))
+	starts := make([]int, 0, n)
+	for i := 0; i < n; i++ {
+		p += 8 // series id
+		ll := int(binary.BigEndian.Uint32(raw[p:]))
+		p += 4 + ll // label-data length + data
+		nc := int(binary.BigEndian.Uint32(raw[p:]))
+		p += 4
+		starts = append(starts, p) // start of this series' chunk-ref records
+		p += nc * 12
+	}
+	if len(starts) != 2 {
+		t.Fatalf("setup: parsed %d series, want 2", len(starts))
+	}
+	a := append([]byte(nil), raw[starts[0]:starts[0]+12]...)
+	b := append([]byte(nil), raw[starts[1]:starts[1]+12]...)
+	copy(raw[starts[0]:], b)
+	copy(raw[starts[1]:], a)
+	if err := os.WriteFile(idxPath, raw, 0o644); err != nil {
+		t.Fatalf("write index: %v", err)
+	}
+
+	if _, err := metrics.NewBlockStore(dir); err == nil {
+		t.Fatal("NewBlockStore accepted a block with swapped chunk refs, want error")
 	}
 }
 
