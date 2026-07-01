@@ -91,7 +91,8 @@ export function summaryHandler(name) {
 
     // Correctness gate: any failed check (e.g. HTTP 200 with an empty result set)
     // marks the run FAIL. This is written to a status file the runner treats as a
-    // HARD failure, independent of the soft latency thresholds (k6 exit 99).
+    // HARD failure, tracked separately from the latency thresholds (k6 exit 99) so
+    // a correctness regression is never masked by the latency escape hatch.
     const checks = (data.metrics.checks || {}).values || {};
     const checksOk = checks.rate === undefined || checks.rate >= 1;
     lines.push('checks       : ' + (checksOk ? 'OK' : 'FAIL (rate=' + (checks.rate || 0).toFixed(3) + ')'));
