@@ -546,6 +546,49 @@ func TestBlockStore_ApplyRetention_Boundary(t *testing.T) {
 	}
 }
 
+// TestBlockStore_FlushBlock_ValidatesBeforePublishing is the regression for the
+// ordinary flush path publishing an unvalidated block: if the committed block is
+// corrupt, FlushBlock must fail and leave the in-memory sealed chunks intact (so
+// the WAL layer will not checkpoint away the only other copy), rather than register
+// the bad block and discard memory.
+func TestBlockStore_FlushBlock_ValidatesBeforePublishing(t *testing.T) {
+	dir := t.TempDir()
+	bs, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+
+	// Corrupt the block on disk right after commit, before validation/registration.
+	blocksDir := filepath.Join(dir, "metrics", "blocks")
+	bs.SetTestAfterFlushCommit(func(blockID string) {
+		if err := os.WriteFile(filepath.Join(blocksDir, blockID, "chunks"), []byte{}, 0o644); err != nil {
+			t.Fatalf("corrupt chunks: %v", err)
+		}
+	})
+
+	lbls := makeLabels(t, map[string]string{"__name__": "m"})
+	for i := 0; i < 120; i++ { // one full sealed chunk
+		if err := bs.Append(lbls, int64(i)*1000, float64(i)); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+
+	if ok, err := bs.FlushBlock(); ok || err == nil {
+		t.Fatalf("FlushBlock on a corrupt block = (%v, %v), want (false, error)", ok, err)
+	}
+	// No block registered, and the sealed chunks are still queryable from memory.
+	if infos := bs.BlockInfos(); len(infos) != 0 {
+		t.Fatalf("corrupt block was registered: %d blocks", len(infos))
+	}
+	got, err := bs.QueryRange(metricFingerprint(t, "m"), 0, 200000)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
+	if len(got) != 120 {
+		t.Fatalf("after failed flush memory query = %d samples, want 120 (data must survive)", len(got))
+	}
+}
+
 // TestBlockStore_Retention_GCsEmptyHeadSeries is the regression for a flushed-out
 // series lingering in the label index after its only block is deleted by retention:
 // SelectSeries kept matching it and cardinality kept counting it until restart.
