@@ -642,9 +642,13 @@ func (bs *BlockStore) FlushBlock() (bool, error) {
 		bs.testAfterFlushCommit(meta.BlockID)
 	}
 
-	// Re-open the committed block as a reader using the block ID from Commit.
+	// Re-open the committed block as a reader using the block ID from Commit. Delete
+	// the committed directory on failure (as the validation branches below do), so a
+	// block that cannot even be opened is not left orphaned on disk where it would
+	// fail the next startup; the memory snapshot is untouched for a later retry.
 	newReader, err := block.OpenReader(filepath.Join(bs.blockDir, meta.BlockID))
 	if err != nil {
+		_ = bs.safeDeleteBlock(meta.BlockID)
 		return false, fmt.Errorf("blockstore: open new block %s: %w", meta.BlockID, err)
 	}
 
