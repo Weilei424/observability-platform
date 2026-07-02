@@ -589,6 +589,65 @@ func TestBlockStore_FlushBlock_ValidatesBeforePublishing(t *testing.T) {
 	}
 }
 
+// TestBlockStore_FlushBlock_OpenFailureCleansUpAndRetrySucceeds is the regression
+// for the OpenReader-error branch leaking a committed block: a block that cannot be
+// re-opened after commit must be deleted, so a later successful retry leaves the
+// store in a state that restarts cleanly (no orphaned corrupt block).
+func TestBlockStore_FlushBlock_OpenFailureCleansUpAndRetrySucceeds(t *testing.T) {
+	dir := t.TempDir()
+	bs, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+
+	blocksDir := filepath.Join(dir, "metrics", "blocks")
+	corrupt := true
+	bs.SetTestAfterFlushCommit(func(blockID string) {
+		if corrupt { // corrupt the index so OpenReader fails
+			if err := os.WriteFile(filepath.Join(blocksDir, blockID, "index"), []byte("garbage"), 0o644); err != nil {
+				t.Fatalf("corrupt index: %v", err)
+			}
+		}
+	})
+
+	lbls := makeLabels(t, map[string]string{"__name__": "m"})
+	for i := 0; i < 120; i++ { // one full sealed chunk
+		if err := bs.Append(lbls, int64(i)*1000, float64(i)); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+
+	// First flush fails at OpenReader; the committed dir must be cleaned up.
+	if ok, err := bs.FlushBlock(); ok || err == nil {
+		t.Fatalf("first FlushBlock = (%v, %v), want (false, error)", ok, err)
+	}
+	if entries, _ := os.ReadDir(blocksDir); len(entries) != 0 {
+		t.Fatalf("orphaned block dir left after failed flush: %d entries", len(entries))
+	}
+
+	// Disable corruption and retry; the sealed chunks are still in memory.
+	corrupt = false
+	if ok, err := bs.FlushBlock(); !ok || err != nil {
+		t.Fatalf("retry FlushBlock = (%v, %v), want (true, nil)", ok, err)
+	}
+	if err := bs.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Restart must succeed (no orphaned corrupt block) with all data intact.
+	reopened, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("restart after retry: %v", err)
+	}
+	got, err := reopened.QueryRange(metricFingerprint(t, "m"), 0, 200000)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
+	if len(got) != 120 {
+		t.Fatalf("after retry+restart query = %d samples, want 120", len(got))
+	}
+}
+
 // TestBlockStore_Retention_GCsEmptyHeadSeries is the regression for a flushed-out
 // series lingering in the label index after its only block is deleted by retention:
 // SelectSeries kept matching it and cardinality kept counting it until restart.
