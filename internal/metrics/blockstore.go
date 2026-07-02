@@ -26,6 +26,18 @@ type BlockStore struct {
 	tmpDir   string
 	mu       sync.RWMutex
 	flushMu  sync.Mutex // serializes concurrent FlushBlock calls
+
+	// testAfterFlushCommit, if non-nil, is called in FlushBlock right after the
+	// block is committed to disk but before it is validated and registered. Tests
+	// only: used to inject on-disk corruption and assert pre-publication validation.
+	testAfterFlushCommit func(blockID string)
+}
+
+// SetTestAfterFlushCommit installs a hook that fires in FlushBlock after Commit but
+// before the committed block is validated. Must not be called after concurrent use
+// begins. Tests only.
+func (bs *BlockStore) SetTestAfterFlushCommit(fn func(blockID string)) {
+	bs.testAfterFlushCommit = fn
 }
 
 // NewBlockStore loads existing blocks from dataDir/metrics/blocks/ and prepares
@@ -626,10 +638,37 @@ func (bs *BlockStore) FlushBlock() (bool, error) {
 		return false, fmt.Errorf("blockstore: commit block: %w", err)
 	}
 
+	if bs.testAfterFlushCommit != nil {
+		bs.testAfterFlushCommit(meta.BlockID)
+	}
+
 	// Re-open the committed block as a reader using the block ID from Commit.
 	newReader, err := block.OpenReader(filepath.Join(bs.blockDir, meta.BlockID))
 	if err != nil {
 		return false, fmt.Errorf("blockstore: open new block %s: %w", meta.BlockID, err)
+	}
+
+	// Validate the committed block before it becomes the only copy of this data. The
+	// sealed chunks are about to be dropped from memory, and WALStore.FlushBlock may
+	// then checkpoint and delete the WAL segments covering them — so a silently
+	// corrupt block (a bad write or writer regression) must be caught here, while
+	// memory and the WAL still hold the data, not at the next restart. These are the
+	// same pre-publication checks compaction runs. On failure the block is deleted
+	// and the memory snapshot is left intact for a later retry.
+	if err := validateBlockSeries(newReader); err != nil {
+		_ = newReader.Close()
+		_ = bs.safeDeleteBlock(meta.BlockID)
+		return false, fmt.Errorf("blockstore: flushed block %s: %w", meta.BlockID, err)
+	}
+	if err := newReader.ValidateChunkRefs(); err != nil {
+		_ = newReader.Close()
+		_ = bs.safeDeleteBlock(meta.BlockID)
+		return false, fmt.Errorf("blockstore: flushed block %s chunk refs: %w", meta.BlockID, err)
+	}
+	if _, err := validateBlockChunks(newReader); err != nil {
+		_ = newReader.Close()
+		_ = bs.safeDeleteBlock(meta.BlockID)
+		return false, fmt.Errorf("blockstore: flushed block %s chunks: %w", meta.BlockID, err)
 	}
 
 	// Register the new reader before discarding sealed chunks from memory.
