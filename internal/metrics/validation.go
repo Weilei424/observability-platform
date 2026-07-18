@@ -3,8 +3,6 @@ package metrics
 import (
 	"fmt"
 	"regexp"
-	"strings"
-	"unicode/utf8"
 )
 
 var (
@@ -12,22 +10,9 @@ var (
 	metricNameRe = regexp.MustCompile(`^[a-zA-Z_:][a-zA-Z0-9_:]*$`)
 )
 
-// ValidationError is a typed error returned by label and sample validation.
-type ValidationError struct {
-	Field   string
-	Message string
-}
-
-func (e *ValidationError) Error() string {
-	return fmt.Sprintf("validation error: %s: %s", e.Field, e.Message)
-}
-
-// validateLabelMap checks that m contains a valid __name__ and valid label names and values.
-// Limits are sized to match WAL encoding constraints: ≤255 total labels, ≤255-byte name, ≤65535-byte value.
-func validateLabelMap(m map[string]string) error {
-	if len(m) > 255 {
-		return &ValidationError{Field: "labels", Message: "too many labels: maximum is 255"}
-	}
+// validateMetricName enforces the metrics-domain requirement that m contains a
+// valid __name__. Generic label-name/value validation lives in internal/labels.
+func validateMetricName(m map[string]string) error {
 	name, ok := m["__name__"]
 	if !ok {
 		return &ValidationError{Field: "__name__", Message: "required"}
@@ -37,26 +22,6 @@ func validateLabelMap(m map[string]string) error {
 	}
 	if len(name) > 65535 {
 		return &ValidationError{Field: "__name__", Message: "metric name exceeds 65535-byte limit"}
-	}
-	for k, v := range m {
-		if k == "__name__" {
-			continue
-		}
-		if strings.HasPrefix(k, "__") {
-			return &ValidationError{Field: k, Message: "label name with __ prefix is reserved"}
-		}
-		if !labelNameRe.MatchString(k) {
-			return &ValidationError{Field: k, Message: fmt.Sprintf("invalid label name %q", k)}
-		}
-		if len(k) > 255 {
-			return &ValidationError{Field: k, Message: "label name exceeds 255-byte limit"}
-		}
-		if !utf8.ValidString(v) {
-			return &ValidationError{Field: k, Message: "label value must be valid UTF-8"}
-		}
-		if len(v) > 65535 {
-			return &ValidationError{Field: k, Message: "label value exceeds 65535-byte limit"}
-		}
 	}
 	return nil
 }
