@@ -2,6 +2,7 @@ package labels_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/masonwheeler/observability-platform/internal/labels"
@@ -54,8 +55,23 @@ func TestNew_NameLabelNotRequired(t *testing.T) {
 }
 
 func TestNew_NameLabelAllowed(t *testing.T) {
-	if _, err := labels.New(map[string]string{"__name__": "anything", "service": "api"}); err != nil {
-		t.Errorf("__name__ must be permitted as an ordinary label: %v", err)
+	// The shared layer must NOT apply metric-name charset validation to __name__.
+	// "123-invalid" (leading digit + hyphen) is invalid as a Prometheus metric
+	// name but valid as an ordinary label value, so New must accept it — proving
+	// the metric-name rule lives in the metrics package, not here.
+	if _, err := labels.New(map[string]string{"__name__": "123-invalid", "service": "api"}); err != nil {
+		t.Errorf("shared New must not apply metric-name validation to __name__: %v", err)
+	}
+}
+
+func TestNew_OversizeNameOrValue_Rejected(t *testing.T) {
+	longName := strings.Repeat("a", 256) // > 255-byte name limit
+	if _, err := labels.New(map[string]string{longName: "v"}); err == nil {
+		t.Error("expected error for label name exceeding 255 bytes")
+	}
+	longValue := strings.Repeat("a", 65536) // > 65535-byte value limit
+	if _, err := labels.New(map[string]string{"service": longValue}); err == nil {
+		t.Error("expected error for label value exceeding 65535 bytes")
 	}
 }
 
