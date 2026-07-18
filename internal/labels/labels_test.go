@@ -64,14 +64,34 @@ func TestNew_NameLabelAllowed(t *testing.T) {
 	}
 }
 
-func TestNew_OversizeNameOrValue_Rejected(t *testing.T) {
-	longName := strings.Repeat("a", 256) // > 255-byte name limit
-	if _, err := labels.New(map[string]string{longName: "v"}); err == nil {
-		t.Error("expected error for label name exceeding 255 bytes")
+func TestNew_NameAndValueSizeLimits(t *testing.T) {
+	// Exact maxima are accepted.
+	if _, err := labels.New(map[string]string{strings.Repeat("a", 255): "v"}); err != nil {
+		t.Errorf("255-byte label name must be accepted: %v", err)
 	}
-	longValue := strings.Repeat("a", 65536) // > 65535-byte value limit
-	if _, err := labels.New(map[string]string{"service": longValue}); err == nil {
-		t.Error("expected error for label value exceeding 65535 bytes")
+	if _, err := labels.New(map[string]string{"service": strings.Repeat("a", 65535)}); err != nil {
+		t.Errorf("65535-byte label value must be accepted: %v", err)
+	}
+
+	// One byte over each limit is rejected with a typed *ValidationError whose
+	// Field names the offending label.
+	overName := strings.Repeat("a", 256)
+	_, err := labels.New(map[string]string{overName: "v"})
+	var ve *labels.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("expected *ValidationError for oversize name, got %T", err)
+	}
+	if ve.Field != overName {
+		t.Errorf("expected Field to name the oversize label, got %q", ve.Field)
+	}
+
+	ve = nil
+	_, err = labels.New(map[string]string{"service": strings.Repeat("a", 65536)})
+	if !errors.As(err, &ve) {
+		t.Fatalf("expected *ValidationError for oversize value, got %T", err)
+	}
+	if ve.Field != "service" {
+		t.Errorf("expected Field=service, got %q", ve.Field)
 	}
 }
 
@@ -103,13 +123,28 @@ func TestNew_EmptyValueAccepted(t *testing.T) {
 	}
 }
 
-func TestNew_TooManyLabels_Rejected(t *testing.T) {
-	m := make(map[string]string, 300)
-	for i := 0; i < 300; i++ {
-		m["label_"+itoa(i)] = "v"
+func TestNew_LabelCountLimit(t *testing.T) {
+	// Exactly 255 labels are accepted.
+	max := make(map[string]string, 255)
+	for i := 0; i < 255; i++ {
+		max["label_"+itoa(i)] = "v"
 	}
-	if _, err := labels.New(m); err == nil {
-		t.Fatal("expected error for >255 labels")
+	if _, err := labels.New(max); err != nil {
+		t.Errorf("255 labels must be accepted: %v", err)
+	}
+
+	// 256 labels are rejected with a typed *ValidationError.
+	over := make(map[string]string, 256)
+	for i := 0; i < 256; i++ {
+		over["label_"+itoa(i)] = "v"
+	}
+	_, err := labels.New(over)
+	var ve *labels.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("expected *ValidationError for >255 labels, got %T", err)
+	}
+	if ve.Field != "labels" {
+		t.Errorf("expected Field=labels, got %q", ve.Field)
 	}
 }
 
