@@ -287,14 +287,25 @@ Design: `docs/superpowers/specs/2026-06-29-phase-3.5-performance-benchmarks-desi
 ## Phase 4 Execution Checklist — Mini Loki-Style Logs Backend
 
 ### Phase 4.1 — Log Stream Data Model
-- [ ] Define `StreamID`, `StreamLabels`, `LogEntry`
-- [ ] Implement deterministic stream fingerprinting
-- [ ] Validate stream labels
-- [ ] Validate log timestamps
-- [ ] Validate log line size
-- [ ] Define out-of-order log behavior
-- [ ] Unit tests: stream identity
-- [ ] Unit tests: invalid logs rejected
+Design: `docs/superpowers/specs/2026-07-18-phase-4.1-log-stream-data-model-design.md` · Plan: `docs/superpowers/plans/2026-07-18-phase-4.1-log-stream-data-model.md`
+
+**Shared `internal/labels` package (ecosystem match — one labels type for metrics + logs)**
+- [x] Create `internal/labels/labels.go` — `Label`, `Labels` (sorted pairs + cached `hash uint64`), `New` (generic validation, no `__name__` required), `NewUnvalidated`, `Hash`, `Get`, `Map`, `Len`; move FNV-1a length-prefixed `fingerprint` verbatim (preserves persisted `SeriesID`s)
+- [x] Create `internal/labels/validation.go` — shared `ValidationError`, generic `validateLabelMap` (≤255 labels; name charset + `__` reserved except `__name__`; value UTF-8 + size limits)
+- [x] Unit tests (`internal/labels/labels_test.go`): order-independent hash, different name/value/extra-label → different hash, generic validation cases, `__name__` accepted as ordinary label, `Get`/`Map`, **pinned golden hash** (migration guard)
+
+**Refactor `internal/metrics` onto `internal/labels` (public API preserved)**
+- [x] `model.go` — `type Labels = labels.Labels`, `type Label = labels.Label`, `type ValidationError = labels.ValidationError`; keep `SeriesID`, `Sample`
+- [x] `labels.go` — `NewLabels` wraps `labels.New` after `validateMetricName`; `newOutputLabels` wraps `labels.NewUnvalidated`; remove moved `fingerprint`/methods
+- [x] `validation.go` — `validateMetricName` (`__name__` present + `[a-zA-Z_:][a-zA-Z0-9_:]*` charset); keep `ValidateSample`; generic label validation moved to shared (`labelNameRe` retained — still used by `expr_parser.go`/`selector.go`)
+- [x] Replace `.Fingerprint()` with `SeriesID(x.Hash())` (and `uint64(x.Fingerprint())` → `x.Hash()`) across `blockstore.go`, `eval.go`, `query.go`, `store.go` + affected tests (also added `sortedPairs` helper in `query.go` since `Labels.pairs` is now unexported in the shared package)
+- [x] Verify: full existing metrics suite (`go test ./...`) stays green; keep pinned `SeriesID` golden `{__name__:"http_requests",service:"api"}` = `9696857623413696903`
+
+**Logs model (`internal/logs`)**
+- [x] Create `internal/logs/model.go` — `StreamID` (uint64), `type StreamLabels = labels.Labels`, `LogEntry{StreamID, TimestampNs int64, Line string}` (Loki-native nanoseconds)
+- [x] Create `internal/logs/labels.go` — `NewStreamLabels` (generic rules + ≥1 label required), `StreamIDOf` (`StreamID(l.Hash())`)
+- [x] Create `internal/logs/validation.go` — `MaxLineBytes = 256*1024`, `ValidateEntry` (`TimestampNs > 0`; line ≤ `MaxLineBytes`, empty accepted); document out-of-order policy (accepted, resolved at query time)
+- [x] Unit tests (`internal/logs/model_test.go`): stream identity (order-independent same ID, different labels differ), empty `{}` rejected, timestamp `≤0` rejected / `>0` accepted, line at/over/at-empty size, typed `*ValidationError` on rejection
 
 ### Phase 4.2 — Loki-Compatible Push API
 - [ ] Implement `POST /loki/api/v1/push`
