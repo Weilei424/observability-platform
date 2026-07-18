@@ -327,7 +327,7 @@ func (bs *BlockStore) SelectSeries(sel Selector) ([]MatchedSeries, error) {
 	result, _ := bs.mem.SelectSeries(sel) // MemoryStore never errors
 	seen := make(map[SeriesID]struct{}, len(result))
 	for _, ms := range result {
-		seen[ms.Labels.Fingerprint()] = struct{}{}
+		seen[SeriesID(ms.Labels.Hash())] = struct{}{}
 	}
 
 	matchers := selectorToIndexMatchers(sel)
@@ -349,7 +349,7 @@ func (bs *BlockStore) SelectSeries(sel Selector) ([]MatchedSeries, error) {
 			if err != nil {
 				return nil, fmt.Errorf("blockstore: decode series %d labels: %w", se.ID, err)
 			}
-			fp := labels.Fingerprint()
+			fp := SeriesID(labels.Hash())
 			if _, already := seen[fp]; already {
 				continue
 			}
@@ -422,7 +422,7 @@ func (bs *BlockStore) Cardinality() (series, names, pairs int) {
 	}
 	memSeries, _ := bs.mem.SelectSeries(Selector{}) // MemoryStore never errors
 	for _, ms := range memSeries {
-		add(ms.Labels, ms.Labels.Fingerprint())
+		add(ms.Labels, SeriesID(ms.Labels.Hash()))
 	}
 	for _, r := range bs.blocks {
 		for _, se := range r.Series() {
@@ -430,7 +430,7 @@ func (bs *BlockStore) Cardinality() (series, names, pairs int) {
 			if err != nil {
 				continue
 			}
-			add(labels, labels.Fingerprint())
+			add(labels, SeriesID(labels.Hash()))
 		}
 	}
 	return len(seriesSet), len(nameSet), len(pairSet)
@@ -1045,8 +1045,8 @@ func validateBlockSeries(r *block.Reader) error {
 		if err != nil {
 			return fmt.Errorf("series %d: %w", se.ID, err)
 		}
-		if uint64(labels.Fingerprint()) != se.ID {
-			return fmt.Errorf("series %d label set fingerprints to %d", se.ID, uint64(labels.Fingerprint()))
+		if labels.Hash() != se.ID {
+			return fmt.Errorf("series %d label set fingerprints to %d", se.ID, labels.Hash())
 		}
 	}
 	return nil

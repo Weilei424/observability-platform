@@ -72,7 +72,7 @@ func (e *QueryEngine) rateInstant(x RateExpr, tMs int64) ([]InstantSample, error
 	result := make([]InstantSample, 0, len(matched))
 	windowSec := float64(x.WindowMs) / 1000.0
 	for _, ms := range matched {
-		samples, err := e.store.QueryRange(ms.Labels.Fingerprint(), tMs-x.WindowMs, tMs)
+		samples, err := e.store.QueryRange(SeriesID(ms.Labels.Hash()), tMs-x.WindowMs, tMs)
 		if err != nil {
 			return nil, err
 		}
@@ -98,7 +98,7 @@ func (e *QueryEngine) rateRange(x RateExpr, startMs, endMs, stepMs int64) ([]Ran
 	result := make([]RangeSeries, 0, len(matched))
 	windowSec := float64(x.WindowMs) / 1000.0
 	for _, ms := range matched {
-		id := ms.Labels.Fingerprint()
+		id := SeriesID(ms.Labels.Hash())
 		var points []SamplePoint
 		for t := startMs; t <= endMs; t += stepMs {
 			samples, err := e.store.QueryRange(id, t-x.WindowMs, t)

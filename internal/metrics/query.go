@@ -53,7 +53,7 @@ func (e *QueryEngine) InstantQuery(sel Selector, tMs int64) ([]InstantSample, er
 	}
 	result := make([]InstantSample, 0, len(matched))
 	for _, ms := range matched {
-		sample, ok, err := e.store.QueryInstant(ms.Labels.Fingerprint(), tMs)
+		sample, ok, err := e.store.QueryInstant(SeriesID(ms.Labels.Hash()), tMs)
 		if err != nil {
 			return nil, err
 		}
@@ -90,7 +90,7 @@ func (e *QueryEngine) RangeQuery(sel Selector, startMs, endMs, stepMs int64) ([]
 
 	for _, ms := range matched {
 		var points []SamplePoint
-		id := ms.Labels.Fingerprint()
+		id := SeriesID(ms.Labels.Hash())
 		for t := startMs; t <= endMs; t += stepMs {
 			sample, ok, err := e.store.QueryInstant(id, t)
 			if err != nil {
@@ -150,7 +150,7 @@ func (e *QueryEngine) matchingSeries(f MetadataFilter) ([]MatchedSeries, error) 
 			return nil, err
 		}
 		for _, ms := range matched {
-			id := ms.Labels.Fingerprint()
+			id := SeriesID(ms.Labels.Hash())
 			if _, ok := seen[id]; ok {
 				continue
 			}
@@ -245,7 +245,7 @@ func (e *QueryEngine) Series(f MetadataFilter) ([]Labels, error) {
 	}
 	seen := make(map[SeriesID]Labels)
 	for _, ms := range series {
-		id := ms.Labels.Fingerprint()
+		id := SeriesID(ms.Labels.Hash())
 		if _, exists := seen[id]; !exists {
 			seen[id] = ms.Labels
 		}
@@ -256,20 +256,22 @@ func (e *QueryEngine) Series(f MetadataFilter) ([]Labels, error) {
 	type entry struct {
 		labels Labels
 		name   string
+		pairs  []Label
 	}
 	entries := make([]entry, 0, len(seen))
 	for _, labels := range seen {
 		name, _ := labels.Get("__name__")
-		entries = append(entries, entry{labels: labels, name: name})
+		entries = append(entries, entry{labels: labels, name: name, pairs: sortedPairs(labels)})
 	}
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].name != entries[j].name {
 			return entries[i].name < entries[j].name
 		}
-		// Compare remaining label pairs in sorted order (Labels.pairs is sorted
-		// by name). Advance past __name__ on each side independently, since its
-		// position depends on what other labels are present.
-		pi, pj := entries[i].labels.pairs, entries[j].labels.pairs
+		// Compare remaining label pairs in sorted order (sortedPairs returns
+		// pairs sorted by name). Advance past __name__ on each side
+		// independently, since its position depends on what other labels are
+		// present.
+		pi, pj := entries[i].pairs, entries[j].pairs
 		ai, aj := 0, 0
 		for {
 			for ai < len(pi) && pi[ai].Name == "__name__" {
@@ -302,4 +304,17 @@ func (e *QueryEngine) Series(f MetadataFilter) ([]Labels, error) {
 		result[i] = e.labels
 	}
 	return result, nil
+}
+
+// sortedPairs returns l's label pairs sorted by name. Labels no longer
+// exposes its internal pairs slice (it is the shared internal/labels type),
+// so callers that need sorted pairs reconstruct them from Map().
+func sortedPairs(l Labels) []Label {
+	m := l.Map()
+	pairs := make([]Label, 0, len(m))
+	for k, v := range m {
+		pairs = append(pairs, Label{Name: k, Value: v})
+	}
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].Name < pairs[j].Name })
+	return pairs
 }

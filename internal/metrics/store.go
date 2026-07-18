@@ -91,7 +91,7 @@ func (s *MemoryStore) AppendTracked(labels Labels, timestampMs int64, value floa
 }
 
 func (s *MemoryStore) appendInternal(labels Labels, timestampMs int64, value float64, walSeg int) error {
-	id := labels.Fingerprint()
+	id := SeriesID(labels.Hash())
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
