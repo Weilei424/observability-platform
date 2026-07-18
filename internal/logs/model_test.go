@@ -70,8 +70,13 @@ func TestValidateEntry_LineSize(t *testing.T) {
 		t.Errorf("line at limit must be accepted: %v", err)
 	}
 	over := logs.LogEntry{TimestampNs: 1, Line: strings.Repeat("a", logs.MaxLineBytes+1)}
-	if err := logs.ValidateEntry(over); err == nil {
-		t.Error("expected error for line over limit")
+	err := logs.ValidateEntry(over)
+	var ve *logs.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("expected *logs.ValidationError for line over limit, got %T", err)
+	}
+	if ve.Field != "line" {
+		t.Errorf("expected Field=line, got %q", ve.Field)
 	}
 	empty := logs.LogEntry{TimestampNs: 1, Line: ""}
 	if err := logs.ValidateEntry(empty); err != nil {
