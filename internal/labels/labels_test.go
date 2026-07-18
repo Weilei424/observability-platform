@@ -61,11 +61,11 @@ func TestNew_NameLabelAllowed(t *testing.T) {
 
 func TestNew_ValidationErrors(t *testing.T) {
 	cases := map[string]map[string]string{
-		"empty name":       {"service": "api", "": "v"},
-		"invalid name":     {"service": "api", "123bad": "v"},
-		"hyphen name":      {"service": "api", "bad-name": "v"},
-		"reserved prefix":  {"service": "api", "__job__": "v"},
-		"invalid utf8":     {"service": string([]byte{0xff, 0xfe})},
+		"empty name":      {"service": "api", "": "v"},
+		"invalid name":    {"service": "api", "123bad": "v"},
+		"hyphen name":     {"service": "api", "bad-name": "v"},
+		"reserved prefix": {"service": "api", "__job__": "v"},
+		"invalid utf8":    {"service": string([]byte{0xff, 0xfe})},
 	}
 	for name, m := range cases {
 		t.Run(name, func(t *testing.T) {
