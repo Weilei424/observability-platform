@@ -308,13 +308,35 @@ Design: `docs/superpowers/specs/2026-07-18-phase-4.1-log-stream-data-model-desig
 - [x] Unit tests (`internal/logs/model_test.go`): stream identity (order-independent same ID, different labels differ), empty `{}` rejected, timestamp `≤0` rejected / `>0` accepted, line at/over/at-empty size, typed `*ValidationError` on rejection
 
 ### Phase 4.2 — Loki-Compatible Push API
-- [ ] Implement `POST /loki/api/v1/push`
-- [ ] Parse Loki-style `streams` payload
-- [ ] Write log records to WAL before acknowledgment
-- [ ] Buffer logs into per-stream chunks
-- [ ] Unit tests: push payload parsing
-- [ ] Integration test: push logs successfully
-- [ ] Integration test: logs survive restart through WAL replay
+Design: `docs/superpowers/specs/2026-07-18-phase-4.2-loki-push-api-design.md` · Plan: `docs/superpowers/plans/2026-07-18-phase-4.2-loki-push-api.md`
+
+**`internal/storage/logwal` package (dedicated log WAL — zero blast radius on metrics WAL)**
+- [ ] `record.go` — `LabelPair`, `RecordWriter` interface, `encodeRecord`/`decodeRecord` (`[len][type=0x01][labelcount][labels][8B tsNs][4B lineLen][line]`), `validateLabels`, `maxRecordBodyBytes`
+- [ ] `logwal.go` — `LogWAL`: `Open`, `WriteRecord(labels, tsNs, line)`, `Sync`, `SegmentIndex`, `Close` (segment rotation at `segMaxBytes`, fsync-every-N, `broken`-state guard, `%06d.wal` naming — mirrors `wal.WAL`)
+- [ ] `replay.go` — `Replay(dir, fn)`: ascending segments, partial trailing record on last segment discarded, corrupt mid-segment record errors, oversized-length guard
+- [ ] Unit tests: record encode/decode round trip (empty line, max line, multi-byte UTF-8, truncated/trailing-byte rejection)
+- [ ] Unit tests: `LogWAL` write→reopen, rotation, fsync boundary, `Close`
+- [ ] Unit tests: replay restores order; partial/oversized trailing discarded; corrupt non-final record errors
+
+**`internal/logs` store**
+- [ ] `store.go` — `Ingester` interface (`Append(StreamLabels, tsNs int64, line string) error`)
+- [ ] `store.go` — `MemoryStore` (per-stream `[]LogEntry` buffer, `Append`, `StreamEntries` copy, `StreamCount`), concurrency-safe
+- [ ] `store.go` — `WALStore` (WAL-write-before-buffer; `NewWALStore(w, store)`; `var _ Ingester`)
+- [ ] Unit tests: `MemoryStore` append/read, order-independent stream identity; `WALStore` writes WAL then buffers; WAL-failure leaves buffer empty (fake writer)
+
+**`internal/api` push handler + wiring**
+- [ ] `loki_push.go` — `handleLokiPush` + `lokiPushRequest`/`lokiStream` DTOs; validate-all-first; 204 success, 400 error list, 500 on append failure; 4 MiB `MaxBytesReader`; reject protobuf content-type + 3-element `values` explicitly
+- [ ] `server.go` — add `logIngester logs.Ingester` field; extend `api.New(...)` signature; update all `api.New(` call sites (main.go, server_test.go, others via grep)
+- [ ] `router.go` — register `POST /loki/api/v1/push`
+- [ ] Unit tests: valid multi-stream push → 204 + entries reach ingester; empty streams / malformed JSON / empty `{}` labels / bad timestamp / oversize line / 3-element values / protobuf → 400
+
+**`cmd/server/main.go` wiring**
+- [ ] Open `data/logs/wal`, replay into a `logs.MemoryStore`, open `logwal.LogWAL`, build `logs.WALStore`, pass to `api.New`, close logs WAL on shutdown (reuse `cfg.WALSegmentMaxBytes`/`WALSyncEveryN`, no new config)
+
+**Integration + verify**
+- [ ] Integration test: push logs through router → entries buffered (query-ready storage)
+- [ ] Integration test: push → close WAL → fresh `MemoryStore` + replay from same dir → entries present (survives restart)
+- [ ] Verify: `go build ./...`, `go vet ./...`, `go test ./...` green
 
 ### Phase 4.3 — Log Chunk Storage and Index
 - [ ] Define log chunk format
