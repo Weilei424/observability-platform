@@ -171,7 +171,7 @@ func TestWALStore_FlushBlock_HeadFence(t *testing.T) {
 	}
 
 	// All 121 samples must be present: 0–119 from block, 120 from WAL replay.
-	id := labels.Fingerprint()
+	id := metrics.SeriesID(labels.Hash())
 	got, err := bs2.QueryRange(id, 0, 120*1000)
 	if err != nil {
 		t.Fatalf("QueryRange: %v", err)
@@ -229,7 +229,7 @@ func TestWALStore_ReplayRestoresSeries(t *testing.T) {
 		t.Fatalf("ReplayFrom: %v", err)
 	}
 
-	id := labels.Fingerprint()
+	id := metrics.SeriesID(labels.Hash())
 	got, err := bs2.QueryRange(id, 1000, 3000)
 	if err != nil {
 		t.Fatalf("QueryRange: %v", err)

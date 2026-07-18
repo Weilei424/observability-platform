@@ -46,7 +46,7 @@ func TestFlushQuery_NoVisibilityGap(t *testing.T) {
 
 	walStore := metrics.NewWALStore(w, bs, dir)
 	labels, _ := metrics.NewLabels(map[string]string{"__name__": "gap_probe"})
-	id := labels.Fingerprint()
+	id := metrics.SeriesID(labels.Hash())
 
 	// Ingest one sealed chunk before starting concurrent goroutines. These
 	// samples (ts 0..119) must be findable at all times: either in memory as
@@ -260,7 +260,7 @@ func TestAppendFlush_AcknowledgedSamplesSurvive(t *testing.T) {
 	checkpoint := metrics.ReadCheckpoint(dir)
 	replayInto(t, walDir, checkpoint, bs2)
 
-	id := labels.Fingerprint()
+	id := metrics.SeriesID(labels.Hash())
 	got, err := bs2.QueryRange(id, 0, math.MaxInt64)
 	if err != nil {
 		t.Fatalf("QueryRange after restart: %v", err)
@@ -433,7 +433,7 @@ func TestAppendMu_FlushBlockWaitsForInFlightAppend(t *testing.T) {
 	checkpoint := metrics.ReadCheckpoint(dir)
 	replayInto(t, walDir, checkpoint, bs2)
 
-	got, err := bs2.QueryRange(labels.Fingerprint(), 120, 120)
+	got, err := bs2.QueryRange(metrics.SeriesID(labels.Hash()), 120, 120)
 	if err != nil {
 		t.Fatalf("QueryRange: %v", err)
 	}

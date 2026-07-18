@@ -117,7 +117,7 @@ func TestNewBlockStore_RejectsFingerprintMismatch(t *testing.T) {
 	}
 	labels := makeLabels(t, map[string]string{"__name__": "cpu", "host": "a"})
 	// Deliberately store a wrong ID (correct fingerprint + 1).
-	wrongID := uint64(labels.Fingerprint()) + 1
+	wrongID := labels.Hash() + 1
 	if err := w.AddSeries(wrongID, labelsToBlockPairs(labels), []*chunk.Chunk{sealedChunk(t)}); err != nil {
 		t.Fatalf("AddSeries: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestBlockStore_FlushBlock_DrainsSealedChunks(t *testing.T) {
 	}
 
 	// After flush, the memory store should retain only the unsealed head chunk.
-	id := labels.Fingerprint()
+	id := metrics.SeriesID(labels.Hash())
 	mem := bs.MemStore()
 	if mem.ChunkCount(id) != 1 {
 		t.Errorf("ChunkCount after flush = %d, want 1 (head only)", mem.ChunkCount(id))
@@ -215,7 +215,7 @@ func TestBlockStore_QueryRange_SpansMemoryAndBlock(t *testing.T) {
 	}
 
 	labels := makeLabels(t, map[string]string{"__name__": "req", "env": "test"})
-	id := labels.Fingerprint()
+	id := metrics.SeriesID(labels.Hash())
 
 	// Append 120 samples — exactly fills one chunk (seals it).
 	for i := 0; i < 120; i++ {
@@ -252,7 +252,7 @@ func TestBlockStore_QueryRange_Deduplication(t *testing.T) {
 	}
 
 	labels := makeLabels(t, map[string]string{"__name__": "dup", "host": "x"})
-	id := labels.Fingerprint()
+	id := metrics.SeriesID(labels.Hash())
 
 	// Append 120 samples and flush to block.
 	for i := 0; i < 120; i++ {
@@ -434,7 +434,7 @@ func metricFingerprint(t *testing.T, name string) metrics.SeriesID {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return lbls.Fingerprint()
+	return metrics.SeriesID(lbls.Hash())
 }
 
 func TestBlockStore_CompactOnce_MergesAndPreservesData(t *testing.T) {
@@ -1210,10 +1210,10 @@ func TestNewBlockStore_SwappedChunkRefsRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWriter: %v", err)
 	}
-	if err := w.AddSeries(uint64(laA.Fingerprint()), pairsOf(laA), []*chunk.Chunk{cA}); err != nil {
+	if err := w.AddSeries(laA.Hash(), pairsOf(laA), []*chunk.Chunk{cA}); err != nil {
 		t.Fatalf("AddSeries A: %v", err)
 	}
-	if err := w.AddSeries(uint64(laB.Fingerprint()), pairsOf(laB), []*chunk.Chunk{cB}); err != nil {
+	if err := w.AddSeries(laB.Hash(), pairsOf(laB), []*chunk.Chunk{cB}); err != nil {
 		t.Fatalf("AddSeries B: %v", err)
 	}
 	meta, err := w.Commit()

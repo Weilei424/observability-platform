@@ -29,15 +29,15 @@ func TestLabels_SameLabels_DifferentOrder_SameFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if a.Fingerprint() != b.Fingerprint() {
-		t.Errorf("expected same fingerprint, got %d vs %d", a.Fingerprint(), b.Fingerprint())
+	if metrics.SeriesID(a.Hash()) != metrics.SeriesID(b.Hash()) {
+		t.Errorf("expected same fingerprint, got %d vs %d", metrics.SeriesID(a.Hash()), metrics.SeriesID(b.Hash()))
 	}
 }
 
 func TestLabels_DifferentValues_DifferentFingerprint(t *testing.T) {
 	a, _ := metrics.NewLabels(map[string]string{"__name__": "http_requests", "service": "api"})
 	b, _ := metrics.NewLabels(map[string]string{"__name__": "http_requests", "service": "web"})
-	if a.Fingerprint() == b.Fingerprint() {
+	if metrics.SeriesID(a.Hash()) == metrics.SeriesID(b.Hash()) {
 		t.Error("expected different fingerprints for different label values")
 	}
 }
@@ -45,7 +45,7 @@ func TestLabels_DifferentValues_DifferentFingerprint(t *testing.T) {
 func TestLabels_DifferentNames_DifferentFingerprint(t *testing.T) {
 	a, _ := metrics.NewLabels(map[string]string{"__name__": "http_requests", "service": "api"})
 	b, _ := metrics.NewLabels(map[string]string{"__name__": "http_requests", "env": "api"})
-	if a.Fingerprint() == b.Fingerprint() {
+	if metrics.SeriesID(a.Hash()) == metrics.SeriesID(b.Hash()) {
 		t.Error("expected different fingerprints for different label names")
 	}
 }
@@ -53,7 +53,7 @@ func TestLabels_DifferentNames_DifferentFingerprint(t *testing.T) {
 func TestLabels_ExtraLabel_DifferentFingerprint(t *testing.T) {
 	a, _ := metrics.NewLabels(map[string]string{"__name__": "http_requests", "service": "api"})
 	b, _ := metrics.NewLabels(map[string]string{"__name__": "http_requests", "service": "api", "env": "prod"})
-	if a.Fingerprint() == b.Fingerprint() {
+	if metrics.SeriesID(a.Hash()) == metrics.SeriesID(b.Hash()) {
 		t.Error("expected different fingerprints when extra label is added")
 	}
 }
@@ -177,7 +177,7 @@ func TestLabels_Fingerprint_Stable(t *testing.T) {
 	// If this fails, the fingerprinting algorithm changed — a breaking change for
 	// any persisted SeriesIDs (WAL, blocks, indexes).
 	const want metrics.SeriesID = 9696857623413696903
-	if got := l.Fingerprint(); got != want {
+	if got := metrics.SeriesID(l.Hash()); got != want {
 		t.Errorf("fingerprint = %d, want %d — algorithm changed, update persisted data", got, want)
 	}
 }

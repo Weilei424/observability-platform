@@ -267,5 +267,5 @@ func mustFingerprint(t *testing.T, name string) metrics.SeriesID {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return lbls.Fingerprint()
+	return metrics.SeriesID(lbls.Hash())
 }

@@ -78,11 +78,11 @@ func TestIngestMetrics_ValidBatch_AllSamplesStored(t *testing.T) {
 		t.Errorf("status = %d, want %d", rr.Code, http.StatusNoContent)
 	}
 
-	gotA, err := store.QueryRange(labelsA.Fingerprint(), 0, 2000)
+	gotA, err := store.QueryRange(metrics.SeriesID(labelsA.Hash()), 0, 2000)
 	if err != nil {
 		t.Fatalf("QueryRange A: %v", err)
 	}
-	gotB, err := store.QueryRange(labelsB.Fingerprint(), 0, 2000)
+	gotB, err := store.QueryRange(metrics.SeriesID(labelsB.Hash()), 0, 2000)
 	if err != nil {
 		t.Fatalf("QueryRange B: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestIngestMetrics_MixedBatch_NoSamplesWritten(t *testing.T) {
 		t.Errorf("status = %d, want %d", rr.Code, http.StatusBadRequest)
 	}
 
-	got, err := store.QueryRange(validLabels.Fingerprint(), 0, 2000)
+	got, err := store.QueryRange(metrics.SeriesID(validLabels.Hash()), 0, 2000)
 	if err != nil {
 		t.Fatalf("QueryRange: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestIngestMetrics_RepeatedWrites_AppendToSameSeries(t *testing.T) {
 		},
 	})
 
-	got, err := store.QueryRange(labels.Fingerprint(), 0, 3000)
+	got, err := store.QueryRange(metrics.SeriesID(labels.Hash()), 0, 3000)
 	if err != nil {
 		t.Fatalf("QueryRange: %v", err)
 	}
