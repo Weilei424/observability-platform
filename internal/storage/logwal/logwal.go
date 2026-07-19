@@ -68,11 +68,31 @@ func (w *LogWAL) openSegment(idx int) error {
 	if err != nil {
 		return fmt.Errorf("logwal: open segment %06d: %w", idx, err)
 	}
+	// Fsync the directory so the new segment's directory entry is durable before
+	// any record is acknowledged. A file fsync alone does not persist a newly
+	// created entry on filesystems that require a directory fsync.
+	if err := syncDir(w.dir); err != nil {
+		f.Close()
+		return fmt.Errorf("logwal: fsync dir for segment %06d: %w", idx, err)
+	}
 	w.current = f
 	w.segIndex = idx
 	w.written = 0
 	w.sinceSynced = 0
 	return nil
+}
+
+// syncDir fsyncs a directory so newly created/removed entries within it are durable.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if err := d.Sync(); err != nil {
+		d.Close()
+		return err
+	}
+	return d.Close()
 }
 
 // WriteRecord encodes and appends a log record to the active segment. Rotates to a
@@ -105,6 +125,12 @@ func (w *LogWAL) WriteRecord(labels []LabelPair, tsNs int64, line string) error 
 	}
 
 	if w.written >= w.segMaxBytes {
+		// Fsync any records written since the last periodic sync before sealing the
+		// segment, so a tail of fewer than syncEveryN records is not left durable
+		// only in the OS page cache when syncEveryN > 1.
+		if err := w.current.Sync(); err != nil {
+			return fmt.Errorf("logwal: fsync before rotate: %w", err)
+		}
 		if err := w.current.Close(); err != nil {
 			return fmt.Errorf("logwal: close segment on rotate: %w", err)
 		}
