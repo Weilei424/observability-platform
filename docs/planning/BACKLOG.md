@@ -311,32 +311,32 @@ Design: `docs/superpowers/specs/2026-07-18-phase-4.1-log-stream-data-model-desig
 Design: `docs/superpowers/specs/2026-07-18-phase-4.2-loki-push-api-design.md` · Plan: `docs/superpowers/plans/2026-07-18-phase-4.2-loki-push-api.md`
 
 **`internal/storage/logwal` package (dedicated log WAL — zero blast radius on metrics WAL)**
-- [ ] `record.go` — `LabelPair`, `RecordWriter` interface, `encodeRecord`/`decodeRecord` (`[len][type=0x01][labelcount][labels][8B tsNs][4B lineLen][line]`), `validateLabels`, `maxRecordBodyBytes`
-- [ ] `logwal.go` — `LogWAL`: `Open`, `WriteRecord(labels, tsNs, line)`, `Sync`, `SegmentIndex`, `Close` (segment rotation at `segMaxBytes`, fsync-every-N, `broken`-state guard, `%06d.wal` naming — mirrors `wal.WAL`)
-- [ ] `replay.go` — `Replay(dir, fn)`: ascending segments, partial trailing record on last segment discarded, corrupt mid-segment record errors, oversized-length guard
-- [ ] Unit tests: record encode/decode round trip (empty line, max line, multi-byte UTF-8, truncated/trailing-byte rejection)
-- [ ] Unit tests: `LogWAL` write→reopen, rotation, fsync boundary, `Close`
-- [ ] Unit tests: replay restores order; partial/oversized trailing discarded; corrupt non-final record errors
+- [x] `record.go` — `LabelPair`, `RecordWriter` interface, `encodeRecord`/`decodeRecord` (`[len][type=0x01][labelcount][labels][8B tsNs][4B lineLen][line]`), `validateLabels`, `maxRecordBodyBytes`
+- [x] `logwal.go` — `LogWAL`: `Open`, `WriteRecord(labels, tsNs, line)`, `Sync`, `SegmentIndex`, `Close` (segment rotation at `segMaxBytes`, fsync-every-N, `broken`-state guard, `%06d.wal` naming — mirrors `wal.WAL`)
+- [x] `replay.go` — `Replay(dir, fn)`: ascending segments, partial trailing record on last segment discarded, corrupt mid-segment record errors, oversized-length guard
+- [x] Unit tests: record encode/decode round trip (empty line, max line, multi-byte UTF-8, truncated/trailing-byte rejection)
+- [x] Unit tests: `LogWAL` write→reopen, rotation, fsync boundary, `Close`
+- [x] Unit tests: replay restores order; partial/oversized trailing discarded; corrupt non-final record errors
 
 **`internal/logs` store**
-- [ ] `store.go` — `Ingester` interface (`Append(StreamLabels, tsNs int64, line string) error`)
-- [ ] `store.go` — `MemoryStore` (per-stream `[]LogEntry` buffer, `Append`, `StreamEntries` copy, `StreamCount`), concurrency-safe
-- [ ] `store.go` — `WALStore` (WAL-write-before-buffer; `NewWALStore(w, store)`; `var _ Ingester`)
-- [ ] Unit tests: `MemoryStore` append/read, order-independent stream identity; `WALStore` writes WAL then buffers; WAL-failure leaves buffer empty (fake writer)
+- [x] `store.go` — `Ingester` interface (`Append(StreamLabels, tsNs int64, line string) error`)
+- [x] `store.go` — `MemoryStore` (per-stream `[]LogEntry` buffer, `Append`, `StreamEntries` copy, `StreamCount`), concurrency-safe
+- [x] `store.go` — `WALStore` (WAL-write-before-buffer; `NewWALStore(w, store)`; `var _ Ingester`)
+- [x] Unit tests: `MemoryStore` append/read, order-independent stream identity; `WALStore` writes WAL then buffers; WAL-failure leaves buffer empty (fake writer)
 
 **`internal/api` push handler + wiring**
-- [ ] `loki_push.go` — `handleLokiPush` + `lokiPushRequest`/`lokiStream` DTOs; validate-all-first; 204 success, 400 error list, 500 on append failure; 4 MiB `MaxBytesReader`; reject protobuf content-type + 3-element `values` explicitly
-- [ ] `server.go` — add `logIngester logs.Ingester` field; extend `api.New(...)` signature; update all `api.New(` call sites (main.go, server_test.go, others via grep)
-- [ ] `router.go` — register `POST /loki/api/v1/push`
-- [ ] Unit tests: valid multi-stream push → 204 + entries reach ingester; empty streams / malformed JSON / empty `{}` labels / bad timestamp / oversize line / 3-element values / protobuf → 400
+- [x] `loki_push.go` — `handleLokiPush` + `lokiPushRequest`/`lokiStream` DTOs; validate-all-first; 204 success, 400 error list, 500 on append failure; 4 MiB `MaxBytesReader`; reject protobuf content-type + 3-element `values` explicitly
+- [x] `server.go` — add `logIngester logs.Ingester` field; extend `api.New(...)` signature; update all `api.New(` call sites (main.go, server_test.go, others via grep)
+- [x] `router.go` — register `POST /loki/api/v1/push`
+- [x] Unit tests: valid multi-stream push → 204 + entries reach ingester; empty streams / malformed JSON / empty `{}` labels / bad timestamp / oversize line / 3-element values / protobuf → 400
 
 **`cmd/server/main.go` wiring**
-- [ ] Open `data/logs/wal`, replay into a `logs.MemoryStore`, open `logwal.LogWAL`, build `logs.WALStore`, pass to `api.New`, close logs WAL on shutdown (reuse `cfg.WALSegmentMaxBytes`/`WALSyncEveryN`, no new config)
+- [x] Open `data/logs/wal`, replay into a `logs.MemoryStore`, open `logwal.LogWAL`, build `logs.WALStore`, pass to `api.New`, close logs WAL on shutdown (reuse `cfg.WALSegmentMaxBytes`/`WALSyncEveryN`, no new config)
 
 **Integration + verify**
-- [ ] Integration test: push logs through router → entries buffered (query-ready storage)
-- [ ] Integration test: push → close WAL → fresh `MemoryStore` + replay from same dir → entries present (survives restart)
-- [ ] Verify: `go build ./...`, `go vet ./...`, `go test ./...` green
+- [x] Integration test: push logs through router → entries buffered (query-ready storage)
+- [x] Integration test: push → close WAL → fresh `MemoryStore` + replay from same dir → entries present (survives restart)
+- [x] Verify: `go build ./...`, `go vet ./...`, `go test ./...` green
 
 ### Phase 4.3 — Log Chunk Storage and Index
 - [ ] Define log chunk format
