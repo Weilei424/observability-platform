@@ -27,13 +27,16 @@ type LogWAL struct {
 	// explicit Sync/Close). A test seam that lets a same-package test verify the
 	// automatic boundary actually fires, which an in-process replay cannot show.
 	autoSyncs int
+	// preRotationSyncs counts fsyncs of an outgoing segment performed just before
+	// rotation. A test seam for the rotate-with-unsynced-remainder guarantee.
+	preRotationSyncs int
 }
 
 // Open opens or creates a log WAL rooted at dir. New writes go to a fresh segment
 // numbered one past the highest existing segment index, so previously written
 // segments are never appended to.
 func Open(dir string, segMaxBytes int64, syncEveryN int) (*LogWAL, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := mkdirAllSync(dir); err != nil {
 		return nil, fmt.Errorf("logwal: mkdir %s: %w", dir, err)
 	}
 	paths, err := segmentPaths(dir)
@@ -71,7 +74,7 @@ func (w *LogWAL) openSegment(idx int) error {
 	// Fsync the directory so the new segment's directory entry is durable before
 	// any record is acknowledged. A file fsync alone does not persist a newly
 	// created entry on filesystems that require a directory fsync.
-	if err := syncDir(w.dir); err != nil {
+	if err := fsyncDir(w.dir); err != nil {
 		f.Close()
 		return fmt.Errorf("logwal: fsync dir for segment %06d: %w", idx, err)
 	}
@@ -82,8 +85,9 @@ func (w *LogWAL) openSegment(idx int) error {
 	return nil
 }
 
-// syncDir fsyncs a directory so newly created/removed entries within it are durable.
-func syncDir(dir string) error {
+// fsyncDir fsyncs a directory so newly created/removed entries within it are
+// durable. It is a package var so tests can count calls and inject failures.
+var fsyncDir = func(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {
 		return err
@@ -93,6 +97,51 @@ func syncDir(dir string) error {
 		return err
 	}
 	return d.Close()
+}
+
+// mkdirAllSync creates dir and any missing parents, then fsyncs the parent of
+// each newly created directory so the new directory entries survive a power loss.
+// A plain MkdirAll leaves those entries only in the OS cache.
+func mkdirAllSync(dir string) error {
+	// Collect the chain of not-yet-existing directories, deepest first.
+	var missing []string
+	p := filepath.Clean(dir)
+	for {
+		fi, err := os.Stat(p)
+		if err == nil {
+			if !fi.IsDir() {
+				return fmt.Errorf("%s exists and is not a directory", p)
+			}
+			break
+		}
+		if !os.IsNotExist(err) {
+			return err
+		}
+		missing = append(missing, p)
+		parent := filepath.Dir(p)
+		if parent == p {
+			break // reached the filesystem root
+		}
+		p = parent
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	// Fsync the parent of each newly created directory: that parent now holds a
+	// new entry. Parents that are themselves newly created are included, so the
+	// whole created chain becomes durable.
+	seen := map[string]bool{}
+	for _, m := range missing {
+		parent := filepath.Dir(m)
+		if seen[parent] {
+			continue
+		}
+		seen[parent] = true
+		if err := fsyncDir(parent); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // WriteRecord encodes and appends a log record to the active segment. Rotates to a
@@ -131,6 +180,7 @@ func (w *LogWAL) WriteRecord(labels []LabelPair, tsNs int64, line string) error 
 		if err := w.current.Sync(); err != nil {
 			return fmt.Errorf("logwal: fsync before rotate: %w", err)
 		}
+		w.preRotationSyncs++
 		if err := w.current.Close(); err != nil {
 			return fmt.Errorf("logwal: close segment on rotate: %w", err)
 		}
