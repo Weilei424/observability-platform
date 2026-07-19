@@ -1,6 +1,11 @@
 package logs
 
-import "testing"
+import (
+	"errors"
+	"testing"
+
+	"github.com/masonwheeler/observability-platform/internal/storage/logwal"
+)
 
 func mustLabels(t *testing.T, m map[string]string) StreamLabels {
 	t.Helper()
@@ -64,5 +69,52 @@ func TestMemoryStore_StreamEntriesCopy(t *testing.T) {
 	fresh := s.StreamEntries(StreamIDOf(sl))
 	if fresh[0].Line != "x" {
 		t.Errorf("StreamEntries returned a live slice; got mutated %q", fresh[0].Line)
+	}
+}
+
+type fakeRecordWriter struct {
+	writes   int
+	failNext bool
+	lastTsNs int64
+	lastLine string
+}
+
+func (f *fakeRecordWriter) WriteRecord(labels []logwal.LabelPair, tsNs int64, line string) error {
+	if f.failNext {
+		return errors.New("wal write failed")
+	}
+	f.writes++
+	f.lastTsNs = tsNs
+	f.lastLine = line
+	return nil
+}
+func (f *fakeRecordWriter) SegmentIndex() int { return 1 }
+
+func TestWALStore_WritesWALThenBuffers(t *testing.T) {
+	fw := &fakeRecordWriter{}
+	mem := NewMemoryStore()
+	ws := NewWALStore(fw, mem)
+	sl := mustLabels(t, map[string]string{"service": "api"})
+	if err := ws.Append(sl, 500, "durable"); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if fw.writes != 1 {
+		t.Errorf("WAL writes = %d, want 1", fw.writes)
+	}
+	if got := len(mem.StreamEntries(StreamIDOf(sl))); got != 1 {
+		t.Errorf("buffered entries = %d, want 1", got)
+	}
+}
+
+func TestWALStore_WALFailureLeavesBufferEmpty(t *testing.T) {
+	fw := &fakeRecordWriter{failNext: true}
+	mem := NewMemoryStore()
+	ws := NewWALStore(fw, mem)
+	sl := mustLabels(t, map[string]string{"service": "api"})
+	if err := ws.Append(sl, 1, "x"); err == nil {
+		t.Fatal("Append should return the WAL error")
+	}
+	if mem.StreamCount() != 0 {
+		t.Errorf("StreamCount = %d, want 0 (nothing buffered after WAL failure)", mem.StreamCount())
 	}
 }

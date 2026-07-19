@@ -1,6 +1,11 @@
 package logs
 
-import "sync"
+import (
+	"sort"
+	"sync"
+
+	"github.com/masonwheeler/observability-platform/internal/storage/logwal"
+)
 
 // Ingester accepts log entries for storage.
 type Ingester interface {
@@ -62,3 +67,42 @@ func (s *MemoryStore) StreamCount() int {
 }
 
 var _ Ingester = (*MemoryStore)(nil)
+
+// WALStore writes each log record to the log WAL before buffering it in memory.
+// Reads delegate to the embedded MemoryStore. Safe for concurrent use.
+type WALStore struct {
+	w     logwal.RecordWriter
+	store *MemoryStore
+}
+
+// NewWALStore returns a WALStore backed by w for durability and store for buffering.
+func NewWALStore(w logwal.RecordWriter, store *MemoryStore) *WALStore {
+	return &WALStore{w: w, store: store}
+}
+
+// Append writes the WAL record first. If the WAL write fails the entry is not
+// buffered and the error is returned.
+func (s *WALStore) Append(labels StreamLabels, tsNs int64, line string) error {
+	if err := s.w.WriteRecord(labelsToWALPairs(labels), tsNs, line); err != nil {
+		return err
+	}
+	return s.store.Append(labels, tsNs, line)
+}
+
+// StreamEntries delegates to the embedded MemoryStore.
+func (s *WALStore) StreamEntries(id StreamID) []LogEntry { return s.store.StreamEntries(id) }
+
+// StreamCount delegates to the embedded MemoryStore.
+func (s *WALStore) StreamCount() int { return s.store.StreamCount() }
+
+var _ Ingester = (*WALStore)(nil)
+
+func labelsToWALPairs(l StreamLabels) []logwal.LabelPair {
+	m := l.Map()
+	pairs := make([]logwal.LabelPair, 0, len(m))
+	for name, value := range m {
+		pairs = append(pairs, logwal.LabelPair{Name: name, Value: value})
+	}
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].Name < pairs[j].Name })
+	return pairs
+}
