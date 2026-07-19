@@ -9,7 +9,10 @@ type fakeCard struct{ s, n, p int }
 
 func (f fakeCard) Cardinality() (int, int, int) { return f.s, f.n, f.p }
 
-type fakeStorage struct{ blocks int; bytes int64 }
+type fakeStorage struct {
+	blocks int
+	bytes  int64
+}
 
 func (f fakeStorage) StorageStats() (int, int64) { return f.blocks, f.bytes }
 

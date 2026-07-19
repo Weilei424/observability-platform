@@ -32,9 +32,9 @@ func roundTrip(t *testing.T, labels []LabelPair, tsNs int64, line string) {
 
 func TestEncodeDecode_RoundTrip(t *testing.T) {
 	roundTrip(t, []LabelPair{{"service", "api"}}, 1700000000000000000, "hello world")
-	roundTrip(t, []LabelPair{{"a", "1"}, {"service", "api"}}, 1, "")                 // empty line
-	roundTrip(t, []LabelPair{{"svc", "ingester"}}, 42, "λ multi-byte 日本語 line")     // UTF-8
-	roundTrip(t, nil, 99, "no labels line")                                          // zero labels
+	roundTrip(t, []LabelPair{{"a", "1"}, {"service", "api"}}, 1, "")            // empty line
+	roundTrip(t, []LabelPair{{"svc", "ingester"}}, 42, "λ multi-byte 日本語 line") // UTF-8
+	roundTrip(t, nil, 99, "no labels line")                                     // zero labels
 }
 
 func TestEncodeDecode_MaxLine(t *testing.T) {

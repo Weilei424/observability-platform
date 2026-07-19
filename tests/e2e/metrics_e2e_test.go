@@ -91,7 +91,7 @@ func queryInstantCount(t *testing.T, srv http.Handler, selector string, tsSec fl
 	var resp struct {
 		Status string `json:"status"`
 		Data   struct {
-			ResultType string           `json:"resultType"`
+			ResultType string            `json:"resultType"`
 			Result     []json.RawMessage `json:"result"`
 		} `json:"data"`
 	}
