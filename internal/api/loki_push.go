@@ -3,9 +3,10 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"io"
+	"mime"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/masonwheeler/observability-platform/internal/logs"
 )
@@ -16,22 +17,39 @@ type lokiPushRequest struct {
 
 type lokiStream struct {
 	Stream map[string]string `json:"stream"`
-	Values [][]string        `json:"values"` // each entry: ["<unix_nano>", "<line>"]
+	// Values holds each entry as raw JSON elements so that a canonical Loki
+	// structured-metadata entry (["<ts>", "<line>", {..}]) decodes successfully
+	// and is then rejected through the explicit length check below, rather than
+	// failing generic JSON decoding.
+	Values [][]json.RawMessage `json:"values"` // each entry: ["<unix_nano>", "<line>"]
 }
 
 // handleLokiPush accepts a Loki-style JSON push payload. It validates every entry
 // first; on any error it returns 400 with the full error list and buffers nothing.
 // Otherwise it appends each accepted entry (WAL-before-buffer) and returns 204.
 func (s *Server) handleLokiPush(w http.ResponseWriter, r *http.Request) {
-	if ct := r.Header.Get("Content-Type"); ct != "" && !strings.HasPrefix(ct, "application/json") {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported content-type: only application/json is supported"})
-		return
+	// Content-Type, if present, must parse to exactly application/json. Parsing the
+	// media type (rather than a prefix check) rejects look-alikes such as
+	// application/jsonp and protobuf bodies.
+	if ct := r.Header.Get("Content-Type"); ct != "" {
+		mt, _, err := mime.ParseMediaType(ct)
+		if err != nil || mt != "application/json" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported content-type: only application/json is supported"})
+			return
+		}
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 4<<20)
 
+	dec := json.NewDecoder(r.Body)
 	var req lokiPushRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := dec.Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+		return
+	}
+	// Reject a body with more than one top-level JSON value (e.g. "{...}{...}"):
+	// a well-formed push is exactly one object, so anything after it is malformed.
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unexpected trailing data after JSON body"})
 		return
 	}
 	if len(req.Streams) == 0 {
@@ -63,12 +81,21 @@ func (s *Server) handleLokiPush(w http.ResponseWriter, r *http.Request) {
 				validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: "values", Message: "each value must be a [timestamp, line] pair; structured metadata is not supported"})
 				continue
 			}
-			tsNs, perr := strconv.ParseInt(v[0], 10, 64)
-			if perr != nil {
-				validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: "timestamp", Message: "invalid nanosecond timestamp: " + v[0]})
+			var tsStr, line string
+			if err := json.Unmarshal(v[0], &tsStr); err != nil {
+				validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: "values", Message: "timestamp must be a string"})
 				continue
 			}
-			if verr := logs.ValidateEntry(logs.LogEntry{TimestampNs: tsNs, Line: v[1]}); verr != nil {
+			if err := json.Unmarshal(v[1], &line); err != nil {
+				validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: "values", Message: "line must be a string"})
+				continue
+			}
+			tsNs, perr := strconv.ParseInt(tsStr, 10, 64)
+			if perr != nil {
+				validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: "timestamp", Message: "invalid nanosecond timestamp: " + tsStr})
+				continue
+			}
+			if verr := logs.ValidateEntry(logs.LogEntry{TimestampNs: tsNs, Line: line}); verr != nil {
 				var ve *logs.ValidationError
 				if errors.As(verr, &ve) {
 					validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: ve.Field, Message: ve.Message})
@@ -77,7 +104,7 @@ func (s *Server) handleLokiPush(w http.ResponseWriter, r *http.Request) {
 				}
 				continue
 			}
-			entries = append(entries, pending{labels: sl, tsNs: tsNs, line: v[1]})
+			entries = append(entries, pending{labels: sl, tsNs: tsNs, line: line})
 		}
 	}
 
