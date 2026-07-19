@@ -148,6 +148,29 @@ func TestLokiPush_StructuredMetadata_RejectedExplicitly(t *testing.T) {
 	}
 }
 
+func TestLokiPush_NullLine_Returns400NoLeak(t *testing.T) {
+	srv, store := newPushServer(t)
+	// JSON null for the line must be rejected, not silently coerced to an empty
+	// line and persisted.
+	body := `{"streams":[{"stream":{"service":"api"},"values":[["1700000000000000000",null]]}]}`
+	rr := postPush(t, srv, body, "application/json")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for null line", rr.Code)
+	}
+	if store.StreamCount() != 0 {
+		t.Errorf("StreamCount = %d, want 0 (null line must not be buffered)", store.StreamCount())
+	}
+}
+
+func TestLokiPush_NullTimestamp_Returns400(t *testing.T) {
+	srv, _ := newPushServer(t)
+	body := `{"streams":[{"stream":{"service":"api"},"values":[[null,"x"]]}]}`
+	rr := postPush(t, srv, body, "application/json")
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for null timestamp", rr.Code)
+	}
+}
+
 func TestLokiPush_MultiStream_Returns204(t *testing.T) {
 	srv, store := newPushServer(t)
 	body := `{"streams":[` +

@@ -81,18 +81,22 @@ func (s *Server) handleLokiPush(w http.ResponseWriter, r *http.Request) {
 				validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: "values", Message: "each value must be a [timestamp, line] pair; structured metadata is not supported"})
 				continue
 			}
-			var tsStr, line string
-			if err := json.Unmarshal(v[0], &tsStr); err != nil {
+			// Decode into *string (not string) so a JSON null is rejected rather
+			// than silently coerced to an empty value: Unmarshal("null") is a no-op
+			// for a string, but leaves a *string nil.
+			var tsPtr, linePtr *string
+			if err := json.Unmarshal(v[0], &tsPtr); err != nil || tsPtr == nil {
 				validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: "values", Message: "timestamp must be a string"})
 				continue
 			}
-			if err := json.Unmarshal(v[1], &line); err != nil {
+			if err := json.Unmarshal(v[1], &linePtr); err != nil || linePtr == nil {
 				validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: "values", Message: "line must be a string"})
 				continue
 			}
-			tsNs, perr := strconv.ParseInt(tsStr, 10, 64)
+			line := *linePtr
+			tsNs, perr := strconv.ParseInt(*tsPtr, 10, 64)
 			if perr != nil {
-				validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: "timestamp", Message: "invalid nanosecond timestamp: " + tsStr})
+				validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: "timestamp", Message: "invalid nanosecond timestamp: " + *tsPtr})
 				continue
 			}
 			if verr := logs.ValidateEntry(logs.LogEntry{TimestampNs: tsNs, Line: line}); verr != nil {
