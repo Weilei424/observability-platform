@@ -217,7 +217,7 @@ func TestReplay_PartialTrailingRecord(t *testing.T) {
 		t.Fatalf("open segment for corruption: %v", err)
 	}
 	_, _ = f.Write([]byte{0x00, 0x00, 0x00, 0x20}) // announce 32-byte body...
-	_, _ = f.Write([]byte{0x01, 0x02})               // ...but only write 2 bytes
+	_, _ = f.Write([]byte{0x01, 0x02})             // ...but only write 2 bytes
 	f.Close()
 
 	var count int
@@ -226,6 +226,63 @@ func TestReplay_PartialTrailingRecord(t *testing.T) {
 	}
 	if count != 1 {
 		t.Errorf("replayed %d records, want 1 (partial record must be discarded)", count)
+	}
+}
+
+// TestReplay_TornTailSurvivesRepeatedRestart guards the recovery bug where a
+// tolerated partial tail on the final segment was never truncated: once Open
+// started a fresh segment, the torn segment was no longer final and the NEXT
+// replay aborted startup. Replay must repair the tail so every restart is clean.
+func TestReplay_TornTailSurvivesRepeatedRestart(t *testing.T) {
+	dir := t.TempDir()
+
+	w, err := Open(dir, 128<<20, 1)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := w.WriteRecord(sampleLabels("good"), 1000, 1.0); err != nil {
+		t.Fatalf("WriteRecord: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// Simulate a torn write: a length prefix promising more than is present.
+	paths, _ := segmentPaths(dir)
+	f, err := os.OpenFile(paths[len(paths)-1], os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatalf("open segment: %v", err)
+	}
+	_, _ = f.Write([]byte{0x00, 0x00, 0x00, 0x20, 0x01, 0x02})
+	f.Close()
+
+	// Restart #1: replay tolerates and repairs the torn tail.
+	var c1 int
+	if err := Replay(dir, func(_ []LabelPair, _ int64, _ float64) { c1++ }); err != nil {
+		t.Fatalf("restart #1 Replay: %v", err)
+	}
+	if c1 != 1 {
+		t.Fatalf("restart #1 replayed %d records, want 1", c1)
+	}
+
+	// A fresh Open starts a new segment; the torn segment is no longer final.
+	w2, err := Open(dir, 128<<20, 1)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if err := w2.WriteRecord(sampleLabels("after"), 2000, 2.0); err != nil {
+		t.Fatalf("WriteRecord after reopen: %v", err)
+	}
+	if err := w2.Close(); err != nil {
+		t.Fatalf("Close 2: %v", err)
+	}
+
+	// Restart #2: replay must NOT abort on the now-non-final repaired segment.
+	var c2 int
+	if err := Replay(dir, func(_ []LabelPair, _ int64, _ float64) { c2++ }); err != nil {
+		t.Fatalf("restart #2 Replay aborted on torn tail: %v", err)
+	}
+	if c2 != 2 {
+		t.Errorf("restart #2 replayed %d records, want 2", c2)
 	}
 }
 

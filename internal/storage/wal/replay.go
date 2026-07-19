@@ -53,17 +53,27 @@ func replaySegment(path string, isLast bool, fn func([]LabelPair, int64, float64
 	}
 	defer f.Close()
 
+	// tolerate repairs a torn trailing record on the final segment by truncating
+	// the file back to offset (the end of the last complete record) and returning
+	// nil. Without this, once Open starts a fresh segment the torn segment is no
+	// longer final and a later replay would abort startup on the same torn tail.
+	tolerate := func(offset int64, msg string) error {
+		if err := os.Truncate(path, offset); err != nil {
+			return fmt.Errorf("wal replay: truncate torn tail in %s: %w", path, err)
+		}
+		slog.Warn(msg, "component", "wal", "segment", path, "truncated_at", offset)
+		return nil
+	}
+
+	var offset int64 // bytes consumed by fully-decoded records so far
 	for {
 		var lenBuf [4]byte
 		if _, err := io.ReadFull(f, lenBuf[:]); err != nil {
 			if err == io.EOF {
 				return nil
 			}
-			if err == io.ErrUnexpectedEOF {
-				if isLast {
-					slog.Warn("wal: partial length prefix discarded", "segment", path)
-					return nil
-				}
+			if err == io.ErrUnexpectedEOF && isLast {
+				return tolerate(offset, "wal: partial length prefix discarded")
 			}
 			return fmt.Errorf("wal replay: read length in %s: %w", path, err)
 		}
@@ -75,16 +85,14 @@ func replaySegment(path string, isLast bool, fn func([]LabelPair, int64, float64
 		// record rather than allocated.
 		if bodyLen > maxRecordBodyBytes {
 			if isLast {
-				slog.Warn("wal: oversized declared length discarded", "segment", path, "declared", bodyLen)
-				return nil
+				return tolerate(offset, "wal: oversized declared length discarded")
 			}
 			return fmt.Errorf("wal replay: declared body length %d exceeds maximum in %s", bodyLen, path)
 		}
 		body := make([]byte, bodyLen)
 		if _, err := io.ReadFull(f, body); err != nil {
 			if err == io.ErrUnexpectedEOF && isLast {
-				slog.Warn("wal: partial record body discarded", "segment", path)
-				return nil
+				return tolerate(offset, "wal: partial record body discarded")
 			}
 			return fmt.Errorf("wal replay: read body in %s: %w", path, err)
 		}
@@ -94,5 +102,6 @@ func replaySegment(path string, isLast bool, fn func([]LabelPair, int64, float64
 			return fmt.Errorf("wal replay: corrupt record in %s", path)
 		}
 		fn(labels, tsMs, value)
+		offset += 4 + int64(bodyLen)
 	}
 }
