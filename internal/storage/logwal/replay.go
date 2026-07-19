@@ -10,8 +10,11 @@ import (
 
 // Replay reads all WAL segments in dir in ascending numeric order, invoking fn
 // for each successfully decoded log record. A partial trailing record on the last
-// segment is silently discarded — the normal result of an unclean shutdown.
-// Records in non-final segments must be complete; a corrupt body there returns an error.
+// segment is the normal result of an unclean shutdown: it is discarded AND the
+// segment is truncated back to the last clean record boundary, so that after the
+// next Open starts a fresh segment (leaving this one no longer final), a later
+// replay does not re-encounter the torn tail and abort. Records in non-final
+// segments must be complete; a corrupt body there returns an error.
 func Replay(dir string, fn func(labels []LabelPair, tsNs int64, line string)) error {
 	paths, err := segmentPaths(dir)
 	if err != nil {
@@ -32,6 +35,18 @@ func replaySegment(path string, isLast bool, fn func([]LabelPair, int64, string)
 	}
 	defer f.Close()
 
+	// tolerate repairs a torn trailing record on the final segment by truncating
+	// the file back to offset (the end of the last complete record) and returning
+	// nil, so the on-disk state is clean for every subsequent restart.
+	tolerate := func(offset int64, msg string) error {
+		if err := os.Truncate(path, offset); err != nil {
+			return fmt.Errorf("logwal replay: truncate torn tail in %s: %w", path, err)
+		}
+		slog.Warn(msg, "component", "logwal", "segment", path, "truncated_at", offset)
+		return nil
+	}
+
+	var offset int64 // bytes consumed by fully-decoded records so far
 	for {
 		var lenBuf [4]byte
 		if _, err := io.ReadFull(f, lenBuf[:]); err != nil {
@@ -39,8 +54,7 @@ func replaySegment(path string, isLast bool, fn func([]LabelPair, int64, string)
 				return nil
 			}
 			if err == io.ErrUnexpectedEOF && isLast {
-				slog.Warn("logwal: partial length prefix discarded", "segment", path)
-				return nil
+				return tolerate(offset, "logwal: partial length prefix discarded")
 			}
 			return fmt.Errorf("logwal replay: read length in %s: %w", path, err)
 		}
@@ -48,16 +62,14 @@ func replaySegment(path string, isLast bool, fn func([]LabelPair, int64, string)
 		bodyLen := binary.BigEndian.Uint32(lenBuf[:])
 		if bodyLen > maxRecordBodyBytes {
 			if isLast {
-				slog.Warn("logwal: oversized declared length discarded", "segment", path, "declared", bodyLen)
-				return nil
+				return tolerate(offset, "logwal: oversized declared length discarded")
 			}
 			return fmt.Errorf("logwal replay: declared body length %d exceeds maximum in %s", bodyLen, path)
 		}
 		body := make([]byte, bodyLen)
 		if _, err := io.ReadFull(f, body); err != nil {
 			if err == io.ErrUnexpectedEOF && isLast {
-				slog.Warn("logwal: partial record body discarded", "segment", path)
-				return nil
+				return tolerate(offset, "logwal: partial record body discarded")
 			}
 			return fmt.Errorf("logwal replay: read body in %s: %w", path, err)
 		}
@@ -67,5 +79,6 @@ func replaySegment(path string, isLast bool, fn func([]LabelPair, int64, string)
 			return fmt.Errorf("logwal replay: corrupt record in %s", path)
 		}
 		fn(labels, tsNs, line)
+		offset += 4 + int64(bodyLen)
 	}
 }
