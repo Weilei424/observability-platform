@@ -12,6 +12,7 @@ import (
 
 	"github.com/masonwheeler/observability-platform/internal/api"
 	"github.com/masonwheeler/observability-platform/internal/config"
+	"github.com/masonwheeler/observability-platform/internal/logs"
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/observability"
 	"github.com/masonwheeler/observability-platform/internal/storage/wal"
@@ -54,7 +55,7 @@ func newWALServer(t *testing.T, dataDir, walDir string) (*api.Server, *wal.WAL) 
 	store := metrics.NewWALStore(w, blockStore, dataDir)
 	engine := metrics.NewQueryEngine(blockStore)
 	reg, _ := observability.NewRegistry(blockStore, nil)
-	return api.New(cfg, log, store, engine, reg), w
+	return api.New(cfg, log, store, engine, reg, logs.NewMemoryStore()), w
 }
 
 func TestIngestRestartQuery(t *testing.T) {
