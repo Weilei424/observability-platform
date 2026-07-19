@@ -58,32 +58,36 @@ func TestLogWAL_CloseIdempotent(t *testing.T) {
 	}
 }
 
-func TestLogWAL_SyncEveryNDurability(t *testing.T) {
+func TestLogWAL_SyncEveryNAutomaticBoundary(t *testing.T) {
 	dir := t.TempDir()
-	// syncEveryN=3 means the final <3 records are only flushed by an explicit
-	// Sync/Close, not by the per-record boundary. Everything must still be durable.
 	w, err := Open(dir, 1<<20, 3)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	for i := 0; i < 5; i++ {
-		if err := w.WriteRecord([]LabelPair{{"service", "api"}}, int64(i+1), "line"); err != nil {
-			t.Fatalf("WriteRecord %d: %v", i, err)
+	defer w.Close()
+	writeN := func(n int) {
+		for i := 0; i < n; i++ {
+			if err := w.WriteRecord([]LabelPair{{"service", "api"}}, 1, "line"); err != nil {
+				t.Fatalf("WriteRecord: %v", err)
+			}
 		}
 	}
-	if err := w.Sync(); err != nil { // explicit Sync flushes the trailing 2 records
-		t.Fatalf("Sync: %v", err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
 
-	var count int
-	if err := Replay(dir, func([]LabelPair, int64, string) { count++ }); err != nil {
-		t.Fatalf("Replay: %v", err)
+	// Below the syncEveryN=3 threshold: no automatic fsync yet. This asserts the
+	// boundary itself, not just eventual durability (which Close would mask).
+	writeN(2)
+	if w.autoSyncs != 0 {
+		t.Fatalf("autoSyncs = %d after 2 writes, want 0 (below boundary)", w.autoSyncs)
 	}
-	if count != 5 {
-		t.Errorf("replayed %d records, want 5 (all durable under syncEveryN=3)", count)
+	// The 3rd write crosses the boundary → exactly one automatic fsync.
+	writeN(1)
+	if w.autoSyncs != 1 {
+		t.Fatalf("autoSyncs = %d after 3 writes, want 1 (boundary must fire automatically)", w.autoSyncs)
+	}
+	// Three more writes → a second automatic fsync at the next boundary.
+	writeN(3)
+	if w.autoSyncs != 2 {
+		t.Fatalf("autoSyncs = %d after 6 writes, want 2", w.autoSyncs)
 	}
 }
 

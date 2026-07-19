@@ -75,13 +75,32 @@ func TestWAL_SyncEveryN(t *testing.T) {
 	}
 	defer w.Close()
 
-	for i := 0; i < 6; i++ {
+	// Assert the automatic sync boundary itself fires (not just eventual
+	// durability, which Close would mask): no fsync below N, one at each Nth write.
+	for i := 0; i < 2; i++ {
 		if err := w.WriteRecord(sampleLabels("m"), int64(i*1000), float64(i)); err != nil {
 			t.Fatalf("WriteRecord %d: %v", i, err)
 		}
 	}
+	if w.autoSyncs != 0 {
+		t.Fatalf("autoSyncs = %d after 2 writes, want 0 (below boundary)", w.autoSyncs)
+	}
+	if err := w.WriteRecord(sampleLabels("m"), 3000, 3.0); err != nil {
+		t.Fatalf("WriteRecord 3: %v", err)
+	}
+	if w.autoSyncs != 1 {
+		t.Fatalf("autoSyncs = %d after 3 writes, want 1 (boundary must fire automatically)", w.autoSyncs)
+	}
+	for i := 0; i < 3; i++ {
+		if err := w.WriteRecord(sampleLabels("m"), int64((i+4)*1000), float64(i+4)); err != nil {
+			t.Fatalf("WriteRecord: %v", err)
+		}
+	}
+	if w.autoSyncs != 2 {
+		t.Fatalf("autoSyncs = %d after 6 writes, want 2", w.autoSyncs)
+	}
 
-	// Verify that all 6 records are readable (sync happened at N=3 and N=6).
+	// And all 6 records remain durably readable.
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}

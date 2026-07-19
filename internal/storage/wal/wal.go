@@ -23,6 +23,11 @@ type WAL struct {
 	written     int64
 	sinceSynced int
 	broken      bool
+
+	// autoSyncs counts fsyncs triggered by the syncEveryN write boundary (not
+	// explicit Sync/Close). A same-package test seam to verify the automatic
+	// boundary actually fires, which an in-process replay cannot show.
+	autoSyncs int
 }
 
 // Open opens or creates a WAL rooted at dir. New writes go to a fresh segment
@@ -100,6 +105,7 @@ func (w *WAL) WriteRecord(labels []LabelPair, tsMs int64, value float64) error {
 			return fmt.Errorf("wal: fsync: %w", err)
 		}
 		w.sinceSynced = 0
+		w.autoSyncs++
 	}
 
 	if w.written >= w.segMaxBytes {

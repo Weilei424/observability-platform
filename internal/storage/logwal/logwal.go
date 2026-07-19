@@ -22,6 +22,11 @@ type LogWAL struct {
 	written     int64
 	sinceSynced int
 	broken      bool
+
+	// autoSyncs counts fsyncs triggered by the syncEveryN write boundary (not
+	// explicit Sync/Close). A test seam that lets a same-package test verify the
+	// automatic boundary actually fires, which an in-process replay cannot show.
+	autoSyncs int
 }
 
 // Open opens or creates a log WAL rooted at dir. New writes go to a fresh segment
@@ -96,6 +101,7 @@ func (w *LogWAL) WriteRecord(labels []LabelPair, tsNs int64, line string) error 
 			return fmt.Errorf("logwal: fsync: %w", err)
 		}
 		w.sinceSynced = 0
+		w.autoSyncs++
 	}
 
 	if w.written >= w.segMaxBytes {
