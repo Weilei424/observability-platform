@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 
+	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/masonwheeler/observability-platform/internal/logs"
 )
 
@@ -119,7 +120,10 @@ func (s *Server) handleLokiPush(w http.ResponseWriter, r *http.Request) {
 
 	for _, e := range entries {
 		if err := s.logIngester.Append(e.labels, e.tsNs, e.line); err != nil {
-			s.log.Error("log ingester append failed", "err", err)
+			s.log.Error("log ingester append failed",
+				"component", "logs_push",
+				"request_id", chimiddleware.GetReqID(r.Context()),
+				"err", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 			return
 		}

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 
+	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 )
 
@@ -109,7 +110,10 @@ func (s *Server) handleIngestMetrics(w http.ResponseWriter, r *http.Request) {
 	var appendErrors []error
 	for _, ps := range samples {
 		if err := s.ingester.Append(ps.labels, ps.timestampMs, ps.value); err != nil {
-			s.log.Error("ingester append failed", "err", err)
+			s.log.Error("ingester append failed",
+				"component", "metrics_ingest",
+				"request_id", chimiddleware.GetReqID(r.Context()),
+				"err", err)
 			appendErrors = append(appendErrors, err)
 		}
 	}
