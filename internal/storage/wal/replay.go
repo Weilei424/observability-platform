@@ -54,12 +54,14 @@ func replaySegment(path string, isLast bool, fn func([]LabelPair, int64, float64
 	defer f.Close()
 
 	// tolerate repairs a torn trailing record on the final segment by truncating
-	// the file back to offset (the end of the last complete record) and returning
-	// nil. Without this, once Open starts a fresh segment the torn segment is no
-	// longer final and a later replay would abort startup on the same torn tail.
+	// the file back to offset (the end of the last complete record). The truncation
+	// is fsynced through a writable handle before returning, so the repair is
+	// durable before Open starts a newer segment — otherwise a host/power crash
+	// could lose the truncation while keeping the newer (fsynced) segment,
+	// recreating the torn-tail abort on a now-non-final segment.
 	tolerate := func(offset int64, msg string) error {
-		if err := os.Truncate(path, offset); err != nil {
-			return fmt.Errorf("wal replay: truncate torn tail in %s: %w", path, err)
+		if err := truncateAndSync(path, offset); err != nil {
+			return fmt.Errorf("wal replay: repair torn tail in %s: %w", path, err)
 		}
 		slog.Warn(msg, "component", "wal", "segment", path, "truncated_at", offset)
 		return nil
@@ -104,4 +106,22 @@ func replaySegment(path string, isLast bool, fn func([]LabelPair, int64, float64
 		fn(labels, tsMs, value)
 		offset += 4 + int64(bodyLen)
 	}
+}
+
+// truncateAndSync truncates path to size bytes and fsyncs it through a writable
+// handle, so a torn-tail repair survives a subsequent host/power crash.
+func truncateAndSync(path string, size int64) error {
+	f, err := os.OpenFile(path, os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	if err := f.Truncate(size); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
