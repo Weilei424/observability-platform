@@ -43,6 +43,24 @@ func postIngest(t *testing.T, srv *api.Server, body any) *httptest.ResponseRecor
 	return rr
 }
 
+func TestIngestMetrics_TrailingData_Returns400(t *testing.T) {
+	srv, store := newIngestTestServer(t)
+	// A valid payload followed by a second top-level JSON object must be rejected
+	// as malformed, and nothing may be stored.
+	raw := `{"metrics":[{"name":"m","labels":{},"timestamp_ms":1000,"value":1}]}{"extra":1}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/ingest/metrics", bytes.NewReader([]byte(raw)))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for trailing data", rr.Code)
+	}
+	if series, _, _ := store.Cardinality(); series != 0 {
+		t.Errorf("series count = %d, want 0 (nothing stored on malformed body)", series)
+	}
+}
+
 func TestIngestMetrics_ValidSingleSample_Returns204(t *testing.T) {
 	srv, _ := newIngestTestServer(t)
 

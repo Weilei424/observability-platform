@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 
 	"github.com/masonwheeler/observability-platform/internal/metrics"
@@ -28,9 +29,15 @@ type ingestErrorItem struct {
 func (s *Server) handleIngestMetrics(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 
+	dec := json.NewDecoder(r.Body)
 	var req ingestRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := dec.Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+		return
+	}
+	// A well-formed request is exactly one JSON object; anything after it is malformed.
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unexpected trailing data after JSON body"})
 		return
 	}
 
