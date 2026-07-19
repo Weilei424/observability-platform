@@ -16,8 +16,10 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/api"
 	"github.com/masonwheeler/observability-platform/internal/compactor"
 	"github.com/masonwheeler/observability-platform/internal/config"
+	"github.com/masonwheeler/observability-platform/internal/logs"
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/observability"
+	"github.com/masonwheeler/observability-platform/internal/storage/logwal"
 	"github.com/masonwheeler/observability-platform/internal/storage/wal"
 )
 
@@ -80,10 +82,42 @@ func main() {
 		os.Exit(1)
 	}
 
+	logsWALDir := filepath.Join(cfg.DataDir, "logs", "wal")
+
+	logStore := logs.NewMemoryStore()
+	var logReplayCount int
+	if err := logwal.Replay(logsWALDir, func(pairs []logwal.LabelPair, tsNs int64, line string) {
+		lm := make(map[string]string, len(pairs))
+		for _, p := range pairs {
+			lm[p.Name] = p.Value
+		}
+		sl, err := logs.NewStreamLabels(lm)
+		if err != nil {
+			log.Warn("logs WAL replay: skipping record with invalid labels", slog.String("error", err.Error()))
+			return
+		}
+		if err := logStore.Append(sl, tsNs, line); err != nil {
+			log.Warn("logs WAL replay: failed to append entry", slog.String("error", err.Error()))
+			return
+		}
+		logReplayCount++
+	}); err != nil {
+		log.Error("logs WAL replay failed", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	log.Info("logs WAL replay complete", slog.Int("entries_restored", logReplayCount))
+
+	lw, err := logwal.Open(logsWALDir, cfg.WALSegmentMaxBytes, cfg.WALSyncEveryN)
+	if err != nil {
+		log.Error("failed to open logs WAL", slog.String("wal_dir", logsWALDir), slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	logIngester := logs.NewWALStore(lw, logStore)
+
 	store := metrics.NewWALStore(w, blockStore, cfg.DataDir)
 	engine := metrics.NewQueryEngine(blockStore)
 	reg, mx := observability.NewRegistry(blockStore, blockStore)
-	srv := api.New(cfg, log, store, engine, reg)
+	srv := api.New(cfg, log, store, engine, reg, logIngester)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -144,6 +178,9 @@ func main() {
 
 	if err := w.Close(); err != nil {
 		log.Error("wal close error", slog.String("error", err.Error()))
+	}
+	if err := lw.Close(); err != nil {
+		log.Error("logs wal close error", slog.String("error", err.Error()))
 	}
 	if err := blockStore.Close(); err != nil {
 		log.Error("block store close error", slog.String("error", err.Error()))
