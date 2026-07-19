@@ -11,6 +11,7 @@ import (
 
 	"github.com/masonwheeler/observability-platform/internal/api"
 	"github.com/masonwheeler/observability-platform/internal/config"
+	"github.com/masonwheeler/observability-platform/internal/logs"
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/observability"
 )
@@ -26,7 +27,7 @@ func newIngestTestServer(t *testing.T) (*api.Server, *metrics.MemoryStore) {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	reg, _ := observability.NewRegistry(store, nil)
-	return api.New(cfg, log, store, engine, reg), store
+	return api.New(cfg, log, store, engine, reg, logs.NewMemoryStore()), store
 }
 
 func postIngest(t *testing.T, srv *api.Server, body any) *httptest.ResponseRecorder {

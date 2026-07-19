@@ -30,5 +30,7 @@ func (s *Server) buildRouter() chi.Router {
 	r.Get("/api/v1/series", s.handleSeries)
 	r.Post("/api/v1/series", s.handleSeries)
 
+	r.Post("/loki/api/v1/push", s.handleLokiPush)
+
 	return r
 }
