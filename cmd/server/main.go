@@ -35,6 +35,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "logger error: %v\n", err)
 		os.Exit(1)
 	}
+	// Route package-level slog calls (e.g. WAL replay recovery warnings) through
+	// the structured JSON application logger instead of the stdlib text default.
+	slog.SetDefault(log)
 
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		log.Error("failed to create data directory", slog.String("data_dir", cfg.DataDir), slog.String("error", err.Error()))
