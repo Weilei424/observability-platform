@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,85 @@ import (
 
 func sampleLabels(name string) []LabelPair {
 	return []LabelPair{{Name: "__name__", Value: name}, {Name: "env", Value: "test"}}
+}
+
+func TestOpen_FsyncsSegmentDirectory(t *testing.T) {
+	var synced []string
+	restore := fsyncDir
+	fsyncDir = func(dir string) error { synced = append(synced, dir); return restore(dir) }
+	defer func() { fsyncDir = restore }()
+
+	dir := t.TempDir()
+	w, err := Open(dir, 128<<20, 1)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer w.Close()
+	found := false
+	for _, d := range synced {
+		if d == dir {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected fsyncDir(%q) for the new segment's directory, got %v", dir, synced)
+	}
+}
+
+func TestMkdirAllSync_FsyncsNewParents(t *testing.T) {
+	var synced []string
+	restore := fsyncDir
+	fsyncDir = func(dir string) error { synced = append(synced, dir); return restore(dir) }
+	defer func() { fsyncDir = restore }()
+
+	base := t.TempDir()
+	dir := filepath.Join(base, "metrics", "wal") // metrics/ and wal/ do not exist yet
+	w, err := Open(dir, 128<<20, 1)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer w.Close()
+	for _, want := range []string{base, filepath.Join(base, "metrics")} {
+		found := false
+		for _, d := range synced {
+			if d == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected fsyncDir(%q) for new-parent durability, got %v", want, synced)
+		}
+	}
+}
+
+func TestOpen_DirSyncFailurePropagates(t *testing.T) {
+	restore := fsyncDir
+	fsyncDir = func(string) error { return errors.New("boom") }
+	defer func() { fsyncDir = restore }()
+
+	if _, err := Open(t.TempDir(), 128<<20, 1); err == nil {
+		t.Fatal("Open should fail when directory fsync fails")
+	}
+}
+
+func TestRotation_SyncsUnsyncedRemainder(t *testing.T) {
+	dir := t.TempDir()
+	// syncEveryN huge so no periodic fsync fires; tiny segMaxBytes forces a
+	// rotation while the just-written record is still unsynced.
+	w, err := Open(dir, 8, 1000)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer w.Close()
+	if err := w.WriteRecord(sampleLabels("m"), 1, 1.0); err != nil {
+		t.Fatalf("WriteRecord: %v", err)
+	}
+	if w.preRotationSyncs == 0 {
+		t.Error("expected a pre-rotation fsync of the unsynced remainder")
+	}
+	if w.autoSyncs != 0 {
+		t.Errorf("autoSyncs = %d, want 0 (syncEveryN=1000 must not periodically sync)", w.autoSyncs)
+	}
 }
 
 func TestWAL_Open_CreatesSegment(t *testing.T) {
