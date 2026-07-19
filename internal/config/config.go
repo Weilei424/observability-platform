@@ -118,6 +118,14 @@ func Load() (*Config, error) {
 	if cfg.FlushSealedChunks < 0 || cfg.FlushWALBytes < 0 || cfg.Retention < 0 {
 		return nil, fmt.Errorf("config: thresholds and retention must be >= 0")
 	}
+	if cfg.WALSegmentMaxBytes <= 0 {
+		return nil, fmt.Errorf("config: wal_segment_max_bytes must be > 0")
+	}
+	if cfg.WALSyncEveryN < 1 {
+		// < 1 would disable automatic fsync entirely, silently dropping the WAL's
+		// durability guarantee.
+		return nil, fmt.Errorf("config: wal_sync_every_n must be >= 1")
+	}
 
 	return cfg, nil
 }

@@ -144,3 +144,27 @@ func TestLoad_InvalidDurationErrors(t *testing.T) {
 		t.Fatal("invalid flush_interval should error")
 	}
 }
+
+func TestLoad_NonPositiveWALSyncEveryNErrors(t *testing.T) {
+	t.Setenv("OBS_DATA_DIR", "data")
+	t.Setenv("OBS_WAL_SYNC_EVERY_N", "0")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("wal_sync_every_n=0 should error (it would disable automatic fsync)")
+	}
+	if !strings.Contains(err.Error(), "wal_sync_every_n") {
+		t.Errorf("error = %q, want it to mention wal_sync_every_n", err.Error())
+	}
+}
+
+func TestLoad_NonPositiveWALSegmentMaxBytesErrors(t *testing.T) {
+	t.Setenv("OBS_DATA_DIR", "data")
+	t.Setenv("OBS_WAL_SEGMENT_MAX_BYTES", "0")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("wal_segment_max_bytes=0 should error")
+	}
+	if !strings.Contains(err.Error(), "wal_segment_max_bytes") {
+		t.Errorf("error = %q, want it to mention wal_segment_max_bytes", err.Error())
+	}
+}
