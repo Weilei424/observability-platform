@@ -4,7 +4,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -37,18 +36,21 @@ func TestMkdirAllSync_FsyncsNewParents(t *testing.T) {
 	}
 }
 
-func TestMkdirAllSync_ExistingDirNoSync(t *testing.T) {
-	var calls int
+func TestMkdirAllSync_ExistingDirSyncsBoundaryParent(t *testing.T) {
+	var synced []string
 	restore := SyncDir
-	SyncDir = func(dir string) error { calls++; return restore(dir) }
+	SyncDir = func(dir string) error { synced = append(synced, dir); return restore(dir) }
 	defer func() { SyncDir = restore }()
 
 	dir := t.TempDir() // already exists
 	if err := MkdirAllSync(dir); err != nil {
 		t.Fatalf("MkdirAllSync: %v", err)
 	}
-	if calls != 0 {
-		t.Errorf("SyncDir called %d times for an existing dir, want 0", calls)
+	// The existing boundary's own entry is made durable by fsyncing its parent,
+	// so a directory left behind by a prior interrupted run is not trusted blindly.
+	want := filepath.Dir(dir)
+	if len(synced) != 1 || synced[0] != want {
+		t.Errorf("synced = %v, want exactly [%q] (boundary parent)", synced, want)
 	}
 }
 
@@ -101,7 +103,7 @@ func TestMkdirAllSync_PartialFailureKeepsDurablePrefixThenRetrySucceeds(t *testi
 	}
 }
 
-func TestMkdirAllSync_RollbackFailureIsSurfaced(t *testing.T) {
+func TestMkdirAllSync_RollbackFailureSurfacedThenRetryMakesSurvivorDurable(t *testing.T) {
 	base := t.TempDir()
 	x := filepath.Join(base, "x")
 	y := filepath.Join(base, "x", "y")
@@ -110,19 +112,47 @@ func TestMkdirAllSync_RollbackFailureIsSurfaced(t *testing.T) {
 	restoreRemove := removeDir
 	defer func() { SyncDir = restoreSync; removeDir = restoreRemove }()
 
+	errSync := errors.New("sync boom")
+	errRemove := errors.New("remove boom")
+
+	// Attempt 1: syncing x (the parent of y) fails, and rollback removal of y also
+	// fails, so the undurable directory y is left behind.
 	SyncDir = func(dir string) error {
 		if dir == x {
-			return errors.New("sync boom")
+			return errSync
 		}
 		return restoreSync(dir)
 	}
-	removeDir = func(string) error { return errors.New("remove boom") }
+	removeDir = func(string) error { return errRemove }
 
 	err := MkdirAllSync(y)
 	if err == nil {
-		t.Fatal("expected error when fsync fails and rollback also fails")
+		t.Fatal("expected error when fsync and rollback both fail")
 	}
-	if !strings.Contains(err.Error(), "rollback") {
-		t.Errorf("error %q should surface the rollback failure", err.Error())
+	// The combined error must let errors.Is recover BOTH underlying causes.
+	if !errors.Is(err, errSync) || !errors.Is(err, errRemove) {
+		t.Errorf("error must wrap both causes: errors.Is(sync)=%v errors.Is(remove)=%v (err=%v)",
+			errors.Is(err, errSync), errors.Is(err, errRemove), err)
+	}
+	if _, statErr := os.Stat(y); statErr != nil {
+		t.Fatalf("survivor y should still exist after a failed rollback: %v", statErr)
+	}
+
+	// Retry with working seams: because y is now the existing boundary, its parent
+	// x must be fsynced before success — making the previously undurable y durable.
+	var synced []string
+	SyncDir = func(dir string) error { synced = append(synced, dir); return restoreSync(dir) }
+	removeDir = restoreRemove
+	if err := MkdirAllSync(y); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	found := false
+	for _, d := range synced {
+		if d == x {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("retry did not fsync the survivor's parent %q; synced=%v", x, synced)
 	}
 }

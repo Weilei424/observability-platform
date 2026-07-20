@@ -40,8 +40,11 @@ var removeDir = os.Remove
 // a retry recreates and re-syncs it; every shallower level already created
 // remains durable. If the rollback removal itself fails, the error is surfaced
 // (wrapping both the fsync and removal failures) rather than silently leaving an
-// undurable directory. The created directories are empty at this point (no files
-// are written until after MkdirAllSync returns), so removing them is safe.
+// undurable directory — and because the surviving directory is the boundary that
+// the next call stops at, MkdirAllSync fsyncs that boundary's parent up front, so
+// a later retry makes the survivor durable rather than trusting it blindly. The
+// created directories are empty at this point (no files are written until after
+// MkdirAllSync returns), so removing them is safe.
 func MkdirAllSync(dir string) error {
 	// Walk up collecting the chain of not-yet-existing directories, deepest first,
 	// stopping at the first existing ancestor.
@@ -66,6 +69,16 @@ func MkdirAllSync(dir string) error {
 		p = parent
 	}
 
+	// p is the deepest existing ancestor. Fsync its parent so p's own entry is
+	// durable before we trust it: a prior interrupted run may have created p
+	// without persisting its entry (a fsync+rollback double failure leaves such a
+	// directory behind). This is idempotent — one dir fsync — in the common case.
+	if boundaryParent := filepath.Dir(p); boundaryParent != p {
+		if err := SyncDir(boundaryParent); err != nil {
+			return fmt.Errorf("fsutil: fsync parent of existing %s: %w", p, err)
+		}
+	}
+
 	// Create shallowest first so each level's parent already exists.
 	for i := len(missing) - 1; i >= 0; i-- {
 		level := missing[i]
@@ -76,7 +89,7 @@ func MkdirAllSync(dir string) error {
 			// This level's entry is not durable; remove it so a retry recreates
 			// and re-syncs it. Shallower levels are already durable.
 			if rmErr := removeDir(level); rmErr != nil {
-				return fmt.Errorf("fsutil: fsync parent of %s failed (%v); rollback also failed: %w", level, err, rmErr)
+				return fmt.Errorf("fsutil: fsync parent of %s failed: %w; rollback also failed: %w", level, err, rmErr)
 			}
 			return fmt.Errorf("fsutil: fsync parent of %s: %w", level, err)
 		}
