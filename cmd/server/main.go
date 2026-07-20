@@ -19,6 +19,7 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/logs"
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/observability"
+	"github.com/masonwheeler/observability-platform/internal/storage/fsutil"
 	"github.com/masonwheeler/observability-platform/internal/storage/logwal"
 	"github.com/masonwheeler/observability-platform/internal/storage/wal"
 )
@@ -39,7 +40,11 @@ func main() {
 	// the structured JSON application logger instead of the stdlib text default.
 	slog.SetDefault(log)
 
-	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
+	// Durably create the data directory so its own directory entry survives a
+	// power loss on first startup — a plain MkdirAll leaves the entry only in the
+	// OS cache, and the WAL helpers below stop walking at the (now-existing) data
+	// dir and never fsync its parent.
+	if err := fsutil.MkdirAllSync(cfg.DataDir); err != nil {
 		log.Error("failed to create data directory", slog.String("data_dir", cfg.DataDir), slog.String("error", err.Error()))
 		os.Exit(1)
 	}
