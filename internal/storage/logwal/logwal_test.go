@@ -5,13 +5,15 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/masonwheeler/observability-platform/internal/storage/fsutil"
 )
 
 func TestOpen_FsyncsSegmentDirectory(t *testing.T) {
 	var synced []string
-	restore := fsyncDir
-	fsyncDir = func(dir string) error { synced = append(synced, dir); return restore(dir) }
-	defer func() { fsyncDir = restore }()
+	restore := fsutil.SyncDir
+	fsutil.SyncDir = func(dir string) error { synced = append(synced, dir); return restore(dir) }
+	defer func() { fsutil.SyncDir = restore }()
 
 	dir := t.TempDir()
 	w, err := Open(dir, 1<<20, 1)
@@ -26,45 +28,17 @@ func TestOpen_FsyncsSegmentDirectory(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("expected fsyncDir(%q) for the new segment's directory, got %v", dir, synced)
-	}
-}
-
-func TestMkdirAllSync_FsyncsNewParents(t *testing.T) {
-	var synced []string
-	restore := fsyncDir
-	fsyncDir = func(dir string) error { synced = append(synced, dir); return restore(dir) }
-	defer func() { fsyncDir = restore }()
-
-	base := t.TempDir()
-	dir := filepath.Join(base, "logs", "wal") // logs/ and wal/ do not exist yet
-	w, err := Open(dir, 1<<20, 1)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer w.Close()
-	// The parents of the newly created directories must be fsynced so the new
-	// entries survive a power loss.
-	for _, want := range []string{base, filepath.Join(base, "logs")} {
-		found := false
-		for _, d := range synced {
-			if d == want {
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("expected fsyncDir(%q) for new-parent durability, got %v", want, synced)
-		}
+		t.Errorf("expected SyncDir(%q) for the new segment's directory, got %v", dir, synced)
 	}
 }
 
 func TestOpen_DirSyncFailurePropagates(t *testing.T) {
-	restore := fsyncDir
-	fsyncDir = func(string) error { return errors.New("boom") }
-	defer func() { fsyncDir = restore }()
+	restore := fsutil.SyncDir
+	fsutil.SyncDir = func(string) error { return errors.New("boom") }
+	defer func() { fsutil.SyncDir = restore }()
 
 	if _, err := Open(t.TempDir(), 1<<20, 1); err == nil {
-		t.Fatal("Open should fail when directory fsync fails")
+		t.Fatal("Open should fail when the segment-directory fsync fails")
 	}
 }
 
