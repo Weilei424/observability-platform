@@ -103,6 +103,29 @@ func TestMkdirAllSync_PartialFailureKeepsDurablePrefixThenRetrySucceeds(t *testi
 	}
 }
 
+func TestMkdirAllSync_UnreadableBoundaryParentTolerated(t *testing.T) {
+	// A pre-provisioned data directory whose parent is execute-only (0111): the
+	// service can traverse the parent and fully access the data dir, but cannot
+	// read/list the parent. MkdirAllSync must not fail — the readiness contract
+	// requires only that the data dir be writable, not that its parent be readable.
+	base := t.TempDir()
+	parent := filepath.Join(base, "restricted")
+	data := filepath.Join(parent, "data")
+	if err := os.MkdirAll(data, 0o700); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := os.Chmod(parent, 0o111); err != nil {
+		t.Fatalf("chmod parent 0111: %v", err)
+	}
+	defer os.Chmod(parent, 0o700) // restore so t.TempDir cleanup can remove it
+
+	// Creating a WAL directory under the writable data dir must succeed despite the
+	// unreadable parent.
+	if err := MkdirAllSync(filepath.Join(data, "metrics", "wal")); err != nil {
+		t.Errorf("MkdirAllSync under an unreadable parent should succeed, got: %v", err)
+	}
+}
+
 func TestMkdirAllSync_RollbackFailureSurfacedThenRetryMakesSurvivorDurable(t *testing.T) {
 	base := t.TempDir()
 	x := filepath.Join(base, "x")

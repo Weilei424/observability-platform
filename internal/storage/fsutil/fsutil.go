@@ -73,8 +73,14 @@ func MkdirAllSync(dir string) error {
 	// durable before we trust it: a prior interrupted run may have created p
 	// without persisting its entry (a fsync+rollback double failure leaves such a
 	// directory behind). This is idempotent — one dir fsync — in the common case.
+	//
+	// If the parent is not readable, p is a pre-provisioned/trusted boundary
+	// (a rollback survivor is always created by us under a directory we own, so
+	// its parent is readable). Treat it as already durable and skip: the readiness
+	// contract requires only that the data directory be writable, not that its
+	// parent be readable.
 	if boundaryParent := filepath.Dir(p); boundaryParent != p {
-		if err := SyncDir(boundaryParent); err != nil {
+		if err := SyncDir(boundaryParent); err != nil && !os.IsPermission(err) {
 			return fmt.Errorf("fsutil: fsync parent of existing %s: %w", p, err)
 		}
 	}
