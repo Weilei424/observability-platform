@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -51,43 +52,77 @@ func TestMkdirAllSync_ExistingDirNoSync(t *testing.T) {
 	}
 }
 
-func TestMkdirAllSync_SyncFailureRollsBackAndRetrySucceeds(t *testing.T) {
+// TestMkdirAllSync_PartialFailureKeepsDurablePrefixThenRetrySucceeds is the
+// regression guard for the retry-safety gap: when a deep level's parent fsync
+// fails, the shallower levels created so far must remain durable, the failing
+// level must be rolled back, and a retry must recreate and re-sync it.
+func TestMkdirAllSync_PartialFailureKeepsDurablePrefixThenRetrySucceeds(t *testing.T) {
 	base := t.TempDir()
-	dir := filepath.Join(base, "x", "y")
+	x := filepath.Join(base, "x")
+	y := filepath.Join(base, "x", "y")
 
-	// First attempt: every parent fsync fails. MkdirAllSync must error AND roll
-	// back the directories it created, so the state is clean for a retry.
 	restore := SyncDir
-	SyncDir = func(string) error { return errors.New("sync boom") }
-	if err := MkdirAllSync(dir); err == nil {
-		SyncDir = restore
-		t.Fatal("MkdirAllSync should fail when a parent fsync fails")
+	defer func() { SyncDir = restore }()
+
+	// First attempt: syncing x (the parent of y) fails; syncing base succeeds.
+	SyncDir = func(dir string) error {
+		if dir == x {
+			return errors.New("sync x boom")
+		}
+		return restore(dir)
 	}
-	if _, err := os.Stat(filepath.Join(base, "x")); !os.IsNotExist(err) {
-		SyncDir = restore
-		t.Fatalf("created dirs must be rolled back after a failed sync; base/x still present (err=%v)", err)
+	if err := MkdirAllSync(y); err == nil {
+		t.Fatal("expected error when syncing the deep parent fails")
+	}
+	if _, err := os.Stat(x); err != nil {
+		t.Fatalf("shallow level %s must remain durable, stat err=%v", x, err)
+	}
+	if _, err := os.Stat(y); !os.IsNotExist(err) {
+		t.Fatalf("failing level %s must be rolled back, err=%v", y, err)
 	}
 
-	// Retry with a working fsync: because the dirs were rolled back, the parents
-	// are seen as missing again and are re-synced before success.
+	// Retry with a working fsync: y is created and x re-synced before success.
 	var synced []string
-	SyncDir = func(d string) error { synced = append(synced, d); return restore(d) }
-	defer func() { SyncDir = restore }()
-	if err := MkdirAllSync(dir); err != nil {
-		t.Fatalf("retry MkdirAllSync: %v", err)
+	SyncDir = func(dir string) error { synced = append(synced, dir); return restore(dir) }
+	if err := MkdirAllSync(y); err != nil {
+		t.Fatalf("retry: %v", err)
 	}
-	for _, want := range []string{base, filepath.Join(base, "x")} {
-		found := false
-		for _, d := range synced {
-			if d == want {
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("retry did not re-sync parent %q; synced=%v", want, synced)
+	if _, err := os.Stat(y); err != nil {
+		t.Errorf("y not created on retry: %v", err)
+	}
+	found := false
+	for _, d := range synced {
+		if d == x {
+			found = true
 		}
 	}
-	if _, err := os.Stat(dir); err != nil {
-		t.Errorf("dir not created on retry: %v", err)
+	if !found {
+		t.Errorf("retry did not re-sync %q; synced=%v", x, synced)
+	}
+}
+
+func TestMkdirAllSync_RollbackFailureIsSurfaced(t *testing.T) {
+	base := t.TempDir()
+	x := filepath.Join(base, "x")
+	y := filepath.Join(base, "x", "y")
+
+	restoreSync := SyncDir
+	restoreRemove := removeDir
+	defer func() { SyncDir = restoreSync; removeDir = restoreRemove }()
+
+	SyncDir = func(dir string) error {
+		if dir == x {
+			return errors.New("sync boom")
+		}
+		return restoreSync(dir)
+	}
+	removeDir = func(string) error { return errors.New("remove boom") }
+
+	err := MkdirAllSync(y)
+	if err == nil {
+		t.Fatal("expected error when fsync fails and rollback also fails")
+	}
+	if !strings.Contains(err.Error(), "rollback") {
+		t.Errorf("error %q should surface the rollback failure", err.Error())
 	}
 }
