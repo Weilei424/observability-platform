@@ -94,6 +94,9 @@ func (w *LogWAL) WriteRecord(labels []LabelPair, tsNs int64, line string) error 
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	if w.current == nil {
+		return fmt.Errorf("logwal: write on closed WAL")
+	}
 	if w.broken {
 		return fmt.Errorf("logwal: writer is in broken state due to previous rotation failure")
 	}
@@ -140,6 +143,9 @@ func (w *LogWAL) WriteRecord(labels []LabelPair, tsNs int64, line string) error 
 func (w *LogWAL) Sync() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.current == nil {
+		return fmt.Errorf("logwal: sync on closed WAL")
+	}
 	if w.broken {
 		return fmt.Errorf("logwal: writer is in broken state due to previous rotation failure")
 	}

@@ -114,6 +114,35 @@ func TestLogWAL_CloseIdempotent(t *testing.T) {
 	}
 }
 
+func TestLogWAL_WriteAfterClose_ReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(dir, 1<<20, 1)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// Must return an error, not panic on a nil *os.File dereference.
+	if err := w.WriteRecord(nil, 1, "x"); err == nil {
+		t.Error("WriteRecord after Close should return an error")
+	}
+}
+
+func TestLogWAL_SyncAfterClose_ReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(dir, 1<<20, 1)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := w.Sync(); err == nil {
+		t.Error("Sync after Close should return an error")
+	}
+}
+
 func TestLogWAL_SyncEveryNAutomaticBoundary(t *testing.T) {
 	dir := t.TempDir()
 	w, err := Open(dir, 1<<20, 3)
