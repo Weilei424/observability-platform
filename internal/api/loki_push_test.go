@@ -227,23 +227,27 @@ func TestLokiPush_UnpairedSurrogateEscape_Returns400NoLeak(t *testing.T) {
 
 func TestLokiPush_ValidSurrogatePair_Returns204(t *testing.T) {
 	srv, store := newPushServer(t)
-	// A valid high/low pair (😀 = U+1F600) must be accepted and stored intact.
-	body := `{"streams":[{"stream":{"service":"😀"},"values":[["1700000000000000000","x"]]}]}`
+	// A valid high/low surrogate escape pair (😀 = U+1F600, 😀) must
+	// exercise the pairing branch, be accepted, and be stored as the decoded rune.
+	// The backtick literal keeps the backslashes verbatim, so the request body
+	// carries the JSON escape sequence rather than a pre-decoded emoji.
+	body := "{\"streams\":[{\"stream\":{\"service\":\"\\ud83d\\ude00\"},\"values\":[[\"1700000000000000000\",\"x\"]]}]}"
 	rr := postPush(t, srv, body, "application/json")
 	if rr.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204; body=%s", rr.Code, rr.Body.String())
 	}
 	sl, _ := logs.NewStreamLabels(map[string]string{"service": "\U0001F600"})
 	if got := len(store.StreamEntries(logs.StreamIDOf(sl))); got != 1 {
-		t.Errorf("entries for the 😀-labelled stream = %d, want 1", got)
+		t.Errorf("entries for the U+1F600-labelled stream = %d, want 1", got)
 	}
 }
 
 func TestLokiPush_LegitimateReplacementChar_Returns204(t *testing.T) {
 	srv, store := newPushServer(t)
-	// An explicit U+FFFD escape is a legitimate code point (not an unpaired
-	// surrogate) and must be accepted and stored as U+FFFD.
-	body := `{"streams":[{"stream":{"service":"�"},"values":[["1700000000000000000","x"]]}]}`
+	// An explicit � escape is a legitimate code point (not an unpaired
+	// surrogate) and must pass the BMP-escape branch, be accepted, and be stored
+	// as U+FFFD. Double-quoted literal so the body carries the escape verbatim.
+	body := "{\"streams\":[{\"stream\":{\"service\":\"\\ufffd\"},\"values\":[[\"1700000000000000000\",\"x\"]]}]}"
 	rr := postPush(t, srv, body, "application/json")
 	if rr.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204; body=%s", rr.Code, rr.Body.String())
