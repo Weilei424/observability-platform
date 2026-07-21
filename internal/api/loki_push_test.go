@@ -185,6 +185,21 @@ func TestLokiPush_NullLabelValue_Returns400NoLeak(t *testing.T) {
 	}
 }
 
+func TestLokiPush_InvalidUTF8_Returns400NoLeak(t *testing.T) {
+	srv, store := newPushServer(t)
+	// A raw 0xff byte in a label value is not valid UTF-8. It must be rejected at
+	// 400, not silently replaced with U+FFFD by the JSON decoder and persisted
+	// (which would alter stream identity).
+	body := "{\"streams\":[{\"stream\":{\"service\":\"a\xffb\"},\"values\":[[\"1700000000000000000\",\"x\"]]}]}"
+	rr := postPush(t, srv, body, "application/json")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for invalid UTF-8; body=%s", rr.Code, rr.Body.String())
+	}
+	if store.StreamCount() != 0 {
+		t.Errorf("StreamCount = %d, want 0 (invalid UTF-8 must not be buffered)", store.StreamCount())
+	}
+}
+
 func TestLokiPush_NullTimestamp_Returns400(t *testing.T) {
 	srv, _ := newPushServer(t)
 	body := `{"streams":[{"stream":{"service":"api"},"values":[[null,"x"]]}]}`

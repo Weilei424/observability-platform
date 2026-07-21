@@ -1,12 +1,14 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
 	"mime"
 	"net/http"
 	"strconv"
+	"unicode/utf8"
 
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/masonwheeler/observability-platform/internal/logs"
@@ -44,7 +46,24 @@ func (s *Server) handleLokiPush(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 4<<20)
 
-	dec := json.NewDecoder(r.Body)
+	// Read the whole body so its UTF-8 validity can be checked BEFORE JSON
+	// decoding. encoding/json silently replaces malformed UTF-8 in strings with
+	// U+FFFD, which would let raw invalid bytes through label validation and alter
+	// stream identity. Validating the raw bytes first upholds the "invalid input
+	// returns 400; never silently misparse" contract. (Legitimate U+FFFD arriving
+	// as a � escape is unaffected — only raw invalid bytes are rejected.)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		// Exceeding the MaxBytesReader cap surfaces here as a read error.
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "request body too large or unreadable"})
+		return
+	}
+	if !utf8.Valid(body) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "request body is not valid UTF-8"})
+		return
+	}
+
+	dec := json.NewDecoder(bytes.NewReader(body))
 	var req lokiPushRequest
 	if err := dec.Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
