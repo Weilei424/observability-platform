@@ -114,6 +114,32 @@ func TestLogWAL_CloseIdempotent(t *testing.T) {
 	}
 }
 
+func TestSegmentPaths_NumericOrderAcrossRollover(t *testing.T) {
+	dir := t.TempDir()
+	// %06d is a minimum width, so once the index needs a 7th digit a lexical sort
+	// misorders: "1000000.wal" < "999999.wal". Create names spanning that boundary
+	// out of order and require segmentPaths to return them numerically ascending.
+	names := []string{"1000001.wal", "999999.wal", "1000000.wal", "100000.wal", "000001.wal"}
+	for _, n := range names {
+		if err := os.WriteFile(filepath.Join(dir, n), nil, 0o644); err != nil {
+			t.Fatalf("write %s: %v", n, err)
+		}
+	}
+	paths, err := segmentPaths(dir)
+	if err != nil {
+		t.Fatalf("segmentPaths: %v", err)
+	}
+	want := []string{"000001.wal", "100000.wal", "999999.wal", "1000000.wal", "1000001.wal"}
+	if len(paths) != len(want) {
+		t.Fatalf("got %d paths, want %d: %v", len(paths), len(want), paths)
+	}
+	for i, p := range paths {
+		if got := filepath.Base(p); got != want[i] {
+			t.Errorf("paths[%d] = %s, want %s", i, got, want[i])
+		}
+	}
+}
+
 func TestLogWAL_WriteAfterClose_ReturnsError(t *testing.T) {
 	dir := t.TempDir()
 	w, err := Open(dir, 1<<20, 1)

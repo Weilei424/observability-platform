@@ -172,7 +172,12 @@ func (w *LogWAL) Close() error {
 	return errors.Join(syncErr, closeErr)
 }
 
-// segmentPaths returns all .wal file paths in dir sorted ascending.
+// segmentPaths returns all .wal file paths in dir sorted by ascending numeric
+// segment index. The names use %06d, which is only a minimum width, so a lexical
+// sort would misorder once the index needs a 7th digit (1000000.wal would sort
+// before 999999.wal) — corrupting replay order and which segment is treated as
+// final. Sorting on the parsed integer keeps ordering correct across that
+// rollover. Non-numeric .wal names (never produced by this WAL) are skipped.
 // Returns nil (not an error) when dir does not exist.
 func segmentPaths(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
@@ -182,12 +187,25 @@ func segmentPaths(dir string) ([]string, error) {
 		}
 		return nil, fmt.Errorf("logwal: readdir %s: %w", dir, err)
 	}
-	var paths []string
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".wal") {
-			paths = append(paths, filepath.Join(dir, e.Name()))
-		}
+	type seg struct {
+		idx  int
+		path string
 	}
-	sort.Strings(paths)
+	var segs []seg
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".wal") {
+			continue
+		}
+		idx, cerr := strconv.Atoi(strings.TrimSuffix(e.Name(), ".wal"))
+		if cerr != nil {
+			continue
+		}
+		segs = append(segs, seg{idx: idx, path: filepath.Join(dir, e.Name())})
+	}
+	sort.Slice(segs, func(i, j int) bool { return segs[i].idx < segs[j].idx })
+	paths := make([]string, len(segs))
+	for i, s := range segs {
+		paths[i] = s.path
+	}
 	return paths, nil
 }
