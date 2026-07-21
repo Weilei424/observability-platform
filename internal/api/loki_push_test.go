@@ -200,6 +200,71 @@ func TestLokiPush_InvalidUTF8_Returns400NoLeak(t *testing.T) {
 	}
 }
 
+func TestLokiPush_UnpairedSurrogateEscape_Returns400NoLeak(t *testing.T) {
+	// Each body is valid ASCII (passes utf8.Valid) but carries an unpaired
+	// surrogate escape that encoding/json would replace with U+FFFD, altering
+	// identity. All must be rejected at 400 with nothing buffered.
+	cases := map[string]string{
+		"isolated high in label":       `{"streams":[{"stream":{"service":"\ud800"},"values":[["1700000000000000000","x"]]}]}`,
+		"isolated low in label":        `{"streams":[{"stream":{"service":"\udc00"},"values":[["1700000000000000000","x"]]}]}`,
+		"high then ascii in label":     `{"streams":[{"stream":{"service":"\ud800A"},"values":[["1700000000000000000","x"]]}]}`,
+		"high then high in label":      `{"streams":[{"stream":{"service":"\ud800\ud800"},"values":[["1700000000000000000","x"]]}]}`,
+		"unpaired surrogate in a line": `{"streams":[{"stream":{"service":"api"},"values":[["1700000000000000000","bad\ud800line"]]}]}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv, store := newPushServer(t)
+			rr := postPush(t, srv, body, "application/json")
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rr.Code, rr.Body.String())
+			}
+			if store.StreamCount() != 0 {
+				t.Errorf("StreamCount = %d, want 0 (unpaired surrogate must not be buffered)", store.StreamCount())
+			}
+		})
+	}
+}
+
+func TestLokiPush_ValidSurrogatePair_Returns204(t *testing.T) {
+	srv, store := newPushServer(t)
+	// A valid high/low pair (😀 = U+1F600) must be accepted and stored intact.
+	body := `{"streams":[{"stream":{"service":"😀"},"values":[["1700000000000000000","x"]]}]}`
+	rr := postPush(t, srv, body, "application/json")
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body=%s", rr.Code, rr.Body.String())
+	}
+	sl, _ := logs.NewStreamLabels(map[string]string{"service": "\U0001F600"})
+	if got := len(store.StreamEntries(logs.StreamIDOf(sl))); got != 1 {
+		t.Errorf("entries for the 😀-labelled stream = %d, want 1", got)
+	}
+}
+
+func TestLokiPush_LegitimateReplacementChar_Returns204(t *testing.T) {
+	srv, store := newPushServer(t)
+	// An explicit U+FFFD escape is a legitimate code point (not an unpaired
+	// surrogate) and must be accepted and stored as U+FFFD.
+	body := `{"streams":[{"stream":{"service":"�"},"values":[["1700000000000000000","x"]]}]}`
+	rr := postPush(t, srv, body, "application/json")
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body=%s", rr.Code, rr.Body.String())
+	}
+	sl, _ := logs.NewStreamLabels(map[string]string{"service": "�"})
+	if got := len(store.StreamEntries(logs.StreamIDOf(sl))); got != 1 {
+		t.Errorf("entries for the U+FFFD-labelled stream = %d, want 1", got)
+	}
+}
+
+func TestLokiPush_EscapedBackslashBeforeU_Returns204(t *testing.T) {
+	srv, _ := newPushServer(t)
+	// "\\uD800" is a literal backslash followed by "uD800" text, NOT a surrogate
+	// escape. It must not be misread as one and rejected.
+	body := `{"streams":[{"stream":{"service":"\\uD800"},"values":[["1700000000000000000","x"]]}]}`
+	rr := postPush(t, srv, body, "application/json")
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestLokiPush_NullTimestamp_Returns400(t *testing.T) {
 	srv, _ := newPushServer(t)
 	body := `{"streams":[{"stream":{"service":"api"},"values":[[null,"x"]]}]}`

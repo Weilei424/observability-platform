@@ -62,6 +62,14 @@ func (s *Server) handleLokiPush(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "request body is not valid UTF-8"})
 		return
 	}
+	// utf8.Valid only covers raw bytes; a JSON "\uD800" escape is pure ASCII yet
+	// encodes an unpaired surrogate that encoding/json would silently replace with
+	// U+FFFD, again altering stream identity. Reject unpaired surrogate escapes up
+	// front (valid pairs and a legitimate "�" escape are left untouched).
+	if hasUnpairedSurrogateEscape(body) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "request body contains an unpaired unicode surrogate escape"})
+		return
+	}
 
 	dec := json.NewDecoder(bytes.NewReader(body))
 	var req lokiPushRequest
@@ -164,4 +172,87 @@ func (s *Server) handleLokiPush(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// hasUnpairedSurrogateEscape reports whether the JSON body contains a "\uXXXX"
+// escape encoding an unpaired UTF-16 surrogate — a high surrogate not immediately
+// followed by a low-surrogate escape, or a low surrogate with no preceding high.
+// encoding/json would silently turn such an escape into U+FFFD; rejecting it here
+// preserves exact string (and thus stream) identity. Only surrogate pairing is
+// checked — other malformations are left for the JSON decoder to reject. Escapes
+// are only inspected inside string literals, and "\\" is consumed as a literal
+// backslash so a payload like "\\uD800" is not misread as an escape.
+func hasUnpairedSurrogateEscape(b []byte) bool {
+	inString := false
+	for i := 0; i < len(b); {
+		c := b[i]
+		if !inString {
+			if c == '"' {
+				inString = true
+			}
+			i++
+			continue
+		}
+		if c == '"' {
+			inString = false
+			i++
+			continue
+		}
+		if c != '\\' {
+			i++
+			continue
+		}
+		// Escape sequence: consume the backslash and its payload.
+		if i+1 >= len(b) {
+			return false // truncated; the JSON decoder will reject it
+		}
+		if b[i+1] != 'u' {
+			i += 2 // \", \\, \n, ... — two bytes, keeps \\ from starting an escape
+			continue
+		}
+		hi, ok := parseHex4(b, i+2)
+		if !ok {
+			return false // malformed \u; decoder will reject
+		}
+		if hi >= 0xDC00 && hi <= 0xDFFF {
+			return true // low surrogate with no preceding high
+		}
+		if hi >= 0xD800 && hi <= 0xDBFF {
+			// High surrogate: the very next thing must be a low-surrogate escape.
+			if i+12 > len(b) || b[i+6] != '\\' || b[i+7] != 'u' {
+				return true
+			}
+			lo, ok := parseHex4(b, i+8)
+			if !ok || lo < 0xDC00 || lo > 0xDFFF {
+				return true
+			}
+			i += 12
+			continue
+		}
+		i += 6 // ordinary BMP escape
+	}
+	return false
+}
+
+// parseHex4 parses exactly four hex digits of b starting at off into a rune,
+// reporting false if fewer than four remain or any digit is non-hex.
+func parseHex4(b []byte, off int) (rune, bool) {
+	if off+4 > len(b) {
+		return 0, false
+	}
+	var v rune
+	for j := 0; j < 4; j++ {
+		d := b[off+j]
+		switch {
+		case d >= '0' && d <= '9':
+			v = v<<4 | rune(d-'0')
+		case d >= 'a' && d <= 'f':
+			v = v<<4 | rune(d-'a'+10)
+		case d >= 'A' && d <= 'F':
+			v = v<<4 | rune(d-'A'+10)
+		default:
+			return 0, false
+		}
+	}
+	return v, true
 }
