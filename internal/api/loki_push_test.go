@@ -162,6 +162,29 @@ func TestLokiPush_NullLine_Returns400NoLeak(t *testing.T) {
 	}
 }
 
+func TestLokiPush_NullLabelValue_Returns400NoLeak(t *testing.T) {
+	srv, store := newPushServer(t)
+	// A JSON null label value must be rejected, not silently coerced to "" and
+	// persisted as an empty-valued label.
+	body := `{"streams":[{"stream":{"service":null},"values":[["1700000000000000000","x"]]}]}`
+	rr := postPush(t, srv, body, "application/json")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for null label value; body=%s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Errors []struct{ Field, Message string } `json:"errors"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if len(resp.Errors) == 0 || resp.Errors[0].Field != "service" {
+		t.Errorf("expected explicit error on the \"service\" label, got %+v", resp.Errors)
+	}
+	if store.StreamCount() != 0 {
+		t.Errorf("StreamCount = %d, want 0 (null label value must not be buffered)", store.StreamCount())
+	}
+}
+
 func TestLokiPush_NullTimestamp_Returns400(t *testing.T) {
 	srv, _ := newPushServer(t)
 	body := `{"streams":[{"stream":{"service":"api"},"values":[[null,"x"]]}]}`

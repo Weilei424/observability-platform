@@ -17,7 +17,10 @@ type lokiPushRequest struct {
 }
 
 type lokiStream struct {
-	Stream map[string]string `json:"stream"`
+	// Stream values are *string (not string) so a JSON null label value is
+	// rejected rather than silently coerced to "": Unmarshal("null") is a no-op
+	// for a string, which would leave {"service":null} as {"service":""}.
+	Stream map[string]*string `json:"stream"`
 	// Values holds each entry as raw JSON elements so that a canonical Loki
 	// structured-metadata entry (["<ts>", "<line>", {..}]) decodes successfully
 	// and is then rejected through the explicit length check below, rather than
@@ -67,7 +70,20 @@ func (s *Server) handleLokiPush(w http.ResponseWriter, r *http.Request) {
 	entries := make([]pending, 0, len(req.Streams))
 
 	for i, st := range req.Streams {
-		sl, err := logs.NewStreamLabels(st.Stream)
+		streamLabels := make(map[string]string, len(st.Stream))
+		var nullLabel bool
+		for k, vp := range st.Stream {
+			if vp == nil {
+				validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: k, Message: "label value must be a string, not null"})
+				nullLabel = true
+				break
+			}
+			streamLabels[k] = *vp
+		}
+		if nullLabel {
+			continue
+		}
+		sl, err := logs.NewStreamLabels(streamLabels)
 		if err != nil {
 			var ve *logs.ValidationError
 			if errors.As(err, &ve) {
