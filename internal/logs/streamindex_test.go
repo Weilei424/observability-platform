@@ -83,6 +83,33 @@ func TestStreamIndex_ManifestRoundTripAndRebuildMatch(t *testing.T) {
 	assertSameIndex(t, x, rebuilt)
 }
 
+func TestLoadManifest_DetectsBodyCorruption(t *testing.T) {
+	dir := t.TempDir()
+	chunksDir := filepath.Join(dir, "chunks")
+	if err := os.MkdirAll(chunksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	x := newStreamIndex()
+	addChunk(t, chunksDir, x, map[string]string{"service": "api"}, 100, 200)
+	manifest := filepath.Join(dir, "streams.index")
+	if err := x.writeManifest(manifest); err != nil {
+		t.Fatalf("writeManifest: %v", err)
+	}
+	// Flip a byte in the manifest body (past magic+version+crc); the CRC must catch
+	// this same-length corruption that the structural checks would otherwise miss.
+	data, err := os.ReadFile(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data[len(data)-1] ^= 0xff
+	if err := os.WriteFile(manifest, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadManifest(manifest); err == nil {
+		t.Error("expected a checksum-mismatch error on body corruption")
+	}
+}
+
 func TestLoadManifest_CorruptReturnsError(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "streams.index")
 	if err := os.WriteFile(path, []byte("not a manifest"), 0o644); err != nil {
