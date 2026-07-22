@@ -96,7 +96,7 @@ func main() {
 		filepath.Join(logsDir, "index"),
 		cfg.WALSegmentMaxBytes,
 		cfg.WALSyncEveryN,
-		int(cfg.LogsFlushThresholdBytes),
+		cfg.LogsFlushThresholdBytes,
 	)
 	if err != nil {
 		log.Error("failed to open logs store", slog.String("logs_dir", logsDir), slog.String("error", err.Error()))

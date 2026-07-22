@@ -1,9 +1,8 @@
 package logs
 
 import (
-	"errors"
+	"encoding/binary"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -31,14 +30,14 @@ type Store struct {
 	index       *streamIndex
 	chunksDir   string
 	indexPath   string
-	headBytes   int
-	flushThresh int
+	headBytes   int64
+	flushThresh int64
 }
 
 // NewStore opens (or creates) a log store rooted at the given directories, loading
 // the persisted index (rebuilding from a chunk scan if the manifest is corrupt) and
 // replaying the WAL into the head.
-func NewStore(walDir, chunksDir, indexDir string, segMaxBytes int64, syncEveryN, flushThreshold int) (*Store, error) {
+func NewStore(walDir, chunksDir, indexDir string, segMaxBytes int64, syncEveryN int, flushThreshold int64) (*Store, error) {
 	for _, d := range []string{walDir, chunksDir, indexDir} {
 		if err := fsutil.MkdirAllSync(d); err != nil {
 			return nil, fmt.Errorf("logs: mkdir %s: %w", d, err)
@@ -47,10 +46,10 @@ func NewStore(walDir, chunksDir, indexDir string, segMaxBytes int64, syncEveryN,
 	indexPath := filepath.Join(indexDir, "streams.index")
 
 	idx, err := loadManifest(indexPath)
-	if errors.Is(err, os.ErrNotExist) {
-		idx = newStreamIndex()
-	} else if err != nil {
-		// Corrupt manifest: rebuild from authoritative chunk files, then rewrite.
+	if err != nil {
+		// Missing OR corrupt manifest: rebuild from the authoritative chunk headers,
+		// then rewrite. The manifest is a rebuildable cache; chunks are the source of
+		// truth. (rebuildFromScan on an empty chunks dir yields an empty index.)
 		idx, err = rebuildFromScan(chunksDir)
 		if err != nil {
 			return nil, err
@@ -61,7 +60,7 @@ func NewStore(walDir, chunksDir, indexDir string, segMaxBytes int64, syncEveryN,
 	}
 
 	head := make(map[StreamID]*memoryStream)
-	headBytes := 0
+	var headBytes int64
 	if err := logwal.Replay(walDir, func(pairs []logwal.LabelPair, tsNs int64, line string) {
 		m := make(map[string]string, len(pairs))
 		for _, p := range pairs {
@@ -78,7 +77,7 @@ func NewStore(walDir, chunksDir, indexDir string, segMaxBytes int64, syncEveryN,
 			head[id] = hs
 		}
 		hs.entries = append(hs.entries, LogEntry{StreamID: id, TimestampNs: tsNs, Line: line})
-		headBytes += 8 + len(line)
+		headBytes += int64(8 + len(line))
 	}); err != nil {
 		return nil, fmt.Errorf("logs: WAL replay: %w", err)
 	}
@@ -114,7 +113,7 @@ func (s *Store) Append(labels StreamLabels, tsNs int64, line string) error {
 		s.head[id] = hs
 	}
 	hs.entries = append(hs.entries, LogEntry{StreamID: id, TimestampNs: tsNs, Line: line})
-	s.headBytes += 8 + len(line)
+	s.headBytes += int64(8 + len(line))
 	if s.flushThresh > 0 && s.headBytes >= s.flushThresh {
 		return s.flushLocked()
 	}
@@ -148,17 +147,43 @@ func (s *Store) writeChunksAndIndexLocked() error {
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	for _, id := range ids {
 		hs := s.head[id]
-		c := logchunk.NewChunk()
-		for _, e := range hs.entries {
-			c.Append(e.TimestampNs, e.Line)
+		// Split so no chunk exceeds the decoder's cap: an oversized chunk would be
+		// written and its WAL checkpointed, then be rejected on read (data loss).
+		for _, c := range splitIntoChunks(hs.entries, logchunk.MaxUncompressedBytes) {
+			ref, err := writeChunkFile(s.chunksDir, id, hs.labels, c)
+			if err != nil {
+				return err
+			}
+			s.index.add(id, hs.labels, ref)
 		}
-		ref, err := writeChunkFile(s.chunksDir, id, hs.labels, c)
-		if err != nil {
-			return err
-		}
-		s.index.add(id, hs.labels, ref)
 	}
 	return s.index.writeManifest(s.indexPath)
+}
+
+// maxEntryEncodingOverhead bounds a single entry's non-line encoding cost in the
+// chunk block: a signed varint timestamp delta plus a uvarint line length, each at
+// most binary.MaxVarintLen64 bytes.
+const maxEntryEncodingOverhead = 2 * binary.MaxVarintLen64
+
+// splitIntoChunks packs entries (in order) into chunks whose uncompressed size
+// stays at or below maxUncompressed, starting a new chunk before an entry would
+// push the current one over. A single entry is bounded by logs.MaxLineBytes at
+// ingest, which is far below the cap, so every chunk holds at least one entry.
+func splitIntoChunks(entries []LogEntry, maxUncompressed int) []*logchunk.Chunk {
+	var out []*logchunk.Chunk
+	cur := logchunk.NewChunk()
+	for _, e := range entries {
+		entryMax := len(e.Line) + maxEntryEncodingOverhead
+		if cur.NumEntries() > 0 && cur.UncompressedBytes()+entryMax > maxUncompressed {
+			out = append(out, cur)
+			cur = logchunk.NewChunk()
+		}
+		cur.Append(e.TimestampNs, e.Line)
+	}
+	if cur.NumEntries() > 0 {
+		out = append(out, cur)
+	}
+	return out
 }
 
 // Close flushes the head (draining it durably) and closes the WAL.
@@ -209,9 +234,14 @@ func (s *Store) StreamEntries(id StreamID, minTs, maxTs int64) ([]LogEntry, erro
 	var out []LogEntry
 
 	for _, ref := range s.index.chunkRefs(id, minTs, maxTs) {
-		_, _, c, err := readChunkFile(filepath.Join(s.chunksDir, ref.Name))
+		gotID, _, c, err := readChunkFile(filepath.Join(s.chunksDir, ref.Name))
 		if err != nil {
 			return nil, err
+		}
+		// Guard against an index ref pointing at another stream's chunk: the chunk
+		// file embeds its own stream ID, so verify it matches the one we queried.
+		if gotID != id {
+			return nil, fmt.Errorf("logs: chunk %s belongs to stream %d, not %d", ref.Name, gotID, id)
 		}
 		it := c.Iterator()
 		for it.Next() {
