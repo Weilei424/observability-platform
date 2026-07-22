@@ -22,10 +22,12 @@ const (
 	version   byte = 1
 	headerLen      = 4 + 1 + 8 + 8 + 4 + 4 + 4 + 4 // magic|ver|minTs|maxTs|numEntries|uncompLen|compLen|crc = 37
 
-	// maxUncompressedBytes bounds the entry-block buffer FromBytes will allocate
-	// from an attacker/corruption-controlled length field. Well above a flushed
-	// per-stream chunk (head flush threshold defaults to 8 MiB total).
-	maxUncompressedBytes = 128 << 20
+	// MaxUncompressedBytes bounds the entry-block buffer FromBytes will allocate
+	// from an attacker/corruption-controlled length field, and is the hard cap a
+	// chunk's uncompressed size must stay under to remain decodable. Writers must
+	// keep each chunk's UncompressedBytes() at or below this (see splitting in the
+	// logs store) so a large flush can never produce an unreadable chunk.
+	MaxUncompressedBytes = 128 << 20
 )
 
 type entry struct {
@@ -122,6 +124,30 @@ func (c *Chunk) Bytes() []byte {
 }
 
 // FromBytes reconstructs a chunk from Bytes output, validating every field.
+// HeaderLen is the fixed size of a serialized chunk's header (the bytes preceding
+// the compressed payload). A reader that only needs the timestamp bounds can read
+// exactly this many bytes and call PeekBounds, avoiding the payload entirely.
+const HeaderLen = headerLen
+
+// PeekBounds reads a chunk's min/max timestamps and entry count from the fixed
+// header WITHOUT decompressing (or checksumming) the payload — the cheap path used
+// to rebuild an index from chunk headers. It validates magic and version only; full
+// payload integrity is verified by FromBytes when the chunk is actually read. data
+// must contain at least HeaderLen bytes.
+func PeekBounds(data []byte) (minTs, maxTs int64, numEntries int, err error) {
+	if len(data) < headerLen ||
+		data[0] != magic[0] || data[1] != magic[1] || data[2] != magic[2] || data[3] != magic[3] {
+		return 0, 0, 0, errors.New("logchunk.PeekBounds: unrecognized chunk format")
+	}
+	if data[4] != version {
+		return 0, 0, 0, fmt.Errorf("logchunk.PeekBounds: unsupported version %d", data[4])
+	}
+	minTs = int64(binary.BigEndian.Uint64(data[5:13]))
+	maxTs = int64(binary.BigEndian.Uint64(data[13:21]))
+	numEntries = int(binary.BigEndian.Uint32(data[21:25]))
+	return minTs, maxTs, numEntries, nil
+}
+
 func FromBytes(data []byte) (*Chunk, error) {
 	if len(data) < headerLen ||
 		data[0] != magic[0] || data[1] != magic[1] || data[2] != magic[2] || data[3] != magic[3] {
@@ -136,7 +162,7 @@ func FromBytes(data []byte) (*Chunk, error) {
 	uncompLen := binary.BigEndian.Uint32(data[25:29])
 	compLen := binary.BigEndian.Uint32(data[29:33])
 	wantCRC := binary.BigEndian.Uint32(data[33:37])
-	if uncompLen > maxUncompressedBytes {
+	if uncompLen > MaxUncompressedBytes {
 		return nil, fmt.Errorf("logchunk.FromBytes: uncompressed length %d exceeds maximum", uncompLen)
 	}
 	if headerLen+int(compLen) != len(data) {
