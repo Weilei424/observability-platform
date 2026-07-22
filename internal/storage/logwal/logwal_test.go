@@ -225,3 +225,50 @@ func TestLogWAL_FreshSegmentOnReopen(t *testing.T) {
 		t.Errorf("reopened segment index %d should be greater than %d", w2.SegmentIndex(), seg1)
 	}
 }
+
+func TestLogWAL_Checkpoint_DropsFlushedSegments(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(dir, 1<<20, 1)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := w.WriteRecord(nil, 1, "flushed-a"); err != nil {
+		t.Fatalf("WriteRecord: %v", err)
+	}
+	if err := w.WriteRecord(nil, 2, "flushed-b"); err != nil {
+		t.Fatalf("WriteRecord: %v", err)
+	}
+	if err := w.Checkpoint(); err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+	if err := w.WriteRecord(nil, 3, "post-checkpoint"); err != nil {
+		t.Fatalf("WriteRecord after checkpoint: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	var lines []string
+	if err := Replay(dir, func(_ []LabelPair, _ int64, line string) {
+		lines = append(lines, line)
+	}); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if len(lines) != 1 || lines[0] != "post-checkpoint" {
+		t.Fatalf("replay = %v, want only [post-checkpoint]", lines)
+	}
+}
+
+func TestLogWAL_Checkpoint_OnClosedWAL_ReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(dir, 1<<20, 1)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := w.Checkpoint(); err == nil {
+		t.Error("Checkpoint after Close should return an error")
+	}
+}

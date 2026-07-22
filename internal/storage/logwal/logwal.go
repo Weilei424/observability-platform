@@ -172,6 +172,37 @@ func (w *LogWAL) Close() error {
 	return errors.Join(syncErr, closeErr)
 }
 
+// Checkpoint discards all current WAL segments and starts a fresh one. It is
+// called after a whole-head flush has persisted every buffered record to a chunk,
+// so the segments hold only already-flushed data and are safe to delete. The
+// caller (logs.Store.flush) holds its own lock, so no append is in flight.
+func (w *LogWAL) Checkpoint() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.current == nil {
+		return fmt.Errorf("logwal: checkpoint on closed WAL")
+	}
+	if err := w.current.Close(); err != nil {
+		return fmt.Errorf("logwal: close on checkpoint: %w", err)
+	}
+	w.current = nil
+	paths, err := segmentPaths(w.dir)
+	if err != nil {
+		return err
+	}
+	for _, p := range paths {
+		if err := os.Remove(p); err != nil {
+			return fmt.Errorf("logwal: remove segment %s on checkpoint: %w", p, err)
+		}
+	}
+	if err := fsutil.SyncDir(w.dir); err != nil {
+		return fmt.Errorf("logwal: fsync dir on checkpoint: %w", err)
+	}
+	w.broken = false
+	// All segments deleted, so numbering restarts at 1. openSegment fsyncs the dir.
+	return w.openSegment(1)
+}
+
 // segmentPaths returns all .wal file paths in dir sorted by ascending numeric
 // segment index. The names use %06d, which is only a minimum width, so a lexical
 // sort would misorder once the index needs a 7th digit (1000000.wal would sort
