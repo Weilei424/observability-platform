@@ -339,14 +339,38 @@ Design: `docs/superpowers/specs/2026-07-18-phase-4.2-loki-push-api-design.md` ·
 - [x] Verify: `go build ./...`, `go vet ./...`, `go test ./...` green
 
 ### Phase 4.3 — Log Chunk Storage and Index
-- [ ] Define log chunk format
-- [ ] Implement log chunk encoding/decoding
-- [ ] Add compression for log chunks
-- [ ] Persist stream ID → chunk references index
-- [ ] Persist label pair → stream IDs index
-- [ ] Track min/max timestamp per chunk
-- [ ] Unit tests: log chunk round trip
-- [ ] Integration test: label index narrows candidate streams
+Design: `docs/superpowers/specs/2026-07-21-phase-4.3-log-chunk-storage-index-design.md`
+
+**`internal/storage/logchunk` package (compressed chunk format — dep-free, `compress/flate`)**
+- [ ] `logchunk.go` — `Chunk`: `Append(tsNs, line)`, `MinTs`/`MaxTs`/`NumEntries`/`UncompressedBytes`, `Iterator`
+- [ ] Entry block: first ts absolute (zigzag varint), rest zigzag-varint deltas (out-of-order tolerant), lines uvarint-len + bytes
+- [ ] `Bytes()`: `magic|version|minTs|maxTs|numEntries|uncompressedLen|compressedLen|DEFLATE(entryblock)`
+- [ ] `FromBytes()`: validate magic/version, decompress, decode exactly `numEntries`, verify header min/max, reject trailing bytes
+- [ ] Unit tests: round trip (empty/single/many/out-of-order/multibyte-UTF8/large line); compression shrinks repetitive block; corruption/truncation/min-max-mismatch rejected
+
+**`internal/logs` chunk file + stream index**
+- [ ] `chunkfile.go` — `ChunkRef`; file = `header{magic,version,streamID,labels}` + `logchunk.Bytes()`; `writeChunkFile` (tmp→fsync→rename→dir fsync), `readChunkFileHeader`, `readChunkFile`; name `<streamIDhex>-<minTsNs>-<rand4>.chunk`
+- [ ] `streamindex.go` — `streamIndex{postings *index.MemPostings, refs map[StreamID][]ChunkRef, labels map[StreamID]StreamLabels}`; `add`, `matchingStreamIDs`, `chunkRefs(id,minTs,maxTs)` overlap filter
+- [ ] `streamindex.go` — `streams.index` manifest write (atomic) + `loadManifest`; `rebuildFromScan(chunksDir)` from chunk headers (self-heal)
+- [ ] Unit tests: `chunkfile` write/read round trip, header-only read, no temp left; `streamIndex` label filter narrows + time filter; manifest round trip; rebuild-from-scan == manifest load; corrupt manifest → rebuild
+
+**`internal/storage/logwal` checkpoint**
+- [ ] `logwal.go` — `Checkpoint()`: sync+close current, delete all `.wal` segments, open fresh, fsync dir (under `w.mu`)
+- [ ] Unit test: `Checkpoint()` drops flushed segments; replay after checkpoint returns only post-checkpoint records
+
+**`internal/logs` production `Store`**
+- [ ] `store.go` — `Store` composing head (`MemoryStore`) + WAL + `streamIndex` + chunks dir; implements `Ingester`
+- [ ] `Append`: WAL-write → head buffer → `headBytes += encodedSize`; flush at `LogsFlushThresholdBytes`
+- [ ] `flush()` (under `mu`): per stream build `logchunk.Chunk` → `writeChunkFile` → `index.add`; write manifest; `wal.Checkpoint()`; reset head
+- [ ] `Close()`: flush (drain head) + close WAL; `NewStore`: load manifest (or rebuild-from-scan) + WAL replay into head
+- [ ] Read surface: `MatchingStreamIDs(matchers)`, `StreamEntries(id,minTs,maxTs)` merged head+chunks deduped by `(streamID,tsNs,line)`
+- [ ] Integration tests: threshold flush → chunk files + manifest exist; append→flush→Close→new Store→entries present (restart); checkpoint drops flushed segments; crash-window (chunk written, WAL not checkpointed) → no duplicates; label filter narrows
+
+**Config + wiring**
+- [ ] `internal/config` — add `LogsFlushThresholdBytes` (default 8 MiB); reject `<= 0`
+- [ ] `cmd/server/main.go` — wire `logs.Store` over `data/logs/{wal,chunks,index}`; `Store.Close()` on shutdown
+- [ ] `ARCHITECTURE_NOTES.md` — "Introduced in 4.3" note for `logchunk`, `streams.index` manifest, flush/checkpoint model
+- [ ] Verify: `go build ./...`, `go vet ./...`, `golangci-lint run`, `go test ./...` green
 
 ### Phase 4.4 — Loki-Compatible Query API
 - [ ] Implement `GET /loki/api/v1/query`
