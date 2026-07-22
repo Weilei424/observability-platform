@@ -1,6 +1,7 @@
 package logchunk
 
 import (
+	"encoding/binary"
 	"strings"
 	"testing"
 )
@@ -112,4 +113,35 @@ func TestFromBytes_Rejects(t *testing.T) {
 			t.Error("expected error for corrupt payload")
 		}
 	})
+	t.Run("oversized uncompLen", func(t *testing.T) {
+		// Force the uncompLen header field (bytes [25:29]) far above the 128 MiB cap.
+		bad := append([]byte(nil), good...)
+		binary.BigEndian.PutUint32(bad[25:29], 0xffffffff)
+		if _, err := FromBytes(bad); err == nil {
+			t.Error("expected error for oversized uncompLen")
+		}
+	})
+	t.Run("tampered header min/max", func(t *testing.T) {
+		// Corrupt the header minTs (bytes [5:13]) so it disagrees with the decoded
+		// entries. CRC covers only the compressed payload, so this reaches the check.
+		bad := append([]byte(nil), good...)
+		bad[5] ^= 0xff
+		if _, err := FromBytes(bad); err == nil {
+			t.Error("expected error for tampered header min/max")
+		}
+	})
+}
+
+// TestDecodeEntries_RejectsOverflowLineLength guards the unsigned bounds check in
+// decodeEntries: a forged huge line-length must return an error, not panic on the
+// slice (int(ll) would wrap negative and slip past a signed comparison).
+func TestDecodeEntries_RejectsOverflowLineLength(t *testing.T) {
+	var buf []byte
+	var tmp [binary.MaxVarintLen64]byte
+	buf = append(buf, tmp[:binary.PutVarint(tmp[:], 100)]...)         // first ts
+	buf = append(buf, tmp[:binary.PutUvarint(tmp[:], ^uint64(0))]...) // huge line length
+	// no line bytes follow
+	if _, err := decodeEntries(buf, 1); err == nil {
+		t.Error("expected error for overflow line length (must not panic)")
+	}
 }

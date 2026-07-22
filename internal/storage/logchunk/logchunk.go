@@ -152,10 +152,11 @@ func FromBytes(data []byte) (*Chunk, error) {
 	if _, err := io.ReadFull(fr, block); err != nil {
 		return nil, fmt.Errorf("logchunk.FromBytes: decompress: %w", err)
 	}
-	// Any bytes beyond uncompLen mean a corrupt/oversized payload.
+	// Any bytes beyond uncompLen — or a stream fault surfacing here — mean a
+	// corrupt/oversized payload.
 	var extra [1]byte
-	if n, _ := fr.Read(extra[:]); n != 0 {
-		return nil, errors.New("logchunk.FromBytes: decompressed data longer than declared")
+	if n, err := fr.Read(extra[:]); n != 0 || (err != nil && err != io.EOF) {
+		return nil, errors.New("logchunk.FromBytes: decompressed payload longer than declared or corrupt")
 	}
 	_ = fr.Close()
 
@@ -192,7 +193,9 @@ func decodeEntries(block []byte, n uint32) (*Chunk, error) {
 			return nil, fmt.Errorf("logchunk.FromBytes: bad line length at entry %d", i)
 		}
 		pos += m2
-		if pos+int(ll) > len(block) {
+		// Compare in unsigned space: int(ll) would wrap negative for a huge forged
+		// length and slip past a signed bounds check, panicking on the slice below.
+		if ll > uint64(len(block)-pos) {
 			return nil, fmt.Errorf("logchunk.FromBytes: line at entry %d exceeds block", i)
 		}
 		line := string(block[pos : pos+int(ll)])
