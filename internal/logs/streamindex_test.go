@@ -3,6 +3,7 @@ package logs
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/masonwheeler/observability-platform/internal/storage/index"
@@ -94,12 +95,33 @@ func TestLoadManifest_CorruptReturnsError(t *testing.T) {
 
 // mustLabels is defined in store_test.go and reused here.
 
+// assertSameIndex proves the spec invariant that loadManifest and rebuildFromScan
+// yield an identical index: same stream set, same ChunkRef VALUES per stream (as a
+// set — rebuildFromScan may order refs differently), and same labels per stream.
 func assertSameIndex(t *testing.T, want, got *streamIndex) {
 	t.Helper()
-	for id, refs := range want.refs {
-		g := got.refs[id]
-		if len(g) != len(refs) {
-			t.Fatalf("stream %d: %d refs, want %d", id, len(g), len(refs))
+	if len(want.refs) != len(got.refs) {
+		t.Fatalf("stream count: got %d, want %d", len(got.refs), len(want.refs))
+	}
+	for id, wrefs := range want.refs {
+		grefs, ok := got.refs[id]
+		if !ok {
+			t.Fatalf("stream %d missing from rebuilt index", id)
+		}
+		if len(grefs) != len(wrefs) {
+			t.Fatalf("stream %d: %d refs, want %d", id, len(grefs), len(wrefs))
+		}
+		wset := make(map[ChunkRef]struct{}, len(wrefs))
+		for _, r := range wrefs {
+			wset[r] = struct{}{}
+		}
+		for _, r := range grefs {
+			if _, in := wset[r]; !in {
+				t.Errorf("stream %d: ref %+v not present in the other index", id, r)
+			}
+		}
+		if !reflect.DeepEqual(want.labels[id].Map(), got.labels[id].Map()) {
+			t.Errorf("stream %d: labels differ: %v vs %v", id, got.labels[id].Map(), want.labels[id].Map())
 		}
 	}
 	if want.postings.SeriesCount() != got.postings.SeriesCount() {
