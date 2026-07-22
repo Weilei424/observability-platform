@@ -156,6 +156,24 @@ stream ID -> chunk references
 time range -> candidate chunks
 ```
 
+### Introduced in Phase 4.3
+
+- **Log chunk format** (`internal/storage/logchunk`): `(tsNs, line)` entries with
+  first-absolute / signed-varint-delta timestamps and uvarint-length lines, the
+  whole entry block DEFLATE-compressed. Self-validating `Bytes()`/`FromBytes()`.
+- **Chunk files** (`data/logs/chunks/<streamIDhex>-<minTsNs>-<rand4>.chunk`):
+  a header embedding stream ID + labels, followed by the chunk bytes, written
+  tmp → fsync → atomic rename → dir fsync. Self-describing, so the index can be
+  rebuilt by scanning them.
+- **Stream index manifest** (`data/logs/index/streams.index`): a persisted cache of
+  `label pair → stream IDs` (via the shared `index.MemPostings`) and
+  `stream ID → chunk refs` with per-chunk min/max. Rebuilt from chunk headers if
+  missing or corrupt (chunks are authoritative).
+- **Flush + checkpoint model**: `logs.Store` buffers to a WAL-backed head and, at a
+  size threshold (`LogsFlushThresholdBytes`, default 8 MiB) and on shutdown, flushes
+  the whole head to chunks + index and checkpoints the log WAL. Merged reads dedup
+  by `(streamID, tsNs, line)` to neutralize the flush crash window.
+
 ---
 
 ## API Boundaries
