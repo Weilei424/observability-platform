@@ -54,3 +54,36 @@ func TestChunkFile_NoTempLeftBehind(t *testing.T) {
 		}
 	}
 }
+
+func TestDecodeChunkFileHeader_RejectsCorrupt(t *testing.T) {
+	dir := t.TempDir()
+	labels, _ := NewStreamLabels(map[string]string{"service": "api", "level": "error"})
+	c := logchunk.NewChunk()
+	c.Append(1, "x")
+	ref, err := writeChunkFile(dir, StreamIDOf(labels), labels, c)
+	if err != nil {
+		t.Fatalf("writeChunkFile: %v", err)
+	}
+	good, err := os.ReadFile(filepath.Join(dir, ref.Name))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	badMagic := append([]byte(nil), good...)
+	badMagic[0] ^= 0xff
+	badVersion := append([]byte(nil), good...)
+	badVersion[4] = 0x7f
+	cases := map[string][]byte{
+		"empty":               {},
+		"too short":           good[:10],
+		"bad magic":           badMagic,
+		"bad version":         badVersion,
+		"truncated in labels": good[:16],
+	}
+	for name, data := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, _, _, err := decodeChunkFileHeader(data); err == nil {
+				t.Errorf("expected error for %s", name)
+			}
+		})
+	}
+}
