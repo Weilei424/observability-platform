@@ -168,3 +168,22 @@ func TestLoad_NonPositiveWALSegmentMaxBytesErrors(t *testing.T) {
 		t.Errorf("error = %q, want it to mention wal_segment_max_bytes", err.Error())
 	}
 }
+
+func TestLoad_LogsFlushThresholdDefault(t *testing.T) {
+	t.Setenv("OBS_DATA_DIR", "data")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.LogsFlushThresholdBytes != 8<<20 {
+		t.Fatalf("LogsFlushThresholdBytes = %d, want %d", cfg.LogsFlushThresholdBytes, 8<<20)
+	}
+}
+
+func TestLoad_RejectsNonPositiveLogsFlushThreshold(t *testing.T) {
+	t.Setenv("OBS_DATA_DIR", "data")
+	t.Setenv("OBS_LOGS_FLUSH_THRESHOLD_BYTES", "0")
+	if _, err := Load(); err == nil {
+		t.Error("expected error for logs_flush_threshold_bytes = 0")
+	}
+}

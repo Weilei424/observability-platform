@@ -9,11 +9,12 @@ import (
 )
 
 type Config struct {
-	HTTPAddr           string
-	DataDir            string
-	LogLevel           string
-	WALSegmentMaxBytes int64
-	WALSyncEveryN      int
+	HTTPAddr                string
+	DataDir                 string
+	LogLevel                string
+	WALSegmentMaxBytes      int64
+	WALSyncEveryN           int
+	LogsFlushThresholdBytes int64
 
 	MaintenanceInterval  time.Duration
 	FlushInterval        time.Duration
@@ -33,6 +34,7 @@ func Load() (*Config, error) {
 	v.SetDefault("log_level", "info")
 	v.SetDefault("wal_segment_max_bytes", int64(128<<20))
 	v.SetDefault("wal_sync_every_n", 1)
+	v.SetDefault("logs_flush_threshold_bytes", int64(8<<20))
 	v.SetDefault("maintenance_interval", "30s")
 	v.SetDefault("flush_interval", "2m")
 	v.SetDefault("flush_sealed_chunks", 1000)
@@ -82,19 +84,20 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
-		HTTPAddr:             v.GetString("http_addr"),
-		DataDir:              dataDir,
-		LogLevel:             v.GetString("log_level"),
-		WALSegmentMaxBytes:   v.GetInt64("wal_segment_max_bytes"),
-		WALSyncEveryN:        v.GetInt("wal_sync_every_n"),
-		MaintenanceInterval:  maintenanceInterval,
-		FlushInterval:        flushInterval,
-		FlushSealedChunks:    v.GetInt("flush_sealed_chunks"),
-		FlushWALBytes:        v.GetInt64("flush_wal_bytes"),
-		CompactionBaseRange:  baseRange,
-		CompactionMultiplier: v.GetInt("compaction_multiplier"),
-		CompactionLevels:     v.GetInt("compaction_levels"),
-		Retention:            retention,
+		HTTPAddr:                v.GetString("http_addr"),
+		DataDir:                 dataDir,
+		LogLevel:                v.GetString("log_level"),
+		WALSegmentMaxBytes:      v.GetInt64("wal_segment_max_bytes"),
+		WALSyncEveryN:           v.GetInt("wal_sync_every_n"),
+		LogsFlushThresholdBytes: v.GetInt64("logs_flush_threshold_bytes"),
+		MaintenanceInterval:     maintenanceInterval,
+		FlushInterval:           flushInterval,
+		FlushSealedChunks:       v.GetInt("flush_sealed_chunks"),
+		FlushWALBytes:           v.GetInt64("flush_wal_bytes"),
+		CompactionBaseRange:     baseRange,
+		CompactionMultiplier:    v.GetInt("compaction_multiplier"),
+		CompactionLevels:        v.GetInt("compaction_levels"),
+		Retention:               retention,
 	}
 
 	if cfg.DataDir == "" {
@@ -125,6 +128,9 @@ func Load() (*Config, error) {
 		// < 1 would disable automatic fsync entirely, silently dropping the WAL's
 		// durability guarantee.
 		return nil, fmt.Errorf("config: wal_sync_every_n must be >= 1")
+	}
+	if cfg.LogsFlushThresholdBytes <= 0 {
+		return nil, fmt.Errorf("config: logs_flush_threshold_bytes must be > 0")
 	}
 
 	return cfg, nil
