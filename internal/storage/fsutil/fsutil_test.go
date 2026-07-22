@@ -117,7 +117,12 @@ func TestMkdirAllSync_UnreadableBoundaryParentTolerated(t *testing.T) {
 	if err := os.Chmod(parent, 0o111); err != nil {
 		t.Fatalf("chmod parent 0111: %v", err)
 	}
-	defer os.Chmod(parent, 0o700) // restore so t.TempDir cleanup can remove it
+	defer func() {
+		// restore so t.TempDir cleanup can remove it
+		if err := os.Chmod(parent, 0o700); err != nil {
+			t.Errorf("restore parent perms: %v", err)
+		}
+	}()
 
 	// Creating a WAL directory under the writable data dir must succeed despite the
 	// unreadable parent.
