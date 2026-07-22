@@ -176,11 +176,19 @@ func (w *LogWAL) Close() error {
 // called after a whole-head flush has persisted every buffered record to a chunk,
 // so the segments hold only already-flushed data and are safe to delete. The
 // caller (logs.Store.flush) holds its own lock, so no append is in flight.
+//
+// Checkpoint fails closed: if a segment removal fails partway, the WAL is left
+// closed (w.current == nil) and unusable rather than in a torn half-state. A
+// surviving already-flushed segment that a later restart replays is harmless —
+// logs.Store merges head and chunk reads and dedups by (streamID, tsNs, line).
 func (w *LogWAL) Checkpoint() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.current == nil {
 		return fmt.Errorf("logwal: checkpoint on closed WAL")
+	}
+	if w.broken {
+		return fmt.Errorf("logwal: writer is in broken state due to previous rotation failure")
 	}
 	if err := w.current.Close(); err != nil {
 		return fmt.Errorf("logwal: close on checkpoint: %w", err)

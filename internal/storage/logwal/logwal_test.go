@@ -272,3 +272,43 @@ func TestLogWAL_Checkpoint_OnClosedWAL_ReturnsError(t *testing.T) {
 		t.Error("Checkpoint after Close should return an error")
 	}
 }
+
+func TestLogWAL_Checkpoint_DropsMultipleSegments(t *testing.T) {
+	dir := t.TempDir()
+	// Tiny segMaxBytes forces a rotation on every write, so several segments exist
+	// on disk before the checkpoint — exercising the delete-ALL-segments loop.
+	w, err := Open(dir, 8, 1)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	for i := 0; i < 4; i++ {
+		if err := w.WriteRecord(nil, int64(i+1), "flushed"); err != nil {
+			t.Fatalf("WriteRecord %d: %v", i, err)
+		}
+	}
+	before, err := segmentPaths(dir)
+	if err != nil {
+		t.Fatalf("segmentPaths: %v", err)
+	}
+	if len(before) < 2 {
+		t.Fatalf("expected >=2 segments before checkpoint, got %d", len(before))
+	}
+	if err := w.Checkpoint(); err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+	if err := w.WriteRecord(nil, 99, "post"); err != nil {
+		t.Fatalf("WriteRecord after checkpoint: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	var lines []string
+	if err := Replay(dir, func(_ []LabelPair, _ int64, line string) {
+		lines = append(lines, line)
+	}); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if len(lines) != 1 || lines[0] != "post" {
+		t.Fatalf("replay = %v, want only [post] (all flushed segments dropped)", lines)
+	}
+}
