@@ -310,7 +310,7 @@ Design: `docs/superpowers/specs/2026-07-18-phase-4.1-log-stream-data-model-desig
 ### Phase 4.2 — Loki-Compatible Push API
 Design: `docs/superpowers/specs/2026-07-18-phase-4.2-loki-push-api-design.md` · Plan: `docs/superpowers/plans/2026-07-18-phase-4.2-loki-push-api.md`
 
-**`internal/storage/logwal` package (dedicated log WAL — zero blast radius on metrics WAL)**
+**`internal/storage/logwal` package (dedicated log WAL — separate package from the metrics WAL; note: later crash-durability hardening did extend into shared/metrics WAL and filesystem code — see the design doc's "Post-Implementation Scope Note")**
 - [x] `record.go` — `LabelPair`, `RecordWriter` interface, `encodeRecord`/`decodeRecord` (`[len][type=0x01][labelcount][labels][8B tsNs][4B lineLen][line]`), `validateLabels`, `maxRecordBodyBytes`
 - [x] `logwal.go` — `LogWAL`: `Open`, `WriteRecord(labels, tsNs, line)`, `Sync`, `SegmentIndex`, `Close` (segment rotation at `segMaxBytes`, fsync-every-N, `broken`-state guard, `%06d.wal` naming — mirrors `wal.WAL`)
 - [x] `replay.go` — `Replay(dir, fn)`: ascending segments, partial trailing record on last segment discarded, corrupt mid-segment record errors, oversized-length guard
