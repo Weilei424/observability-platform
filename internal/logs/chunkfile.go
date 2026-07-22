@@ -1,10 +1,12 @@
 package logs
 
 import (
+	"bufio"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -24,6 +26,69 @@ type ChunkRef struct {
 	Name  string
 	MinTs int64
 	MaxTs int64
+}
+
+// readChunkFileHeader reads a chunk file's stream identity, labels, and timestamp
+// bounds WITHOUT decompressing the payload — the cheap path rebuildFromScan uses to
+// reconstruct the index from chunk headers, so recovery scales with the number of
+// chunks rather than the whole log corpus. It reads only the file header plus the
+// logchunk fixed header, streaming just those bytes.
+func readChunkFileHeader(path string) (StreamID, StreamLabels, int64, int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, StreamLabels{}, 0, 0, fmt.Errorf("logs: open chunk file: %w", err)
+	}
+	defer f.Close()
+	r := bufio.NewReader(f)
+
+	fixed := make([]byte, 14) // magic(4)|version(1)|streamID(8)|labelCount(1)
+	if _, err := io.ReadFull(r, fixed); err != nil {
+		return 0, StreamLabels{}, 0, 0, fmt.Errorf("logs: read chunk file header: %w", err)
+	}
+	if fixed[0] != chunkFileMagic[0] || fixed[1] != chunkFileMagic[1] ||
+		fixed[2] != chunkFileMagic[2] || fixed[3] != chunkFileMagic[3] {
+		return 0, StreamLabels{}, 0, 0, fmt.Errorf("logs: unrecognized chunk file header")
+	}
+	if fixed[4] != chunkFileVersion {
+		return 0, StreamLabels{}, 0, 0, fmt.Errorf("logs: unsupported chunk file version %d", fixed[4])
+	}
+	id := StreamID(binary.BigEndian.Uint64(fixed[5:13]))
+	labelCount := int(fixed[13])
+
+	m := make(map[string]string, labelCount)
+	var vlen [2]byte
+	for i := 0; i < labelCount; i++ {
+		nl, err := r.ReadByte()
+		if err != nil {
+			return 0, StreamLabels{}, 0, 0, fmt.Errorf("logs: read chunk file label name len: %w", err)
+		}
+		name := make([]byte, int(nl))
+		if _, err := io.ReadFull(r, name); err != nil {
+			return 0, StreamLabels{}, 0, 0, fmt.Errorf("logs: read chunk file label name: %w", err)
+		}
+		if _, err := io.ReadFull(r, vlen[:]); err != nil {
+			return 0, StreamLabels{}, 0, 0, fmt.Errorf("logs: read chunk file label value len: %w", err)
+		}
+		val := make([]byte, int(binary.BigEndian.Uint16(vlen[:])))
+		if _, err := io.ReadFull(r, val); err != nil {
+			return 0, StreamLabels{}, 0, 0, fmt.Errorf("logs: read chunk file label value: %w", err)
+		}
+		m[string(name)] = string(val)
+	}
+	labels, err := NewStreamLabels(m)
+	if err != nil {
+		return 0, StreamLabels{}, 0, 0, fmt.Errorf("logs: invalid labels in chunk file: %w", err)
+	}
+
+	lch := make([]byte, logchunk.HeaderLen)
+	if _, err := io.ReadFull(r, lch); err != nil {
+		return 0, StreamLabels{}, 0, 0, fmt.Errorf("logs: read chunk header in %s: %w", path, err)
+	}
+	minTs, maxTs, _, err := logchunk.PeekBounds(lch)
+	if err != nil {
+		return 0, StreamLabels{}, 0, 0, fmt.Errorf("logs: peek chunk bounds in %s: %w", path, err)
+	}
+	return id, labels, minTs, maxTs, nil
 }
 
 // encodeChunkFileHeader serializes stream identity + labels:

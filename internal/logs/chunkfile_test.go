@@ -8,6 +8,32 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/storage/logchunk"
 )
 
+func TestReadChunkFileHeader_MatchesWithoutDecompress(t *testing.T) {
+	dir := t.TempDir()
+	labels, _ := NewStreamLabels(map[string]string{"service": "api", "level": "error"})
+	id := StreamIDOf(labels)
+	c := logchunk.NewChunk()
+	c.Append(300, "late")
+	c.Append(100, "early")
+	ref, err := writeChunkFile(dir, id, labels, c)
+	if err != nil {
+		t.Fatalf("writeChunkFile: %v", err)
+	}
+	gotID, gotLabels, minTs, maxTs, err := readChunkFileHeader(filepath.Join(dir, ref.Name))
+	if err != nil {
+		t.Fatalf("readChunkFileHeader: %v", err)
+	}
+	if gotID != id {
+		t.Errorf("streamID = %d, want %d", gotID, id)
+	}
+	if gotLabels.Hash() != labels.Hash() {
+		t.Errorf("labels hash mismatch")
+	}
+	if minTs != 100 || maxTs != 300 {
+		t.Errorf("bounds = %d/%d, want 100/300", minTs, maxTs)
+	}
+}
+
 func TestChunkFile_RoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	labels, _ := NewStreamLabels(map[string]string{"service": "api", "level": "error"})
