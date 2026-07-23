@@ -34,6 +34,10 @@ type LogWAL struct {
 	preRotationSyncs int
 }
 
+// syncFile fsyncs a file. It is a package var so a test can inject a sync failure
+// on the checkpoint path and assert the error propagates before any close/delete.
+var syncFile = func(f *os.File) error { return f.Sync() }
+
 // Open opens or creates a log WAL rooted at dir. New writes go to a fresh segment
 // numbered one past the highest existing segment index, so previously written
 // segments are never appended to.
@@ -192,8 +196,9 @@ func (w *LogWAL) Checkpoint() error {
 	}
 	// Sync before close, matching Close/rotate and the documented "sync + close"
 	// contract: it also surfaces any latent write error on the outgoing segment
-	// before we drop it.
-	if err := w.current.Sync(); err != nil {
+	// before we drop it. A sync failure here returns early — the segment is neither
+	// closed nor deleted and w.current stays valid, so the checkpoint is retryable.
+	if err := syncFile(w.current); err != nil {
 		return fmt.Errorf("logwal: sync on checkpoint: %w", err)
 	}
 	if err := w.current.Close(); err != nil {

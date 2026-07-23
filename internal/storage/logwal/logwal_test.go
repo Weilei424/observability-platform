@@ -273,6 +273,55 @@ func TestLogWAL_Checkpoint_OnClosedWAL_ReturnsError(t *testing.T) {
 	}
 }
 
+func TestLogWAL_Checkpoint_SyncFailure_PropagatesBeforeDelete(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(dir, 1<<20, 1)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := w.WriteRecord(nil, 1, "a"); err != nil {
+		t.Fatalf("WriteRecord: %v", err)
+	}
+
+	// Inject a sync failure on the checkpoint path.
+	restore := syncFile
+	syncFile = func(*os.File) error { return errors.New("boom") }
+	defer func() { syncFile = restore }()
+
+	if err := w.Checkpoint(); err == nil {
+		t.Fatal("Checkpoint should fail when the outgoing segment's sync fails")
+	}
+	// The failure must occur BEFORE close/delete: the segment file must survive.
+	if paths, _ := segmentPaths(dir); len(paths) == 0 {
+		t.Fatal("no segments should be deleted when the checkpoint sync fails")
+	}
+
+	// The WAL must remain usable and the checkpoint retryable once sync recovers.
+	syncFile = restore
+	if err := w.WriteRecord(nil, 2, "b"); err != nil {
+		t.Fatalf("WAL should stay usable after a failed checkpoint: %v", err)
+	}
+	if err := w.Checkpoint(); err != nil {
+		t.Fatalf("retry Checkpoint should succeed once sync recovers: %v", err)
+	}
+	if err := w.WriteRecord(nil, 3, "c"); err != nil {
+		t.Fatalf("WriteRecord after successful checkpoint: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// After the successful checkpoint, replay sees only the post-checkpoint record.
+	var lines []string
+	if err := Replay(dir, func(_ []LabelPair, _ int64, line string) {
+		lines = append(lines, line)
+	}); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if len(lines) != 1 || lines[0] != "c" {
+		t.Fatalf("replay = %v, want only [c]", lines)
+	}
+}
+
 func TestLogWAL_Checkpoint_DropsMultipleSegments(t *testing.T) {
 	dir := t.TempDir()
 	// Tiny segMaxBytes forces a rotation on every write, so several segments exist
