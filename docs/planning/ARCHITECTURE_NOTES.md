@@ -158,9 +158,12 @@ time range -> candidate chunks
 
 ### Introduced in Phase 4.3
 
-- **Log chunk format** (`internal/storage/logchunk`): `(tsNs, line)` entries with
-  first-absolute / signed-varint-delta timestamps and uvarint-length lines, the
-  whole entry block DEFLATE-compressed. Self-validating `Bytes()`/`FromBytes()`.
+- **Log chunk format** (`internal/storage/logchunk`, on-disk **version 2**):
+  `(tsNs, line)` entries with first-absolute / signed-varint-delta timestamps and
+  uvarint-length lines, the whole entry block DEFLATE-compressed. Two CRC-32/Castagnoli
+  checksums — a header CRC (over the timestamp bounds + counts, so a header-only read
+  can authenticate them) and a payload CRC — plus a decoded-vs-header min/max check
+  make `Bytes()`/`FromBytes()` self-validating.
 - **Chunk files** (`data/logs/chunks/<streamIDhex>-<minTsNs>-<rand4>.chunk`):
   a header embedding stream ID + labels, followed by the chunk bytes, written
   tmp → fsync → atomic rename → dir fsync. Self-describing, so the index can be
@@ -173,6 +176,30 @@ time range -> candidate chunks
   size threshold (`LogsFlushThresholdBytes`, default 8 MiB) and on shutdown, flushes
   the whole head to chunks + index and checkpoints the log WAL. Merged reads dedup
   by `(streamID, tsNs, line)` to neutralize the flush crash window.
+
+#### Accepted decision: log chunk format break (v1 → v2)
+
+The log chunk format was revised during Phase 4.3 development to add the header CRC
+(header grew 37 → 41 bytes), bumping the on-disk version from 1 to 2. **This is a
+deliberate, accepted one-time break, not a migration.** Because chunks are the
+durable source of truth once their WAL records are checkpointed away, a v1 chunk
+holds data with no WAL fallback — so the break is recorded here rather than left
+implicit. It is safe because:
+
+- No released version ever shipped v1; a v1 chunk can only exist in a local
+  `data/logs/chunks/` from a mid-development run of an unreleased build.
+- It matches the existing precedent for the metrics chunk format
+  (`internal/storage/chunk`), which rejects superseded layouts outright rather than
+  carrying multi-version decoders.
+
+`FromBytes`/`PeekBounds` reject a v1 chunk with an explicit *"unsupported chunk
+version 1 (expected 2)"* error (the version byte at offset 4 is the discriminator),
+and a rebuild fails closed rather than misreading it. **Recovery for a local dev
+data dir:** back up and remove the pre-v2 files under `data/logs/chunks/` (and the
+stale `data/logs/index/streams.index`); metrics storage under `data/metrics/` is
+unaffected and must not be touched. If preserving pre-v2 log data ever becomes a
+requirement, add a version-1 decode path in `logchunk.FromBytes` (v1 bounds were not
+checksummed, so a v1 rebuild must fully decode rather than peek).
 
 ---
 
