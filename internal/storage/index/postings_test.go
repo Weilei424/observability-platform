@@ -78,7 +78,7 @@ func TestMemPostings_ReturnedSlicesAreCopies(t *testing.T) {
 		t.Fatalf("select(nil) = %v, want [1 2 3]", firstSelect)
 	}
 	// Mutate the returned slice
-	firstSelect = append(firstSelect, 999)
+	firstSelect[0] = 999 // mutate the returned slice in place
 	// Re-fetch and verify the internal state is unaffected
 	secondSelect := p.Select(nil)
 	if !reflect.DeepEqual(secondSelect, []uint64{1, 2, 3}) {
@@ -91,7 +91,7 @@ func TestMemPostings_ReturnedSlicesAreCopies(t *testing.T) {
 		t.Fatalf("postings(job,api) = %v, want [1 2]", firstPostings)
 	}
 	// Mutate the returned slice
-	firstPostings = append(firstPostings, 888)
+	firstPostings[0] = 888 // mutate the returned slice in place
 	// Re-fetch and verify the internal state is unaffected
 	secondPostings := p.Postings("job", "api")
 	if !reflect.DeepEqual(secondPostings, []uint64{1, 2}) {
@@ -104,7 +104,7 @@ func TestMemPostings_ReturnedSlicesAreCopies(t *testing.T) {
 		t.Fatalf("postings(empty,empty) = %v, want [1 2 3]", firstEmptyPair)
 	}
 	// Mutate the returned slice
-	firstEmptyPair = append(firstEmptyPair, 777)
+	firstEmptyPair[0] = 777 // mutate the returned slice in place
 	// Re-fetch and verify the internal state is unaffected
 	secondEmptyPair := p.Postings("", "")
 	if !reflect.DeepEqual(secondEmptyPair, []uint64{1, 2, 3}) {

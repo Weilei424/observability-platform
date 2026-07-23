@@ -75,9 +75,9 @@ func TestFlushQuery_NoVisibilityGap(t *testing.T) {
 			}
 			base := int64((cycle + 1) * chunkSize * 1000)
 			for i := 0; i < chunkSize; i++ {
-				walStore.Append(labels, base+int64(i*1000), float64(i))
+				_ = walStore.Append(labels, base+int64(i*1000), float64(i))
 			}
-			walStore.FlushBlock()
+			_, _ = walStore.FlushBlock()
 		}
 	}()
 

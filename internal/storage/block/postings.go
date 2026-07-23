@@ -16,10 +16,11 @@ import (
 
 var postingsMagic = [4]byte{'O', 'P', 'P', 'I'}
 
+const postingsVersion byte = 1
+
 const (
-	postingsVersion  byte = 1
-	postingsHeaderSz      = 5 // magic(4) + version(1)
-	postingsFooterSz      = 8 // offsetTableOffset(8)
+	postingsHeaderSz = 5 // magic(4) + version(1)
+	postingsFooterSz = 8 // offsetTableOffset(8)
 )
 
 // blockPostings is one block's inverted index. Two implementations: filePostings
