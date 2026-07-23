@@ -2,6 +2,7 @@ package logchunk
 
 import (
 	"encoding/binary"
+	"hash/crc32"
 	"strings"
 	"testing"
 )
@@ -134,9 +135,12 @@ func TestFromBytes_Rejects(t *testing.T) {
 		}
 	})
 	t.Run("oversized uncompLen", func(t *testing.T) {
-		// Force the uncompLen header field (bytes [25:29]) far above the 128 MiB cap.
+		// Force the uncompLen header field (bytes [25:29]) far above the 128 MiB cap,
+		// re-signing the header CRC so the cap check — not the CRC check — is what
+		// rejects it.
 		bad := append([]byte(nil), good...)
 		binary.BigEndian.PutUint32(bad[25:29], 0xffffffff)
+		binary.BigEndian.PutUint32(bad[33:37], crc32.Checksum(bad[:headerCRCScope], crcTable))
 		if _, err := FromBytes(bad); err == nil {
 			t.Error("expected error for oversized uncompLen")
 		}

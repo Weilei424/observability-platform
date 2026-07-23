@@ -19,8 +19,12 @@ var magic = [4]byte{0x9C, 'L', 'C', 0x01}
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
 
 const (
-	version   byte = 1
-	headerLen      = 4 + 1 + 8 + 8 + 4 + 4 + 4 + 4 // magic|ver|minTs|maxTs|numEntries|uncompLen|compLen|crc = 37
+	version byte = 1
+	// headerLen: magic|ver|minTs|maxTs|numEntries|uncompLen|compLen|headerCRC|payloadCRC = 41.
+	// headerCRC (Castagnoli) covers bytes [0:33] so the timestamp bounds and counts
+	// are authenticated by a header-only read; payloadCRC covers the compressed body.
+	headerLen      = 4 + 1 + 8 + 8 + 4 + 4 + 4 + 4 + 4
+	headerCRCScope = 33 // bytes [0:33] covered by headerCRC
 
 	// MaxUncompressedBytes bounds the entry-block buffer FromBytes will allocate
 	// from an attacker/corruption-controlled length field, and is the hard cap a
@@ -99,9 +103,10 @@ func (c *Chunk) encodeEntries() []byte {
 }
 
 // Bytes serializes the chunk:
-// magic(4)|version(1)|minTs(8)|maxTs(8)|numEntries(4)|uncompLen(4)|compLen(4)|crc32(4)|DEFLATE(block)
-// The crc32 (Castagnoli) covers the compressed payload so corruption anywhere in
-// it is detected on read — raw DEFLATE has no integrity check of its own.
+// magic(4)|version(1)|minTs(8)|maxTs(8)|numEntries(4)|uncompLen(4)|compLen(4)|headerCRC(4)|payloadCRC(4)|DEFLATE(block)
+// Both CRCs are Castagnoli: headerCRC covers bytes [0:33] so the bounds/counts are
+// authenticated by a header-only read; payloadCRC covers the compressed payload
+// (raw DEFLATE has no integrity check of its own).
 func (c *Chunk) Bytes() []byte {
 	block := c.encodeEntries()
 	var cbuf bytes.Buffer
@@ -118,12 +123,12 @@ func (c *Chunk) Bytes() []byte {
 	binary.BigEndian.PutUint32(out[21:25], uint32(len(c.entries)))
 	binary.BigEndian.PutUint32(out[25:29], uint32(len(block)))
 	binary.BigEndian.PutUint32(out[29:33], uint32(len(compressed)))
-	binary.BigEndian.PutUint32(out[33:37], crc32.Checksum(compressed, crcTable))
+	binary.BigEndian.PutUint32(out[33:37], crc32.Checksum(out[:headerCRCScope], crcTable)) // header CRC
+	binary.BigEndian.PutUint32(out[37:41], crc32.Checksum(compressed, crcTable))           // payload CRC
 	out = append(out, compressed...)
 	return out
 }
 
-// FromBytes reconstructs a chunk from Bytes output, validating every field.
 // HeaderLen is the fixed size of a serialized chunk's header (the bytes preceding
 // the compressed payload). A reader that only needs the timestamp bounds can read
 // exactly this many bytes and call PeekBounds, avoiding the payload entirely.
@@ -142,12 +147,21 @@ func PeekBounds(data []byte) (minTs, maxTs int64, numEntries int, err error) {
 	if data[4] != version {
 		return 0, 0, 0, fmt.Errorf("logchunk.PeekBounds: unsupported version %d", data[4])
 	}
+	// Authenticate the header before trusting the bounds — a header-only read has no
+	// decoded payload to cross-check them against.
+	if crc32.Checksum(data[:headerCRCScope], crcTable) != binary.BigEndian.Uint32(data[33:37]) {
+		return 0, 0, 0, errors.New("logchunk.PeekBounds: chunk header checksum mismatch")
+	}
 	minTs = int64(binary.BigEndian.Uint64(data[5:13]))
 	maxTs = int64(binary.BigEndian.Uint64(data[13:21]))
 	numEntries = int(binary.BigEndian.Uint32(data[21:25]))
 	return minTs, maxTs, numEntries, nil
 }
 
+// FromBytes reconstructs a chunk from Bytes output, validating every field: magic,
+// version, the header checksum, the uncompressed-size cap, the declared compressed
+// length, the payload checksum, and that the decoded entries' min/max match the
+// header.
 func FromBytes(data []byte) (*Chunk, error) {
 	if len(data) < headerLen ||
 		data[0] != magic[0] || data[1] != magic[1] || data[2] != magic[2] || data[3] != magic[3] {
@@ -156,12 +170,15 @@ func FromBytes(data []byte) (*Chunk, error) {
 	if data[4] != version {
 		return nil, fmt.Errorf("logchunk.FromBytes: unsupported version %d", data[4])
 	}
+	if crc32.Checksum(data[:headerCRCScope], crcTable) != binary.BigEndian.Uint32(data[33:37]) {
+		return nil, errors.New("logchunk.FromBytes: chunk header checksum mismatch")
+	}
 	minTs := int64(binary.BigEndian.Uint64(data[5:13]))
 	maxTs := int64(binary.BigEndian.Uint64(data[13:21]))
 	numEntries := binary.BigEndian.Uint32(data[21:25])
 	uncompLen := binary.BigEndian.Uint32(data[25:29])
 	compLen := binary.BigEndian.Uint32(data[29:33])
-	wantCRC := binary.BigEndian.Uint32(data[33:37])
+	payloadCRC := binary.BigEndian.Uint32(data[37:41])
 	if uncompLen > MaxUncompressedBytes {
 		return nil, fmt.Errorf("logchunk.FromBytes: uncompressed length %d exceeds maximum", uncompLen)
 	}
@@ -169,7 +186,7 @@ func FromBytes(data []byte) (*Chunk, error) {
 		return nil, fmt.Errorf("logchunk.FromBytes: declared compressed length %d does not match data", compLen)
 	}
 	compressed := data[headerLen : headerLen+int(compLen)]
-	if crc32.Checksum(compressed, crcTable) != wantCRC {
+	if crc32.Checksum(compressed, crcTable) != payloadCRC {
 		return nil, errors.New("logchunk.FromBytes: chunk payload checksum mismatch")
 	}
 
