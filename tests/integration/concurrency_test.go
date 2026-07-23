@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -61,6 +62,11 @@ func TestFlushQuery_NoVisibilityGap(t *testing.T) {
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
+	// flushedABlock records that at least one FlushBlock actually committed a block
+	// (wrote=true). Without this, a flush that silently never writes would leave the
+	// seeded samples in memory forever and the query workers would still pass —
+	// without exercising the memory→block transition this test exists to verify.
+	var flushedABlock atomic.Bool
 
 	// Flush goroutine: repeatedly ingest a new sealed chunk then flush. Each
 	// flush cycle exercises the read-memory-before-snapshot ordering.
@@ -75,9 +81,19 @@ func TestFlushQuery_NoVisibilityGap(t *testing.T) {
 			}
 			base := int64((cycle + 1) * chunkSize * 1000)
 			for i := 0; i < chunkSize; i++ {
-				_ = walStore.Append(labels, base+int64(i*1000), float64(i))
+				if err := walStore.Append(labels, base+int64(i*1000), float64(i)); err != nil {
+					t.Errorf("flush-goroutine Append: %v", err)
+					return
+				}
 			}
-			_, _ = walStore.FlushBlock()
+			wrote, err := walStore.FlushBlock()
+			if err != nil {
+				t.Errorf("FlushBlock: %v", err)
+				return
+			}
+			if wrote {
+				flushedABlock.Store(true)
+			}
 		}
 	}()
 
@@ -112,6 +128,12 @@ func TestFlushQuery_NoVisibilityGap(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	close(stop)
 	wg.Wait()
+
+	// Prove the transition under test actually happened: if no flush ever wrote a
+	// block, the query workers passed purely on in-memory data and verified nothing.
+	if !flushedABlock.Load() {
+		t.Error("no FlushBlock reported wrote=true — the memory→block transition under test was never exercised")
+	}
 }
 
 // TestAppendFlush_AcknowledgedSamplesSurvive is a regression test for the
