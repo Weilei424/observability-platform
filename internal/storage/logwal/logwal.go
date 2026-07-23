@@ -190,6 +190,12 @@ func (w *LogWAL) Checkpoint() error {
 	if w.broken {
 		return fmt.Errorf("logwal: writer is in broken state due to previous rotation failure")
 	}
+	// Sync before close, matching Close/rotate and the documented "sync + close"
+	// contract: it also surfaces any latent write error on the outgoing segment
+	// before we drop it.
+	if err := w.current.Sync(); err != nil {
+		return fmt.Errorf("logwal: sync on checkpoint: %w", err)
+	}
 	if err := w.current.Close(); err != nil {
 		return fmt.Errorf("logwal: close on checkpoint: %w", err)
 	}
