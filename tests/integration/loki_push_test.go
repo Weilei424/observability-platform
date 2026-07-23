@@ -55,7 +55,65 @@ func newLogServer(t *testing.T, dataDir, logsWALDir string) (*api.Server, *logs.
 	return api.New(cfg, log, mstore, engine, reg, logIngester), logStore, lw
 }
 
+// newDiskLogServer builds a server whose logs ingester is the PRODUCTION
+// logs.Store (the same wiring cmd/server/main.go uses), rooted at dataDir/logs.
+// It returns the server and the store for assertions and shutdown.
+func newDiskLogServer(t *testing.T, dataDir string) (*api.Server, *logs.Store) {
+	t.Helper()
+	logsDir := filepath.Join(dataDir, "logs")
+	store, err := logs.NewStore(
+		filepath.Join(logsDir, "wal"),
+		filepath.Join(logsDir, "chunks"),
+		filepath.Join(logsDir, "index"),
+		128<<20, 1, 8<<20,
+	)
+	if err != nil {
+		t.Fatalf("logs.NewStore: %v", err)
+	}
+	cfg := &config.Config{HTTPAddr: ":0", DataDir: dataDir, LogLevel: "info"}
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	mstore := metrics.NewMemoryStore()
+	engine := metrics.NewQueryEngine(mstore)
+	reg, _ := observability.NewRegistry(mstore, nil)
+	return api.New(cfg, log, mstore, engine, reg, store), store
+}
+
 const pushBody = `{"streams":[{"stream":{"service":"api"},"values":[["1700000000000000000","first"],["1700000000000000001","second"]]}]}`
+
+func TestLokiPush_DiskStore_SurvivesFlushAndRestart(t *testing.T) {
+	dataDir := t.TempDir()
+
+	// First server: push via the router, then Close — which flushes the head to
+	// chunk files + a manifest and checkpoints (drops) the WAL.
+	srv1, store1 := newDiskLogServer(t, dataDir)
+	req := httptest.NewRequest(http.MethodPost, "/loki/api/v1/push", bytes.NewReader([]byte(pushBody)))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv1.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("push status = %d, want 204; body=%s", rr.Code, rr.Body.String())
+	}
+	if err := store1.Close(); err != nil {
+		t.Fatalf("store1.Close: %v", err)
+	}
+	// The data must be in persisted chunks, not only the (now-checkpointed) WAL.
+	chunks, _ := os.ReadDir(filepath.Join(dataDir, "logs", "chunks"))
+	if len(chunks) == 0 {
+		t.Fatal("expected persisted chunk files after flush")
+	}
+
+	// Second server: a fresh logs.Store loads the manifest and replays the WAL.
+	_, store2 := newDiskLogServer(t, dataDir)
+	defer store2.Close()
+	sl, _ := logs.NewStreamLabels(map[string]string{"service": "api"})
+	entries, err := store2.StreamEntries(logs.StreamIDOf(sl), 0, 1<<62)
+	if err != nil {
+		t.Fatalf("StreamEntries: %v", err)
+	}
+	if len(entries) != 2 || entries[0].Line != "first" || entries[1].Line != "second" {
+		t.Fatalf("after restart entries = %+v, want first/second", entries)
+	}
+}
 
 func TestLokiPush_BufferedAfterPush(t *testing.T) {
 	dataDir := t.TempDir()
