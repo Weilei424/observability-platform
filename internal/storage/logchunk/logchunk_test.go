@@ -156,6 +156,20 @@ func TestFromBytes_Rejects(t *testing.T) {
 	})
 }
 
+func TestFromBytes_RejectsLegacyVersion(t *testing.T) {
+	// A version-1 chunk (pre header-CRC, 37-byte header) must be rejected via the
+	// version discriminator at offset 4, not misread as the new layout.
+	good := build([][2]any{{100, "a"}, {200, "b"}}).Bytes()
+	v1 := append([]byte(nil), good...)
+	v1[4] = 1
+	if _, err := FromBytes(v1); err == nil {
+		t.Error("FromBytes should reject a version-1 chunk")
+	}
+	if _, _, _, err := PeekBounds(v1); err == nil {
+		t.Error("PeekBounds should reject a version-1 chunk")
+	}
+}
+
 // TestDecodeEntries_RejectsOverflowLineLength guards the unsigned bounds check in
 // decodeEntries: a forged huge line-length must return an error, not panic on the
 // slice (int(ll) would wrap negative and slip past a signed comparison).

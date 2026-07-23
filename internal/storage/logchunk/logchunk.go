@@ -12,14 +12,20 @@ import (
 	"io"
 )
 
-// magic prefixes every v1 log chunk: 0x9C sentinel, "LC", version 0x01.
+// magic prefixes every log chunk: 0x9C sentinel, "LC", and a fixed format sentinel
+// 0x01 (NOT the version — the on-disk version is the separate byte at offset 4).
 var magic = [4]byte{0x9C, 'L', 'C', 0x01}
 
 // crcTable is CRC-32/Castagnoli, the same polynomial Prometheus/Loki chunks use.
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
 
 const (
-	version byte = 1
+	// version 2 added the header CRC (headerLen 37 -> 41). Version 1 chunks (no
+	// header CRC) are intentionally not decoded — matching the metrics chunk format,
+	// which rejects superseded layouts rather than carrying multi-version decoders.
+	// Since the log chunk format is unreleased, any v1 chunk is transient dev data;
+	// it is rejected with a clear message instead of being misread.
+	version byte = 2
 	// headerLen: magic|ver|minTs|maxTs|numEntries|uncompLen|compLen|headerCRC|payloadCRC = 41.
 	// headerCRC (Castagnoli) covers bytes [0:33] so the timestamp bounds and counts
 	// are authenticated by a header-only read; payloadCRC covers the compressed body.
@@ -135,17 +141,18 @@ func (c *Chunk) Bytes() []byte {
 const HeaderLen = headerLen
 
 // PeekBounds reads a chunk's min/max timestamps and entry count from the fixed
-// header WITHOUT decompressing (or checksumming) the payload — the cheap path used
-// to rebuild an index from chunk headers. It validates magic and version only; full
-// payload integrity is verified by FromBytes when the chunk is actually read. data
-// must contain at least HeaderLen bytes.
+// header WITHOUT decompressing the payload — the cheap path used to rebuild an index
+// from chunk headers. It validates magic, version, and the header checksum (so the
+// returned bounds are authenticated); the payload checksum and full decode are done
+// by FromBytes when the chunk is actually read. data must contain at least HeaderLen
+// bytes.
 func PeekBounds(data []byte) (minTs, maxTs int64, numEntries int, err error) {
 	if len(data) < headerLen ||
 		data[0] != magic[0] || data[1] != magic[1] || data[2] != magic[2] || data[3] != magic[3] {
 		return 0, 0, 0, errors.New("logchunk.PeekBounds: unrecognized chunk format")
 	}
 	if data[4] != version {
-		return 0, 0, 0, fmt.Errorf("logchunk.PeekBounds: unsupported version %d", data[4])
+		return 0, 0, 0, fmt.Errorf("logchunk.PeekBounds: unsupported chunk version %d (expected %d; clear the data directory if this is a legacy format)", data[4], version)
 	}
 	// Authenticate the header before trusting the bounds — a header-only read has no
 	// decoded payload to cross-check them against.
@@ -168,7 +175,7 @@ func FromBytes(data []byte) (*Chunk, error) {
 		return nil, errors.New("logchunk.FromBytes: unrecognized chunk format")
 	}
 	if data[4] != version {
-		return nil, fmt.Errorf("logchunk.FromBytes: unsupported version %d", data[4])
+		return nil, fmt.Errorf("logchunk.FromBytes: unsupported chunk version %d (expected %d; clear the data directory if this is a legacy format)", data[4], version)
 	}
 	if crc32.Checksum(data[:headerCRCScope], crcTable) != binary.BigEndian.Uint32(data[33:37]) {
 		return nil, errors.New("logchunk.FromBytes: chunk header checksum mismatch")
