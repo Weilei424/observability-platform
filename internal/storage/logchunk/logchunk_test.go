@@ -1,11 +1,39 @@
 package logchunk
 
 import (
+	"bytes"
+	"compress/flate"
 	"encoding/binary"
 	"hash/crc32"
 	"strings"
 	"testing"
 )
+
+// makeV1Chunk builds a real pre-v2 chunk: the 37-byte header layout (version 1, a
+// single payload CRC at [33:37], NO header CRC) followed by the DEFLATE payload.
+// Used to prove v1 chunks are rejected through the version discriminator.
+func makeV1Chunk(entries [][2]any) []byte {
+	c := build(entries)
+	block := c.encodeEntries()
+	var cbuf bytes.Buffer
+	fw, _ := flate.NewWriter(&cbuf, flate.DefaultCompression)
+	_, _ = fw.Write(block)
+	_ = fw.Close()
+	compressed := cbuf.Bytes()
+
+	const v1HeaderLen = 37
+	out := make([]byte, v1HeaderLen, v1HeaderLen+len(compressed))
+	copy(out[0:4], magic[:])
+	out[4] = 1 // version 1
+	binary.BigEndian.PutUint64(out[5:13], uint64(c.minTs))
+	binary.BigEndian.PutUint64(out[13:21], uint64(c.maxTs))
+	binary.BigEndian.PutUint32(out[21:25], uint32(len(c.entries)))
+	binary.BigEndian.PutUint32(out[25:29], uint32(len(block)))
+	binary.BigEndian.PutUint32(out[29:33], uint32(len(compressed)))
+	binary.BigEndian.PutUint32(out[33:37], crc32.Checksum(compressed, crcTable)) // v1 payload CRC
+	out = append(out, compressed...)
+	return out
+}
 
 func build(entries [][2]any) *Chunk {
 	c := NewChunk()
@@ -156,17 +184,31 @@ func TestFromBytes_Rejects(t *testing.T) {
 	})
 }
 
-func TestFromBytes_RejectsLegacyVersion(t *testing.T) {
-	// A version-1 chunk (pre header-CRC, 37-byte header) must be rejected via the
-	// version discriminator at offset 4, not misread as the new layout.
-	good := build([][2]any{{100, "a"}, {200, "b"}}).Bytes()
-	v1 := append([]byte(nil), good...)
-	v1[4] = 1
-	if _, err := FromBytes(v1); err == nil {
-		t.Error("FromBytes should reject a version-1 chunk")
+func TestFromBytes_RejectsLegacyV1Fixture(t *testing.T) {
+	// A REAL 37-byte v1 chunk (not a v2 chunk with a flipped byte) must be rejected
+	// specifically through the version discriminator — the error must name version 1.
+	v1 := makeV1Chunk([][2]any{{100, "a"}, {200, "b"}})
+	if v1[4] != 1 {
+		t.Fatalf("fixture version byte = %d, want 1", v1[4])
 	}
-	if _, _, _, err := PeekBounds(v1); err == nil {
-		t.Error("PeekBounds should reject a version-1 chunk")
+	if len(v1) < headerLen {
+		t.Fatalf("fixture too short (%d) to reach the version check", len(v1))
+	}
+
+	_, err := FromBytes(v1)
+	if err == nil {
+		t.Fatal("FromBytes should reject a v1 chunk")
+	}
+	if !strings.Contains(err.Error(), "unsupported chunk version 1") {
+		t.Errorf("FromBytes error = %q, want it to reject via the version discriminator", err.Error())
+	}
+
+	_, _, _, perr := PeekBounds(v1)
+	if perr == nil {
+		t.Fatal("PeekBounds should reject a v1 chunk")
+	}
+	if !strings.Contains(perr.Error(), "unsupported chunk version 1") {
+		t.Errorf("PeekBounds error = %q, want it to reject via the version discriminator", perr.Error())
 	}
 }
 

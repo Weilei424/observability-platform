@@ -23,8 +23,9 @@ const (
 	// version 2 added the header CRC (headerLen 37 -> 41). Version 1 chunks (no
 	// header CRC) are intentionally not decoded — matching the metrics chunk format,
 	// which rejects superseded layouts rather than carrying multi-version decoders.
-	// Since the log chunk format is unreleased, any v1 chunk is transient dev data;
-	// it is rejected with a clear message instead of being misread.
+	// This is an accepted one-time pre-release format break (no released version had
+	// v1); see the "Log chunk format break" note in docs/planning/ARCHITECTURE_NOTES.md.
+	// A v1 chunk is rejected with a version error, not misread.
 	version byte = 2
 	// headerLen: magic|ver|minTs|maxTs|numEntries|uncompLen|compLen|headerCRC|payloadCRC = 41.
 	// headerCRC (Castagnoli) covers bytes [0:33] so the timestamp bounds and counts
@@ -152,7 +153,7 @@ func PeekBounds(data []byte) (minTs, maxTs int64, numEntries int, err error) {
 		return 0, 0, 0, errors.New("logchunk.PeekBounds: unrecognized chunk format")
 	}
 	if data[4] != version {
-		return 0, 0, 0, fmt.Errorf("logchunk.PeekBounds: unsupported chunk version %d (expected %d; clear the data directory if this is a legacy format)", data[4], version)
+		return 0, 0, 0, fmt.Errorf("logchunk.PeekBounds: unsupported chunk version %d (expected %d)", data[4], version)
 	}
 	// Authenticate the header before trusting the bounds — a header-only read has no
 	// decoded payload to cross-check them against.
@@ -175,7 +176,7 @@ func FromBytes(data []byte) (*Chunk, error) {
 		return nil, errors.New("logchunk.FromBytes: unrecognized chunk format")
 	}
 	if data[4] != version {
-		return nil, fmt.Errorf("logchunk.FromBytes: unsupported chunk version %d (expected %d; clear the data directory if this is a legacy format)", data[4], version)
+		return nil, fmt.Errorf("logchunk.FromBytes: unsupported chunk version %d (expected %d)", data[4], version)
 	}
 	if crc32.Checksum(data[:headerCRCScope], crcTable) != binary.BigEndian.Uint32(data[33:37]) {
 		return nil, errors.New("logchunk.FromBytes: chunk header checksum mismatch")

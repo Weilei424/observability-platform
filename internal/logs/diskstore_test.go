@@ -3,6 +3,7 @@ package logs
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/masonwheeler/observability-platform/internal/storage/index"
@@ -133,6 +134,52 @@ func TestStore_RebuildRejectsTamperedChunkHeader(t *testing.T) {
 		1<<20, 1, 1<<30,
 	); err == nil {
 		t.Error("NewStore should fail rebuilding from a tampered chunk header, not launder it")
+	}
+}
+
+func TestStore_RebuildRejectsUnsupportedChunkVersion(t *testing.T) {
+	dir := t.TempDir()
+	labels := mustLabels(t, map[string]string{"service": "api"})
+
+	s := newTestStore(t, dir, 1<<30)
+	if err := s.Append(labels, 100, "x"); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, "index", "streams.index")); err != nil {
+		t.Fatalf("remove manifest: %v", err)
+	}
+	// The single-label chunk file header is 27 bytes; the embedded logchunk version
+	// byte is at 27+4. Force it to an unsupported version 1. A rebuild MUST fail
+	// (fail-closed) rather than laundering an unreadable chunk into a new manifest.
+	chunksDir := filepath.Join(dir, "chunks")
+	entries, _ := os.ReadDir(chunksDir)
+	var cpath string
+	for _, e := range entries {
+		if filepath.Ext(e.Name()) == ".chunk" {
+			cpath = filepath.Join(chunksDir, e.Name())
+		}
+	}
+	data, err := os.ReadFile(cpath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data[27+4] = 1
+	if err := os.WriteFile(cpath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = NewStore(
+		filepath.Join(dir, "wal"), chunksDir, filepath.Join(dir, "index"),
+		1<<20, 1, 1<<30,
+	)
+	if err == nil {
+		t.Fatal("NewStore should fail rebuilding a chunk with an unsupported version")
+	}
+	if !strings.Contains(err.Error(), "version") {
+		t.Errorf("rebuild error = %q, want it to name the unsupported version", err.Error())
 	}
 }
 
