@@ -263,6 +263,46 @@ func TestStore_SurvivesRestart(t *testing.T) {
 	}
 }
 
+func TestStore_RecoversUnflushedEntriesFromWAL(t *testing.T) {
+	// A crash BEFORE any flush leaves entries only in the WAL (no chunks). Restart
+	// must recover them purely from WAL replay. The flush-then-restart tests can
+	// pass from persisted chunks even if replay were broken; this one cannot.
+	dir := t.TempDir()
+	labels := mustLabels(t, map[string]string{"service": "api"})
+	id := StreamIDOf(labels)
+
+	s := newTestStore(t, dir, 1<<30) // high threshold: no auto-flush
+	if err := s.Append(labels, 100, "a"); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if err := s.Append(labels, 200, "b"); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	// Simulate a crash: close ONLY the WAL, with no flush to chunks.
+	if err := s.closeWALForTest(); err != nil {
+		t.Fatalf("closeWALForTest: %v", err)
+	}
+
+	// Precondition: nothing was flushed, so no chunk files exist.
+	chunks, _ := os.ReadDir(filepath.Join(dir, "chunks"))
+	for _, e := range chunks {
+		if filepath.Ext(e.Name()) == ".chunk" {
+			t.Fatalf("expected no chunk files before flush, found %s", e.Name())
+		}
+	}
+
+	// Restart: recovery must come purely from WAL replay.
+	s2 := newTestStore(t, dir, 1<<30)
+	defer s2.Close()
+	got, err := s2.StreamEntries(id, 0, 1000)
+	if err != nil {
+		t.Fatalf("StreamEntries: %v", err)
+	}
+	if len(got) != 2 || got[0].Line != "a" || got[1].Line != "b" {
+		t.Fatalf("WAL-only recovery entries = %+v, want a,b", got)
+	}
+}
+
 func TestStore_CheckpointPreventsDoubleCount(t *testing.T) {
 	dir := t.TempDir()
 	labels := mustLabels(t, map[string]string{"service": "api"})
