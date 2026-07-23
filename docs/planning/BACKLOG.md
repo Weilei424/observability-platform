@@ -345,7 +345,7 @@ Design: `docs/superpowers/specs/2026-07-21-phase-4.3-log-chunk-storage-index-des
 - [x] `logchunk.go` — `Chunk`: `Append(tsNs, line)`, `MinTs`/`MaxTs`/`NumEntries`/`UncompressedBytes`, `Iterator`
 - [x] Entry block: first ts absolute (zigzag varint), rest zigzag-varint deltas (out-of-order tolerant), lines uvarint-len + bytes
 - [x] `Bytes()` (on-disk **version 2**): `magic|version|minTs|maxTs|numEntries|uncompressedLen|compressedLen|headerCRC|payloadCRC|DEFLATE(entryblock)` — two CRC-32/Castagnoli: `headerCRC` over bytes `[0:33]` (bounds + counts, so a header-only read can authenticate them), `payloadCRC` over the compressed block
-- [x] `FromBytes()`: validate magic/version, verify `headerCRC`, decompress, verify `payloadCRC`, decode exactly `numEntries`, verify header min/max, reject trailing bytes
+- [x] `FromBytes()`: validate magic/version, verify `headerCRC`, verify `payloadCRC` (before decompressing), decompress, decode exactly `numEntries`, verify header min/max, reject trailing bytes
 - [x] Unit tests: round trip (empty/single/many/out-of-order/multibyte-UTF8/large line); compression shrinks repetitive block; corruption/truncation/min-max-mismatch rejected
 
 **`internal/logs` chunk file + stream index**
