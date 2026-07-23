@@ -55,6 +55,7 @@ func readChunkFileHeader(path string) (StreamID, StreamLabels, int64, int64, err
 	id := StreamID(binary.BigEndian.Uint64(fixed[5:13]))
 	labelCount := int(fixed[13])
 
+	fileHeaderLen := 14 // magic(4)|version(1)|streamID(8)|labelCount(1)
 	m := make(map[string]string, labelCount)
 	var vlen [2]byte
 	for i := 0; i < labelCount; i++ {
@@ -74,6 +75,7 @@ func readChunkFileHeader(path string) (StreamID, StreamLabels, int64, int64, err
 			return 0, StreamLabels{}, 0, 0, fmt.Errorf("logs: read chunk file label value: %w", err)
 		}
 		m[string(name)] = string(val)
+		fileHeaderLen += 1 + int(nl) + 2 + len(val)
 	}
 	labels, err := NewStreamLabels(m)
 	if err != nil {
@@ -93,12 +95,23 @@ func readChunkFileHeader(path string) (StreamID, StreamLabels, int64, int64, err
 	}
 	// PeekBounds verifies the logchunk header checksum, so tampered timestamp bounds
 	// are caught here instead of being trusted into a rebuilt manifest.
-	minTs, maxTs, _, err := logchunk.PeekBounds(lch)
+	minTs, maxTs, _, compLen, err := logchunk.PeekBounds(lch)
 	if err != nil {
 		return 0, StreamLabels{}, 0, 0, fmt.Errorf("logs: peek chunk bounds in %s: %w", path, err)
 	}
 	if minTs > maxTs {
 		return 0, StreamLabels{}, 0, 0, fmt.Errorf("logs: chunk file %s has minTs %d > maxTs %d", path, minTs, maxTs)
+	}
+	// The header alone does not prove the compressed payload is present: a chunk
+	// truncated right after its header would pass every check above and then be
+	// indexed as pointing to unreadable data. Verify the file is exactly the header
+	// plus the authenticated compressed length.
+	fi, err := f.Stat()
+	if err != nil {
+		return 0, StreamLabels{}, 0, 0, fmt.Errorf("logs: stat chunk file %s: %w", path, err)
+	}
+	if want := int64(fileHeaderLen + logchunk.HeaderLen + compLen); fi.Size() != want {
+		return 0, StreamLabels{}, 0, 0, fmt.Errorf("logs: chunk file %s size %d != expected %d (truncated or malformed)", path, fi.Size(), want)
 	}
 	return id, labels, minTs, maxTs, nil
 }
@@ -223,6 +236,12 @@ func decodeChunkFileHeader(data []byte) (StreamID, StreamLabels, []byte, error) 
 	labels, err := NewStreamLabels(m)
 	if err != nil {
 		return 0, StreamLabels{}, nil, fmt.Errorf("logs: invalid labels in chunk file: %w", err)
+	}
+	// Cross-check the stored ID against the labels' fingerprint on the full-read path
+	// too (recovery already does): a label mutated to another valid value would
+	// otherwise be silently accepted, since the embedded ID is unchanged.
+	if StreamIDOf(labels) != id {
+		return 0, StreamLabels{}, nil, fmt.Errorf("logs: chunk file stream id does not match its labels")
 	}
 	return id, labels, data[pos:], nil
 }

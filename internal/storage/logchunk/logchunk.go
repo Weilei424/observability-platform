@@ -141,29 +141,32 @@ func (c *Chunk) Bytes() []byte {
 // exactly this many bytes and call PeekBounds, avoiding the payload entirely.
 const HeaderLen = headerLen
 
-// PeekBounds reads a chunk's min/max timestamps and entry count from the fixed
-// header WITHOUT decompressing the payload — the cheap path used to rebuild an index
-// from chunk headers. It validates magic, version, and the header checksum (so the
-// returned bounds are authenticated); the payload checksum and full decode are done
-// by FromBytes when the chunk is actually read. data must contain at least HeaderLen
-// bytes.
-func PeekBounds(data []byte) (minTs, maxTs int64, numEntries int, err error) {
+// PeekBounds reads a chunk's min/max timestamps, entry count, and compressed-payload
+// length from the fixed header WITHOUT decompressing the payload — the cheap path used
+// to rebuild an index from chunk headers. It validates magic, version, and the header
+// checksum (so the returned values are authenticated); the payload checksum and full
+// decode are done by FromBytes when the chunk is actually read. The returned
+// compressedLen lets a caller confirm the payload is physically present (total file
+// size == header offset + HeaderLen + compressedLen). data must contain at least
+// HeaderLen bytes.
+func PeekBounds(data []byte) (minTs, maxTs int64, numEntries, compressedLen int, err error) {
 	if len(data) < headerLen ||
 		data[0] != magic[0] || data[1] != magic[1] || data[2] != magic[2] || data[3] != magic[3] {
-		return 0, 0, 0, errors.New("logchunk.PeekBounds: unrecognized chunk format")
+		return 0, 0, 0, 0, errors.New("logchunk.PeekBounds: unrecognized chunk format")
 	}
 	if data[4] != version {
-		return 0, 0, 0, fmt.Errorf("logchunk.PeekBounds: unsupported chunk version %d (expected %d)", data[4], version)
+		return 0, 0, 0, 0, fmt.Errorf("logchunk.PeekBounds: unsupported chunk version %d (expected %d)", data[4], version)
 	}
-	// Authenticate the header before trusting the bounds — a header-only read has no
-	// decoded payload to cross-check them against.
+	// Authenticate the header before trusting any of it — a header-only read has no
+	// decoded payload to cross-check against.
 	if crc32.Checksum(data[:headerCRCScope], crcTable) != binary.BigEndian.Uint32(data[33:37]) {
-		return 0, 0, 0, errors.New("logchunk.PeekBounds: chunk header checksum mismatch")
+		return 0, 0, 0, 0, errors.New("logchunk.PeekBounds: chunk header checksum mismatch")
 	}
 	minTs = int64(binary.BigEndian.Uint64(data[5:13]))
 	maxTs = int64(binary.BigEndian.Uint64(data[13:21]))
 	numEntries = int(binary.BigEndian.Uint32(data[21:25]))
-	return minTs, maxTs, numEntries, nil
+	compressedLen = int(binary.BigEndian.Uint32(data[29:33]))
+	return minTs, maxTs, numEntries, compressedLen, nil
 }
 
 // FromBytes reconstructs a chunk from Bytes output, validating every field: magic,

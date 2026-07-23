@@ -73,6 +73,53 @@ func TestReadChunkFileHeader_RejectsTamperedMetadata(t *testing.T) {
 	}
 }
 
+func TestReadChunkFileHeader_RejectsTruncatedPayload(t *testing.T) {
+	dir := t.TempDir()
+	labels, _ := NewStreamLabels(map[string]string{"service": "api"})
+	c := logchunk.NewChunk()
+	c.Append(100, "x")
+	c.Append(200, "y")
+	ref, err := writeChunkFile(dir, StreamIDOf(labels), labels, c)
+	if err != nil {
+		t.Fatalf("writeChunkFile: %v", err)
+	}
+	path := filepath.Join(dir, ref.Name)
+	// Truncate to exactly the file header (27 bytes for a single label) + logchunk
+	// header, cutting off the compressed payload while leaving both headers intact.
+	if err := os.Truncate(path, 27+int64(logchunk.HeaderLen)); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	if _, _, _, _, err := readChunkFileHeader(path); err == nil {
+		t.Error("expected error for a chunk truncated after its header (payload missing)")
+	}
+}
+
+func TestReadChunkFile_RejectsRelabeledChunk(t *testing.T) {
+	dir := t.TempDir()
+	labels, _ := NewStreamLabels(map[string]string{"service": "api"})
+	c := logchunk.NewChunk()
+	c.Append(100, "x")
+	ref, err := writeChunkFile(dir, StreamIDOf(labels), labels, c)
+	if err != nil {
+		t.Fatalf("writeChunkFile: %v", err)
+	}
+	path := filepath.Join(dir, ref.Name)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The value "api" starts at offset 24 (14 + nameLen(1) + "service"(7) + valLen(2)).
+	// Change it to another VALID label value; the embedded ID no longer fingerprints
+	// the stored labels, which the full-read path must reject (not just recovery).
+	data[24] = 'z'
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := readChunkFile(path); err == nil {
+		t.Error("expected error: relabeled chunk's id no longer matches its labels")
+	}
+}
+
 func TestChunkFile_RoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	labels, _ := NewStreamLabels(map[string]string{"service": "api", "level": "error"})

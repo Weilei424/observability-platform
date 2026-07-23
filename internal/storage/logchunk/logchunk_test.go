@@ -110,19 +110,22 @@ func TestChunk_UncompressedBytesMatchesHeader(t *testing.T) {
 func TestPeekBounds(t *testing.T) {
 	c := build([][2]any{{300, "a"}, {100, "b"}, {200, "c"}})
 	data := c.Bytes()
-	minTs, maxTs, n, err := PeekBounds(data)
+	minTs, maxTs, n, compLen, err := PeekBounds(data)
 	if err != nil {
 		t.Fatalf("PeekBounds: %v", err)
 	}
 	if minTs != 100 || maxTs != 300 || n != 3 {
 		t.Fatalf("PeekBounds = (%d,%d,%d), want (100,300,3)", minTs, maxTs, n)
 	}
-	if _, _, _, err := PeekBounds(data[:10]); err == nil {
+	if want := len(data) - HeaderLen; compLen != want {
+		t.Fatalf("PeekBounds compressedLen = %d, want %d", compLen, want)
+	}
+	if _, _, _, _, err := PeekBounds(data[:10]); err == nil {
 		t.Error("expected error for a short header")
 	}
 	bad := append([]byte(nil), data...)
 	bad[0] ^= 0xff
-	if _, _, _, err := PeekBounds(bad); err == nil {
+	if _, _, _, _, err := PeekBounds(bad); err == nil {
 		t.Error("expected error for bad magic")
 	}
 }
@@ -203,7 +206,7 @@ func TestFromBytes_RejectsLegacyV1Fixture(t *testing.T) {
 		t.Errorf("FromBytes error = %q, want it to reject via the version discriminator", err.Error())
 	}
 
-	_, _, _, perr := PeekBounds(v1)
+	_, _, _, _, perr := PeekBounds(v1)
 	if perr == nil {
 		t.Fatal("PeekBounds should reject a v1 chunk")
 	}
