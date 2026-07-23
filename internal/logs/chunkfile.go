@@ -79,14 +79,26 @@ func readChunkFileHeader(path string) (StreamID, StreamLabels, int64, int64, err
 	if err != nil {
 		return 0, StreamLabels{}, 0, 0, fmt.Errorf("logs: invalid labels in chunk file: %w", err)
 	}
+	// The file header (stream ID + labels) is not covered by a checksum, so
+	// cross-check that the stored ID is the fingerprint of the stored labels; a
+	// single-field corruption in either breaks this and is rejected rather than
+	// silently misindexing the stream during a rebuild.
+	if StreamIDOf(labels) != id {
+		return 0, StreamLabels{}, 0, 0, fmt.Errorf("logs: chunk file %s stream id does not match its labels", path)
+	}
 
 	lch := make([]byte, logchunk.HeaderLen)
 	if _, err := io.ReadFull(r, lch); err != nil {
 		return 0, StreamLabels{}, 0, 0, fmt.Errorf("logs: read chunk header in %s: %w", path, err)
 	}
+	// PeekBounds verifies the logchunk header checksum, so tampered timestamp bounds
+	// are caught here instead of being trusted into a rebuilt manifest.
 	minTs, maxTs, _, err := logchunk.PeekBounds(lch)
 	if err != nil {
 		return 0, StreamLabels{}, 0, 0, fmt.Errorf("logs: peek chunk bounds in %s: %w", path, err)
+	}
+	if minTs > maxTs {
+		return 0, StreamLabels{}, 0, 0, fmt.Errorf("logs: chunk file %s has minTs %d > maxTs %d", path, minTs, maxTs)
 	}
 	return id, labels, minTs, maxTs, nil
 }

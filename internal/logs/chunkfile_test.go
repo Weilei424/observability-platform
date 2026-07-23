@@ -34,6 +34,45 @@ func TestReadChunkFileHeader_MatchesWithoutDecompress(t *testing.T) {
 	}
 }
 
+func TestReadChunkFileHeader_RejectsTamperedMetadata(t *testing.T) {
+	dir := t.TempDir()
+	// Single label so the header byte offsets are deterministic:
+	// magic(4)|ver(1)|streamID(8)|labelCount(1)|nameLen(1)|"service"(7)|valLen(2)|
+	// "api"(3) => the file header is 27 bytes, then the logchunk header follows.
+	labels, _ := NewStreamLabels(map[string]string{"service": "api"})
+	c := logchunk.NewChunk()
+	c.Append(100, "x")
+	c.Append(200, "y")
+	ref, err := writeChunkFile(dir, StreamIDOf(labels), labels, c)
+	if err != nil {
+		t.Fatalf("writeChunkFile: %v", err)
+	}
+	path := filepath.Join(dir, ref.Name)
+	good, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const lcStart = 27 // logchunk header begins here; minTs at +5, maxTs at +13
+
+	cases := map[string]int{
+		"tampered label byte": 15,           // inside "service" -> id/labels mismatch or invalid label
+		"tampered minTs byte": lcStart + 5,  // logchunk header CRC catches it
+		"tampered maxTs byte": lcStart + 13, // logchunk header CRC catches it
+	}
+	for name, off := range cases {
+		t.Run(name, func(t *testing.T) {
+			bad := append([]byte(nil), good...)
+			bad[off] ^= 0xff
+			if err := os.WriteFile(path, bad, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, _, _, err := readChunkFileHeader(path); err == nil {
+				t.Errorf("expected error for %s (unauthenticated metadata must be rejected)", name)
+			}
+		})
+	}
+}
+
 func TestChunkFile_RoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	labels, _ := NewStreamLabels(map[string]string{"service": "api", "level": "error"})

@@ -93,6 +93,49 @@ func TestStore_RebuildsIndexWhenManifestCorrupt(t *testing.T) {
 	}
 }
 
+func TestStore_RebuildRejectsTamperedChunkHeader(t *testing.T) {
+	dir := t.TempDir()
+	labels := mustLabels(t, map[string]string{"service": "api"})
+
+	s := newTestStore(t, dir, 1<<30)
+	if err := s.Append(labels, 100, "x"); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// Remove the manifest so reopening must rebuild from chunk headers.
+	if err := os.Remove(filepath.Join(dir, "index", "streams.index")); err != nil {
+		t.Fatalf("remove manifest: %v", err)
+	}
+	// Tamper the logchunk minTs byte in the one chunk file (single-label header is 27
+	// bytes, minTs at +5). This must be rejected on rebuild, not laundered into a new
+	// checksum-valid manifest.
+	chunksDir := filepath.Join(dir, "chunks")
+	entries, _ := os.ReadDir(chunksDir)
+	var cpath string
+	for _, e := range entries {
+		if filepath.Ext(e.Name()) == ".chunk" {
+			cpath = filepath.Join(chunksDir, e.Name())
+		}
+	}
+	data, err := os.ReadFile(cpath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data[27+5] ^= 0xff
+	if err := os.WriteFile(cpath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := NewStore(
+		filepath.Join(dir, "wal"), chunksDir, filepath.Join(dir, "index"),
+		1<<20, 1, 1<<30,
+	); err == nil {
+		t.Error("NewStore should fail rebuilding from a tampered chunk header, not launder it")
+	}
+}
+
 func TestSplitIntoChunks_CapsUncompressedSize(t *testing.T) {
 	var entries []LogEntry
 	for i := 0; i < 10; i++ {
