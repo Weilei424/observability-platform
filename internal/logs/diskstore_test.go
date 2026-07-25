@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/masonwheeler/observability-platform/internal/storage/index"
+	"github.com/masonwheeler/observability-platform/internal/storage/logwal"
 )
 
 func newTestStore(t *testing.T, dir string, flushThreshold int64) *Store {
@@ -323,6 +324,40 @@ func TestStore_CheckpointPreventsDoubleCount(t *testing.T) {
 	}
 	if len(got) != 1 {
 		t.Fatalf("entries = %d, want 1 (no double count from WAL + chunk)", len(got))
+	}
+}
+
+func TestStore_CheckpointTruncatesFlushedWAL(t *testing.T) {
+	// Prove the flush actually checkpoints the WAL — not via the deduping read path
+	// (which would hide a missing checkpoint by merging chunk/WAL duplicates), but by
+	// replaying the WAL directly and asserting only the post-flush record remains.
+	dir := t.TempDir()
+	labels := mustLabels(t, map[string]string{"service": "api"})
+
+	// headBytes accrues 8+len(line) per append. Threshold 15 flushes on the second
+	// append (9 -> 19), checkpointing the WAL; the third append stays in the head.
+	s := newTestStore(t, dir, 15)
+	if err := s.Append(labels, 100, "a"); err != nil { // headBytes 9
+		t.Fatalf("Append a: %v", err)
+	}
+	if err := s.Append(labels, 200, "bb"); err != nil { // headBytes 19 >= 15 -> flush + checkpoint
+		t.Fatalf("Append bb: %v", err)
+	}
+	if err := s.Append(labels, 300, "c"); err != nil { // headBytes 9 -> unflushed
+		t.Fatalf("Append c: %v", err)
+	}
+
+	var lines []string
+	if err := logwal.Replay(filepath.Join(dir, "wal"), func(_ []logwal.LabelPair, _ int64, line string) {
+		lines = append(lines, line)
+	}); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if len(lines) != 1 || lines[0] != "c" {
+		t.Fatalf("direct WAL replay = %v, want only [c] (a/bb must have been checkpointed away)", lines)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 }
 
