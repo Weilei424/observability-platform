@@ -51,6 +51,9 @@ func TestChunk_RoundTrip(t *testing.T) {
 		"out of order": {{300, "late"}, {100, "early"}, {200, "mid"}},
 		"utf8":         {{100, "héllo → 世界"}},
 		"empty line":   {{100, ""}, {200, "x"}},
+		// A 256 KiB line (the log line-size limit) exercises the multi-byte uvarint
+		// length encoding and size accounting; a small follow-on covers a delta after it.
+		"large line (256 KiB)": {{100, strings.Repeat("x", 256*1024)}, {200, "small"}},
 	}
 	for name, entries := range cases {
 		t.Run(name, func(t *testing.T) {
