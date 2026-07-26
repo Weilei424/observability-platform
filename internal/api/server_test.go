@@ -27,7 +27,7 @@ func newTestServer(t *testing.T, dataDir string) *api.Server {
 	store := metrics.NewMemoryStore()
 	engine := metrics.NewQueryEngine(store)
 	reg, _ := observability.NewRegistry(store, nil)
-	return api.New(cfg, log, store, engine, reg, logs.NewMemoryStore())
+	return api.New(cfg, log, store, engine, reg, logs.NewMemoryStore(), nil)
 }
 
 func TestHealthz_Returns200(t *testing.T) {
