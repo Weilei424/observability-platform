@@ -285,7 +285,71 @@ func streamMatches(labels StreamLabels, matchers []index.Pair) bool {
 	return true
 }
 
+// Flush drains the head to chunks + index and checkpoints the WAL. Safe to call
+// when the head is empty (no-op).
+func (s *Store) Flush() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.flushLocked()
+}
+
+// StreamLabelSet returns a stream's labels from the persisted index or the still
+// -buffered head. Stream labels are stable for a given id across a concurrent flush.
+func (s *Store) StreamLabelSet(id StreamID) (StreamLabels, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if l, ok := s.index.labels[id]; ok {
+		return l, true
+	}
+	if hs := s.head[id]; hs != nil {
+		return hs.labels, true
+	}
+	return StreamLabels{}, false
+}
+
+// LabelNames returns all stream label names across head + persisted index, sorted, unique.
+func (s *Store) LabelNames() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	set := make(map[string]struct{})
+	for _, n := range s.index.postings.LabelNames() {
+		set[n] = struct{}{}
+	}
+	for _, hs := range s.head {
+		for n := range hs.labels.Map() {
+			set[n] = struct{}{}
+		}
+	}
+	return sortedKeys(set)
+}
+
+// LabelValues returns all values for name across head + persisted index, sorted, unique.
+func (s *Store) LabelValues(name string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	set := make(map[string]struct{})
+	for _, v := range s.index.postings.LabelValues(name) {
+		set[v] = struct{}{}
+	}
+	for _, hs := range s.head {
+		if v, ok := hs.labels.Get(name); ok {
+			set[v] = struct{}{}
+		}
+	}
+	return sortedKeys(set)
+}
+
+func sortedKeys(set map[string]struct{}) []string {
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 var _ Ingester = (*Store)(nil)
+var _ Reader = (*Store)(nil)
 
 // writeChunksAndIndexForTest persists the head to chunks + manifest WITHOUT
 // checkpointing the WAL or resetting the head — used only to simulate the flush
