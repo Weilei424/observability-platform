@@ -201,6 +201,20 @@ unaffected and must not be touched. If preserving pre-v2 log data ever becomes a
 requirement, add a version-1 decode path in `logchunk.FromBytes` (v1 bounds were not
 checksummed, so a v1 rebuild must fully decode rather than peek).
 
+### Loki query path (introduced in 4.4)
+
+- `internal/logs/logql.go` — LogQL subset parser: equality stream selector `{k="v"}`
+  plus chained line filters `|=` / `!=` / `|~` / `!~`. Pipelines, formatters,
+  metric/aggregation queries, and regex/negative label matchers return explicit errors.
+- `internal/logs/query.go` — `QueryEngine` over a `Reader` interface (`*logs.Store`
+  satisfies it): match streams by label → read `[start,end]` entries → line-filter →
+  global order-by-direction + limit → regroup by stream.
+- `internal/api/loki_query.go` + `loki_response.go` — `GET /loki/api/v1/{query,query_range,
+  labels,label/{name}/values}`. Loki-native nanosecond timestamps, `limit`/`direction`
+  defaults (100 / backward), and **plain-text** error bodies (deliberately distinct from
+  the Prometheus JSON error envelope). Label endpoints accept but ignore `start`/`end`
+  this phase.
+
 ---
 
 ## API Boundaries
