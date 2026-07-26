@@ -425,6 +425,40 @@ func assertStringSet(t *testing.T, got, want []string) {
 	}
 }
 
+func TestStore_LabelAccessors_MixedHeadAndIndex(t *testing.T) {
+	s := newTestStore(t, t.TempDir(), 8<<20) // high threshold, no auto-flush
+
+	// api is flushed: its labels live only in the persisted index, head cleared.
+	api := mustLabels(t, map[string]string{"service": "api", "level": "info"})
+	if err := s.Append(api, 100, "a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	// web is appended after the flush: its labels live only in the head. It carries
+	// its own label name ("region") that api does not have, so a LabelNames() that
+	// silently dropped the head would be caught (api's index-only names alone are
+	// {level, service}, a strict subset of the expected union) — not just a
+	// LabelValues()/StreamLabelSet() short-circuit.
+	web := mustLabels(t, map[string]string{"service": "web", "region": "us-east"})
+	if err := s.Append(web, 200, "w"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mixed state: api is served from the persisted index, web from the head. Each
+	// accessor must consult both sources, not short-circuit to just one.
+	if got, ok := s.StreamLabelSet(StreamIDOf(api)); !ok || got.Hash() != api.Hash() {
+		t.Fatalf("StreamLabelSet(index-only stream) = %v,%v", got, ok)
+	}
+	if got, ok := s.StreamLabelSet(StreamIDOf(web)); !ok || got.Hash() != web.Hash() {
+		t.Fatalf("StreamLabelSet(head-only stream) = %v,%v", got, ok)
+	}
+	assertStringSet(t, s.LabelNames(), []string{"level", "region", "service"})
+	assertStringSet(t, s.LabelValues("service"), []string{"api", "web"})
+}
+
 func TestStore_MergeDedupsCrashWindow(t *testing.T) {
 	// Simulate the crash window: a chunk was written but the WAL was NOT
 	// checkpointed, so a WAL replay reintroduces the same entry. The merged read

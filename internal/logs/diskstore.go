@@ -293,8 +293,8 @@ func (s *Store) Flush() error {
 	return s.flushLocked()
 }
 
-// StreamLabelSet returns a stream's labels from the persisted index or the still
-// -buffered head. Stream labels are stable for a given id across a concurrent flush.
+// StreamLabelSet returns a stream's labels from the persisted index, or from the
+// still-buffered head. Stream labels are stable for a given id across a concurrent flush.
 func (s *Store) StreamLabelSet(id StreamID) (StreamLabels, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
