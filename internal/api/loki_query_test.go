@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/masonwheeler/observability-platform/internal/api"
 	"github.com/masonwheeler/observability-platform/internal/config"
@@ -100,6 +102,9 @@ func TestLokiQueryRange_LabelOnly(t *testing.T) {
 	if resp.Data.Result[0].Values[0][0] != "100" {
 		t.Fatalf("first value ts = %q, want 100", resp.Data.Result[0].Values[0][0])
 	}
+	if resp.Data.Result[0].Values[0][1] != "GET /a error" {
+		t.Fatalf("first value line = %q, want %q", resp.Data.Result[0].Values[0][1], "GET /a error")
+	}
 }
 
 func TestLokiQueryRange_TimeRangeNarrows(t *testing.T) {
@@ -164,7 +169,12 @@ func TestLokiInstantQuery_UpToTime(t *testing.T) {
 
 func TestLokiLabels(t *testing.T) {
 	srv := newLokiServer(t)
-	pushLogs(t, srv, twoStreams)
+	// The "api" stream carries a second, distinct label name ("level") so that
+	// LabelNames() sortedness across more than one name is actually exercised.
+	pushLogs(t, srv, `{"streams":[
+	 {"stream":{"service":"api","level":"info"},"values":[["100","GET /a error"]]},
+	 {"stream":{"service":"web"},"values":[["150","render error"]]}
+	]}`)
 	w := getLoki(t, srv, "/loki/api/v1/labels", url.Values{})
 	var resp struct {
 		Status string   `json:"status"`
@@ -173,8 +183,9 @@ func TestLokiLabels(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if resp.Status != "success" || len(resp.Data) != 1 || resp.Data[0] != "service" {
-		t.Fatalf("labels = %+v", resp)
+	want := []string{"level", "service"}
+	if resp.Status != "success" || len(resp.Data) != len(want) || resp.Data[0] != want[0] || resp.Data[1] != want[1] {
+		t.Fatalf("labels = %+v, want %v", resp, want)
 	}
 }
 
@@ -219,10 +230,92 @@ func TestLokiQueryRange_UnsupportedAndBadParams(t *testing.T) {
 	if w.Code != 400 {
 		t.Fatalf("bad limit code = %d", w.Code)
 	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Fatalf("bad limit content-type = %q", ct)
+	}
 
 	// Missing query → 400.
 	w = getLoki(t, srv, "/loki/api/v1/query_range", url.Values{})
 	if w.Code != 400 {
 		t.Fatalf("missing query code = %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Fatalf("missing query content-type = %q", ct)
+	}
+}
+
+// TestLokiQueryRange_DefaultWindow proves query_range with no start/end
+// defaults to the window [now-1h, now]: an entry 30m in the past falls inside
+// (proving end≈now), an entry 2h in the past falls outside (proving
+// start≈now-1h).
+func TestLokiQueryRange_DefaultWindow(t *testing.T) {
+	srv := newLokiServer(t)
+	now := time.Now()
+	insideNs := now.Add(-30 * time.Minute).UnixNano()
+	outsideNs := now.Add(-2 * time.Hour).UnixNano()
+	body := fmt.Sprintf(`{"streams":[{"stream":{"service":"api"},"values":[["%d","inside window"],["%d","outside window"]]}]}`,
+		insideNs, outsideNs)
+	pushLogs(t, srv, body)
+
+	q := url.Values{}
+	q.Set("query", `{service="api"}`)
+	// No start/end: exercises the [now-1h, now] default.
+	w := getLoki(t, srv, "/loki/api/v1/query_range", q)
+	if w.Code != 200 {
+		t.Fatalf("code = %d, body = %s", w.Code, w.Body.String())
+	}
+	var resp lokiStreamsResp
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Data.Result) != 1 || len(resp.Data.Result[0].Values) != 1 {
+		t.Fatalf("default window result = %+v", resp.Data.Result)
+	}
+	if resp.Data.Result[0].Values[0][1] != "inside window" {
+		t.Fatalf("default window line = %q, want %q", resp.Data.Result[0].Values[0][1], "inside window")
+	}
+}
+
+// TestLokiInstantQuery_DefaultTime proves the instant query with no 'time'
+// defaults to now, evaluated over [0, now]: an entry 30m in the past falls
+// inside, an entry 1h in the future falls outside.
+func TestLokiInstantQuery_DefaultTime(t *testing.T) {
+	srv := newLokiServer(t)
+	now := time.Now()
+	pastNs := now.Add(-30 * time.Minute).UnixNano()
+	futureNs := now.Add(1 * time.Hour).UnixNano()
+	body := fmt.Sprintf(`{"streams":[{"stream":{"service":"api"},"values":[["%d","past entry"],["%d","future entry"]]}]}`,
+		pastNs, futureNs)
+	pushLogs(t, srv, body)
+
+	q := url.Values{}
+	q.Set("query", `{service="api"}`)
+	// No time: exercises the now default with a [0, now] window.
+	w := getLoki(t, srv, "/loki/api/v1/query", q)
+	if w.Code != 200 {
+		t.Fatalf("code = %d, body = %s", w.Code, w.Body.String())
+	}
+	var resp lokiStreamsResp
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Data.Result) != 1 || len(resp.Data.Result[0].Values) != 1 {
+		t.Fatalf("default time result = %+v", resp.Data.Result)
+	}
+	if resp.Data.Result[0].Values[0][1] != "past entry" {
+		t.Fatalf("default time line = %q, want %q", resp.Data.Result[0].Values[0][1], "past entry")
+	}
+}
+
+// TestLokiQueryRange_NilLogQuery drives a query handler against a Server built
+// with a nil logs query engine (metrics-only wiring) and expects a 500, per
+// requireLogQuery's guard.
+func TestLokiQueryRange_NilLogQuery(t *testing.T) {
+	srv := newPushServerWithIngester(t, logs.NewMemoryStore())
+	q := url.Values{}
+	q.Set("query", `{service="api"}`)
+	w := getLoki(t, srv, "/loki/api/v1/query_range", q)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("code = %d, want 500; body = %s", w.Code, w.Body.String())
 	}
 }
