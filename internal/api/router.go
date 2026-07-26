@@ -31,6 +31,10 @@ func (s *Server) buildRouter() chi.Router {
 	r.Post("/api/v1/series", s.handleSeries)
 
 	r.Post("/loki/api/v1/push", s.handleLokiPush)
+	r.Get("/loki/api/v1/query", s.handleLokiQuery)
+	r.Get("/loki/api/v1/query_range", s.handleLokiQueryRange)
+	r.Get("/loki/api/v1/labels", s.handleLokiLabels)
+	r.Get("/loki/api/v1/label/{name}/values", s.handleLokiLabelValues)
 
 	return r
 }
