@@ -376,27 +376,27 @@ Design: `docs/superpowers/specs/2026-07-21-phase-4.3-log-chunk-storage-index-des
 Design: `docs/superpowers/specs/2026-07-25-phase-4.4-loki-query-api-design.md` · Plan: `docs/superpowers/plans/2026-07-26-phase-4.4-loki-query-api.md`
 
 **`internal/logs` LogQL parser + query engine**
-- [ ] `logql.go` — `LogSelector{Matchers []index.Pair, LineFilters []LineFilter}`, `FilterOp` (`|=`/`!=`/`|~`/`!~`), `LineFilter.Keep`; `ParseLogQL` (equality-only selector, ≥1 matcher required, quote-aware line-filter tokenizing, regex compiled once)
-- [ ] `logql.go` — explicit errors for `{}`/empty selector, non-`=` label matcher ops (`=~`/`!=`/`!~`), pipelines/formatters (`| json`, `| logfmt`, `line_format`, `label_format`), metric wrappers (`rate(`, `count_over_time(`), trailing junk, and invalid regex operands
-- [ ] `query.go` — `Reader` interface (`MatchingStreamIDs`, `StreamEntries`, `StreamLabelSet`, `LabelNames`, `LabelValues`); `QueryEngine`, `Direction` (backward/forward), `StreamResult`
-- [ ] `query.go` — `QueryRange` (match → read `[start,end]` → line-filter → global order-by-direction + limit → regroup by stream, drop empty streams); `QueryInstant` = `QueryRange(sel, 0, time, limit, dir)`; `LabelNames`/`LabelValues` delegation
-- [ ] `diskstore.go` — `StreamLabelSet(id)`, `LabelNames()`, `LabelValues(name)` merging head + persisted index (sorted-unique); `var _ Reader = (*Store)(nil)`
+- [x] `logql.go` — `LogSelector{Matchers []index.Pair, LineFilters []LineFilter}`, `FilterOp` (`|=`/`!=`/`|~`/`!~`), `LineFilter.Keep`; `ParseLogQL` (equality-only selector, ≥1 matcher required, quote-aware line-filter tokenizing, regex compiled once)
+- [x] `logql.go` — explicit errors for `{}`/empty selector, non-`=` label matcher ops (`=~`/`!=`/`!~`), pipelines/formatters (`| json`, `| logfmt`, `line_format`, `label_format`), metric wrappers (`rate(`, `count_over_time(`), trailing junk, and invalid regex operands
+- [x] `query.go` — `Reader` interface (`MatchingStreamIDs`, `StreamEntries`, `StreamLabelSet`, `LabelNames`, `LabelValues`); `QueryEngine`, `Direction` (backward/forward), `StreamResult`
+- [x] `query.go` — `QueryRange` (match → read `[start,end]` → line-filter → global order-by-direction + limit → regroup by stream, drop empty streams); `QueryInstant` = `QueryRange(sel, 0, time, limit, dir)`; `LabelNames`/`LabelValues` delegation
+- [x] `diskstore.go` — `StreamLabelSet(id)`, `LabelNames()`, `LabelValues(name)` merging head + persisted index (sorted-unique); `var _ Reader = (*Store)(nil)`
 
 **`internal/api` Loki endpoints + envelope**
-- [ ] `loki_response.go` — `lokiResponse`/`lokiData`/`lokiStreamResult` (`resultType:"streams"`, values `["<tsNs>","<line>"]`, `stats:{}`); success writer; **plain-text** error writer (Loki-faithful, distinct from the Prometheus JSON envelope)
-- [ ] `loki_query.go` — `parseLokiTime` (ns epoch / RFC3339, not float-seconds), `limit` (default 100, reject `<=0`), `direction` (default backward) parsing
-- [ ] `loki_query.go` — `handleLokiQueryRange` (end default now / start default end−1h; `end<start` → 400; ignore `step`/`interval`) and `handleLokiQuery` (instant; `time` default now)
-- [ ] `loki_query.go` — `handleLokiLabels`, `handleLokiLabelValues` (accept + ignore `start`/`end`/`query` this phase)
-- [ ] `server.go` — add `logQuery *logs.QueryEngine` field + `api.New` param; `router.go` — register the 4 `GET` routes
-- [ ] `cmd/server/main.go` — `logs.NewQueryEngine(logStore)` → `api.New`; update all other `api.New(` call sites (e.g. `server_test.go`)
+- [x] `loki_response.go` — `lokiResponse`/`lokiData`/`lokiStreamResult` (`resultType:"streams"`, values `["<tsNs>","<line>"]`, `stats:{}`); success writer; **plain-text** error writer (Loki-faithful, distinct from the Prometheus JSON envelope)
+- [x] `loki_query.go` — `parseLokiTime` (ns epoch / RFC3339, not float-seconds), `limit` (default 100, reject `<=0`), `direction` (default backward) parsing
+- [x] `loki_query.go` — `handleLokiQueryRange` (end default now / start default end−1h; `end<start` → 400; ignore `step`/`interval`) and `handleLokiQuery` (instant; `time` default now)
+- [x] `loki_query.go` — `handleLokiLabels`, `handleLokiLabelValues` (accept + ignore `start`/`end`/`query` this phase)
+- [x] `server.go` — add `logQuery *logs.QueryEngine` field + `api.New` param; `router.go` — register the 4 `GET` routes
+- [x] `cmd/server/main.go` — `logs.NewQueryEngine(logStore)` → `api.New`; update all other `api.New(` call sites (e.g. `server_test.go`)
 
 **Tests + docs + verify**
-- [ ] Unit `internal/logs/logql_test.go` — bare selector, each filter op, chained filters, `LineFilter.Keep` (substring + regex, positive/negative); rejections (empty/`{}`, non-`=` label op, pipelines, metric wrappers, invalid regex, unclosed brace/missing quotes)
-- [ ] Unit `internal/logs/query_test.go` — label-only query, time-range narrowing, substring + regex line filters, backward/forward ordering, global `limit` capping across streams, multi-stream merge, empty result (real temp-dir `*Store` + fake `Reader`)
-- [ ] Unit `internal/logs/diskstore_test.go` — `StreamLabelSet`/`LabelNames`/`LabelValues` across head-only, flushed-only, mixed state
-- [ ] Integration `internal/api/loki_query_test.go` — push → label-only `query_range`; time-range query; `|=` text filter; `|~` regex filter; `/labels` + `/label/{name}/values`; unsupported LogQL → 400 plain text; malformed params → 400; envelope-shape assertions (`resultType:"streams"`, `["<ns>","line"]`, sorted label `data`)
-- [ ] `ARCHITECTURE_NOTES.md` — "Introduced in 4.4" note for the logs query engine + Loki endpoints
-- [ ] Verify: `go build ./...`, `go vet ./...`, `golangci-lint run`, `go test ./...` green
+- [x] Unit `internal/logs/logql_test.go` — bare selector, each filter op, chained filters, `LineFilter.Keep` (substring + regex, positive/negative); rejections (empty/`{}`, non-`=` label op, pipelines, metric wrappers, invalid regex, unclosed brace/missing quotes)
+- [x] Unit `internal/logs/query_test.go` — label-only query, time-range narrowing, substring + regex line filters, backward/forward ordering, global `limit` capping across streams, multi-stream merge, empty result (real temp-dir `*Store` + fake `Reader`)
+- [x] Unit `internal/logs/diskstore_test.go` — `StreamLabelSet`/`LabelNames`/`LabelValues` across head-only, flushed-only, mixed state
+- [x] Integration `internal/api/loki_query_test.go` — push → label-only `query_range`; time-range query; `|=` text filter; `|~` regex filter; `/labels` + `/label/{name}/values`; unsupported LogQL → 400 plain text; malformed params → 400; envelope-shape assertions (`resultType:"streams"`, `["<ns>","line"]`, sorted label `data`)
+- [x] `ARCHITECTURE_NOTES.md` — "Introduced in 4.4" note for the logs query engine + Loki endpoints
+- [x] Verify: `go build ./...`, `go vet ./...`, `golangci-lint run`, `go test ./...` green
 
 ### Phase 4.5 — Grafana Logs Demo
 - [ ] Add Grafana datasource provisioning for Loki-compatible endpoint
