@@ -376,6 +376,55 @@ func TestStore_LabelFilterNarrows(t *testing.T) {
 	}
 }
 
+func TestStore_LabelAccessors_HeadAndFlushed(t *testing.T) {
+	s := newTestStore(t, t.TempDir(), 8<<20)
+	api := mustLabels(t, map[string]string{"service": "api", "level": "info"})
+	web := mustLabels(t, map[string]string{"service": "web"})
+	if err := s.Append(api, 100, "a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append(web, 100, "w"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Head-only state.
+	if got, ok := s.StreamLabelSet(StreamIDOf(api)); !ok || got.Hash() != api.Hash() {
+		t.Fatalf("StreamLabelSet(head) = %v,%v", got, ok)
+	}
+	assertStringSet(t, s.LabelNames(), []string{"level", "service"})
+	assertStringSet(t, s.LabelValues("service"), []string{"api", "web"})
+
+	// Flush → same answers from the persisted index.
+	if err := s.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if _, ok := s.StreamLabelSet(StreamIDOf(web)); !ok {
+		t.Fatalf("StreamLabelSet(flushed) not found")
+	}
+	assertStringSet(t, s.LabelNames(), []string{"level", "service"})
+	assertStringSet(t, s.LabelValues("service"), []string{"api", "web"})
+
+	// Unknown id / name.
+	if _, ok := s.StreamLabelSet(StreamID(999999)); ok {
+		t.Fatalf("expected unknown stream id to be absent")
+	}
+	if v := s.LabelValues("nope"); len(v) != 0 {
+		t.Fatalf("expected no values for unknown label, got %v", v)
+	}
+}
+
+func assertStringSet(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("set = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("set = %v, want %v (sorted)", got, want)
+		}
+	}
+}
+
 func TestStore_MergeDedupsCrashWindow(t *testing.T) {
 	// Simulate the crash window: a chunk was written but the WAL was NOT
 	// checkpointed, so a WAL replay reintroduces the same entry. The merged read

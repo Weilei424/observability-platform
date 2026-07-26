@@ -71,3 +71,56 @@ func TestQueryRange_GlobalOrderAndLimit(t *testing.T) {
 		t.Fatalf("forward order wrong: %+v", res)
 	}
 }
+
+func TestQueryRange_RealStore_FilterAndTimeRange(t *testing.T) {
+	s := newTestStore(t, t.TempDir(), 8<<20)
+	api := mustLabels(t, map[string]string{"service": "api"})
+	if err := s.Append(api, 100, "GET /a error"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append(api, 200, "GET /b ok"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append(api, 300, "GET /c error"); err != nil {
+		t.Fatal(err)
+	}
+	eng := NewQueryEngine(s)
+
+	sel, err := ParseLogQL(`{service="api"} |= "error"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := eng.QueryRange(sel, 0, 1000, 100, Forward)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
+	if len(res) != 1 || len(res[0].Entries) != 2 {
+		t.Fatalf("expected 2 error lines, got %+v", res)
+	}
+
+	// Time range excludes ts=300.
+	res, err = eng.QueryRange(sel, 0, 250, 100, Forward)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 || len(res[0].Entries) != 1 || res[0].Entries[0].TimestampNs != 100 {
+		t.Fatalf("time-range narrowing wrong: %+v", res)
+	}
+}
+
+func TestQueryInstant_UpToTime(t *testing.T) {
+	s := newTestStore(t, t.TempDir(), 8<<20)
+	api := mustLabels(t, map[string]string{"service": "api"})
+	_ = s.Append(api, 100, "old")
+	_ = s.Append(api, 400, "new")
+	eng := NewQueryEngine(s)
+	sel, _ := ParseLogQL(`{service="api"}`)
+
+	res, err := eng.QueryInstant(sel, 250, 100, Backward)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 || len(res[0].Entries) != 1 || res[0].Entries[0].Line != "old" {
+		t.Fatalf("instant should return only ts<=250, got %+v", res)
+	}
+}
