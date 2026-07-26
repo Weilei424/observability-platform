@@ -49,35 +49,78 @@ func parseLokiDirection(s string) (logs.Direction, error) {
 
 // requireLogQuery guards handlers when no logs query engine is configured (e.g.
 // metrics-only test wiring). Production always configures it.
-func (s *Server) requireLogQuery(w http.ResponseWriter) bool {
+func (s *Server) requireLogQuery(w http.ResponseWriter, r *http.Request) bool {
 	if s.logQuery == nil {
+		s.log.Error("logs query engine not configured", "component", "logs_query",
+			"request_id", chimiddleware.GetReqID(r.Context()))
 		writeLokiError(w, http.StatusInternalServerError, "logs query engine not configured")
 		return false
 	}
 	return true
 }
 
-func (s *Server) handleLokiQueryRange(w http.ResponseWriter, r *http.Request) {
-	if !s.requireLogQuery(w) {
-		return
+// parseCommonLokiQuery performs the parameter parsing shared by the query_range
+// and instant query handlers: the log-query-engine guard, form parsing, the
+// required 'query' parameter, LogQL parsing, 'limit', and 'direction'. On any
+// failure it writes the plain-text error response itself and returns ok=false;
+// callers must return immediately when ok is false. On success, r.Form is
+// populated so callers can read their own remaining parameters (start/end/time)
+// from it directly.
+func (s *Server) parseCommonLokiQuery(w http.ResponseWriter, r *http.Request) (sel logs.LogSelector, limit int, dir logs.Direction, ok bool) {
+	if !s.requireLogQuery(w, r) {
+		return logs.LogSelector{}, 0, 0, false
 	}
 	if err := r.ParseForm(); err != nil {
 		writeLokiError(w, http.StatusBadRequest, "invalid request: "+err.Error())
-		return
+		return logs.LogSelector{}, 0, 0, false
 	}
 	q := r.Form
 	queryStr := q.Get("query")
 	if queryStr == "" {
 		writeLokiError(w, http.StatusBadRequest, "missing required parameter 'query'")
-		return
+		return logs.LogSelector{}, 0, 0, false
 	}
 	sel, err := logs.ParseLogQL(queryStr)
 	if err != nil {
 		writeLokiError(w, http.StatusBadRequest, err.Error())
+		return logs.LogSelector{}, 0, 0, false
+	}
+	limit, err = parseLokiLimit(q.Get("limit"))
+	if err != nil {
+		writeLokiError(w, http.StatusBadRequest, err.Error())
+		return logs.LogSelector{}, 0, 0, false
+	}
+	dir, err = parseLokiDirection(q.Get("direction"))
+	if err != nil {
+		writeLokiError(w, http.StatusBadRequest, err.Error())
+		return logs.LogSelector{}, 0, 0, false
+	}
+	return sel, limit, dir, true
+}
+
+// respondLokiStreams runs fetch and writes its result as a Loki streams
+// envelope, or logs the error and writes a 500 on failure. logMsg distinguishes
+// the query_range vs instant query call site in the log line.
+func (s *Server) respondLokiStreams(w http.ResponseWriter, r *http.Request, logMsg string, fetch func() ([]logs.StreamResult, error)) {
+	results, err := fetch()
+	if err != nil {
+		s.log.Error(logMsg, "component", "logs_query",
+			"request_id", chimiddleware.GetReqID(r.Context()), "err", err)
+		writeLokiError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	writeLokiStreams(w, toLokiStreamResults(results))
+}
+
+func (s *Server) handleLokiQueryRange(w http.ResponseWriter, r *http.Request) {
+	sel, limit, dir, ok := s.parseCommonLokiQuery(w, r)
+	if !ok {
+		return
+	}
+	q := r.Form
 
 	endNs := time.Now().UnixNano()
+	var err error
 	if raw := q.Get("end"); raw != "" {
 		endNs, err = parseLokiTime(raw)
 		if err != nil {
@@ -97,78 +140,38 @@ func (s *Server) handleLokiQueryRange(w http.ResponseWriter, r *http.Request) {
 		writeLokiError(w, http.StatusBadRequest, "invalid time range: 'end' must be >= 'start'")
 		return
 	}
-	limit, err := parseLokiLimit(q.Get("limit"))
-	if err != nil {
-		writeLokiError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	dir, err := parseLokiDirection(q.Get("direction"))
-	if err != nil {
-		writeLokiError(w, http.StatusBadRequest, err.Error())
-		return
-	}
 
-	results, err := s.logQuery.QueryRange(sel, startNs, endNs, limit, dir)
-	if err != nil {
-		s.log.Error("loki query_range failed", "component", "logs_query",
-			"request_id", chimiddleware.GetReqID(r.Context()), "err", err)
-		writeLokiError(w, http.StatusInternalServerError, "internal error")
-		return
-	}
-	writeLokiStreams(w, toLokiStreamResults(results))
+	s.respondLokiStreams(w, r, "loki query_range failed", func() ([]logs.StreamResult, error) {
+		return s.logQuery.QueryRange(sel, startNs, endNs, limit, dir)
+	})
 }
 
 func (s *Server) handleLokiQuery(w http.ResponseWriter, r *http.Request) {
-	if !s.requireLogQuery(w) {
-		return
-	}
-	if err := r.ParseForm(); err != nil {
-		writeLokiError(w, http.StatusBadRequest, "invalid request: "+err.Error())
+	sel, limit, dir, ok := s.parseCommonLokiQuery(w, r)
+	if !ok {
 		return
 	}
 	q := r.Form
-	queryStr := q.Get("query")
-	if queryStr == "" {
-		writeLokiError(w, http.StatusBadRequest, "missing required parameter 'query'")
-		return
-	}
-	sel, err := logs.ParseLogQL(queryStr)
-	if err != nil {
-		writeLokiError(w, http.StatusBadRequest, err.Error())
-		return
-	}
+
 	timeNs := time.Now().UnixNano()
 	if raw := q.Get("time"); raw != "" {
+		var err error
 		timeNs, err = parseLokiTime(raw)
 		if err != nil {
 			writeLokiError(w, http.StatusBadRequest, "invalid 'time' parameter: "+err.Error())
 			return
 		}
 	}
-	limit, err := parseLokiLimit(q.Get("limit"))
-	if err != nil {
-		writeLokiError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	dir, err := parseLokiDirection(q.Get("direction"))
-	if err != nil {
-		writeLokiError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	results, err := s.logQuery.QueryInstant(sel, timeNs, limit, dir)
-	if err != nil {
-		s.log.Error("loki query failed", "component", "logs_query",
-			"request_id", chimiddleware.GetReqID(r.Context()), "err", err)
-		writeLokiError(w, http.StatusInternalServerError, "internal error")
-		return
-	}
-	writeLokiStreams(w, toLokiStreamResults(results))
+
+	s.respondLokiStreams(w, r, "loki query failed", func() ([]logs.StreamResult, error) {
+		return s.logQuery.QueryInstant(sel, timeNs, limit, dir)
+	})
 }
 
 // handleLokiLabels returns all stream label names. start/end/query narrowing is
 // accepted but ignored this phase (documented limitation).
 func (s *Server) handleLokiLabels(w http.ResponseWriter, r *http.Request) {
-	if !s.requireLogQuery(w) {
+	if !s.requireLogQuery(w, r) {
 		return
 	}
 	writeLokiLabels(w, s.logQuery.LabelNames())
@@ -176,7 +179,7 @@ func (s *Server) handleLokiLabels(w http.ResponseWriter, r *http.Request) {
 
 // handleLokiLabelValues returns all values for the {name} label.
 func (s *Server) handleLokiLabelValues(w http.ResponseWriter, r *http.Request) {
-	if !s.requireLogQuery(w) {
+	if !s.requireLogQuery(w, r) {
 		return
 	}
 	name := chi.URLParam(r, "name")
