@@ -104,11 +104,12 @@ func main() {
 	}
 	log.Info("logs store ready", slog.String("logs_dir", logsDir))
 	logIngester := logStore
+	logQuery := logs.NewQueryEngine(logStore)
 
 	store := metrics.NewWALStore(w, blockStore, cfg.DataDir)
 	engine := metrics.NewQueryEngine(blockStore)
 	reg, mx := observability.NewRegistry(blockStore, blockStore)
-	srv := api.New(cfg, log, store, engine, reg, logIngester)
+	srv := api.New(cfg, log, store, engine, reg, logIngester, logQuery)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

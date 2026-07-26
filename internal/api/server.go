@@ -19,9 +19,10 @@ type Server struct {
 	engine      *metrics.QueryEngine
 	reg         *prometheus.Registry
 	logIngester logs.Ingester
+	logQuery    *logs.QueryEngine
 }
 
-func New(cfg *config.Config, log *slog.Logger, ingester metrics.Ingester, engine *metrics.QueryEngine, reg *prometheus.Registry, logIngester logs.Ingester) *Server {
+func New(cfg *config.Config, log *slog.Logger, ingester metrics.Ingester, engine *metrics.QueryEngine, reg *prometheus.Registry, logIngester logs.Ingester, logQuery *logs.QueryEngine) *Server {
 	s := &Server{
 		cfg:         cfg,
 		log:         log,
@@ -29,6 +30,7 @@ func New(cfg *config.Config, log *slog.Logger, ingester metrics.Ingester, engine
 		engine:      engine,
 		reg:         reg,
 		logIngester: logIngester,
+		logQuery:    logQuery,
 	}
 	s.router = s.buildRouter()
 	return s
