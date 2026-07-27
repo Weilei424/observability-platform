@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -59,43 +60,50 @@ func (s *Server) requireLogQuery(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
-// parseCommonLokiQuery performs the parameter parsing shared by the query_range
+// parseLokiQueryParams performs the parameter parsing shared by the query_range
 // and instant query handlers: the log-query-engine guard, form parsing, the
-// required 'query' parameter, LogQL parsing, 'limit', and 'direction'. On any
-// failure it writes the plain-text error response itself and returns ok=false;
-// callers must return immediately when ok is false. On success, r.Form is
-// populated so callers can read their own remaining parameters (start/end/time)
-// from it directly.
-func (s *Server) parseCommonLokiQuery(w http.ResponseWriter, r *http.Request) (sel logs.LogSelector, limit int, dir logs.Direction, ok bool) {
+// required 'query' parameter, 'limit', and 'direction'. It deliberately does not
+// parse the query expression — the two endpoints accept different expression
+// kinds (see handleLokiQuery). On any failure it writes the plain-text error
+// response itself and returns ok=false; callers must return immediately when ok
+// is false. On success, r.Form is populated so callers can read their own
+// remaining parameters (start/end/time) from it directly.
+func (s *Server) parseLokiQueryParams(w http.ResponseWriter, r *http.Request) (queryStr string, limit int, dir logs.Direction, ok bool) {
 	if !s.requireLogQuery(w, r) {
-		return logs.LogSelector{}, 0, 0, false
+		return "", 0, 0, false
 	}
 	if err := r.ParseForm(); err != nil {
 		writeLokiError(w, http.StatusBadRequest, "invalid request: "+err.Error())
-		return logs.LogSelector{}, 0, 0, false
+		return "", 0, 0, false
 	}
 	q := r.Form
-	queryStr := q.Get("query")
+	queryStr = q.Get("query")
 	if queryStr == "" {
 		writeLokiError(w, http.StatusBadRequest, "missing required parameter 'query'")
-		return logs.LogSelector{}, 0, 0, false
+		return "", 0, 0, false
 	}
-	sel, err := logs.ParseLogQL(queryStr)
+	limit, err := parseLokiLimit(q.Get("limit"))
 	if err != nil {
 		writeLokiError(w, http.StatusBadRequest, err.Error())
-		return logs.LogSelector{}, 0, 0, false
-	}
-	limit, err = parseLokiLimit(q.Get("limit"))
-	if err != nil {
-		writeLokiError(w, http.StatusBadRequest, err.Error())
-		return logs.LogSelector{}, 0, 0, false
+		return "", 0, 0, false
 	}
 	dir, err = parseLokiDirection(q.Get("direction"))
 	if err != nil {
 		writeLokiError(w, http.StatusBadRequest, err.Error())
-		return logs.LogSelector{}, 0, 0, false
+		return "", 0, 0, false
 	}
-	return sel, limit, dir, true
+	return queryStr, limit, dir, true
+}
+
+// parseLokiLogSelector parses queryStr as a log query, writing the plain-text
+// 400 itself on failure.
+func parseLokiLogSelector(w http.ResponseWriter, queryStr string) (logs.LogSelector, bool) {
+	sel, err := logs.ParseLogQL(queryStr)
+	if err != nil {
+		writeLokiError(w, http.StatusBadRequest, err.Error())
+		return logs.LogSelector{}, false
+	}
+	return sel, true
 }
 
 // respondLokiStreams runs fetch and writes its result as a Loki streams
@@ -113,7 +121,11 @@ func (s *Server) respondLokiStreams(w http.ResponseWriter, r *http.Request, logM
 }
 
 func (s *Server) handleLokiQueryRange(w http.ResponseWriter, r *http.Request) {
-	sel, limit, dir, ok := s.parseCommonLokiQuery(w, r)
+	queryStr, limit, dir, ok := s.parseLokiQueryParams(w, r)
+	if !ok {
+		return
+	}
+	sel, ok := parseLokiLogSelector(w, queryStr)
 	if !ok {
 		return
 	}
@@ -142,12 +154,21 @@ func (s *Server) handleLokiQueryRange(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.respondLokiStreams(w, r, "loki query_range failed", func() ([]logs.StreamResult, error) {
-		return s.logQuery.QueryRange(sel, startNs, endNs, limit, dir)
+		return s.logQuery.QueryRange(r.Context(), sel, startNs, endNs, limit, dir)
 	})
 }
 
+// handleLokiQuery serves the instant query endpoint. It accepts two expression
+// kinds:
+//
+//   - a stream selector, evaluated as a log query over [0, time]. Upstream Loki
+//     rejects log queries here with a 400 and directs them to query_range; we
+//     accept them as a deliberate superset. Grafana never sends a log query to
+//     this endpoint, so nothing depends on the stricter behavior.
+//   - a constant metric expression such as vector(1)+vector(1), returning a
+//     "vector" envelope. This is the Grafana Loki datasource health check.
 func (s *Server) handleLokiQuery(w http.ResponseWriter, r *http.Request) {
-	sel, limit, dir, ok := s.parseCommonLokiQuery(w, r)
+	queryStr, limit, dir, ok := s.parseLokiQueryParams(w, r)
 	if !ok {
 		return
 	}
@@ -163,8 +184,24 @@ func (s *Server) handleLokiQuery(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A query that does not open with a stream selector is a metric query; only
+	// the constant subset is supported and everything else errors explicitly.
+	if trimmed := strings.TrimSpace(queryStr); trimmed != "" && trimmed[0] != '{' {
+		value, err := logs.ParseScalarQuery(trimmed)
+		if err != nil {
+			writeLokiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeLokiVector(w, timeNs, value)
+		return
+	}
+
+	sel, ok := parseLokiLogSelector(w, queryStr)
+	if !ok {
+		return
+	}
 	s.respondLokiStreams(w, r, "loki query failed", func() ([]logs.StreamResult, error) {
-		return s.logQuery.QueryInstant(sel, timeNs, limit, dir)
+		return s.logQuery.QueryInstant(r.Context(), sel, timeNs, limit, dir)
 	})
 }
 
