@@ -378,9 +378,9 @@ Design: `docs/superpowers/specs/2026-07-25-phase-4.4-loki-query-api-design.md` �
 **`internal/logs` LogQL parser + query engine**
 - [x] `logql.go` — `LogSelector{Matchers []index.Pair, LineFilters []LineFilter}`, `FilterOp` (`|=`/`!=`/`|~`/`!~`), `LineFilter.Keep`; `ParseLogQL` (equality-only selector, ≥1 matcher required, quote-aware line-filter tokenizing, regex compiled once)
 - [x] `logql.go` — explicit errors for `{}`/empty selector, non-`=` label matcher ops (`=~`/`!=`/`!~`), pipelines/formatters (`| json`, `| logfmt`, `line_format`, `label_format`), metric wrappers (`rate(`, `count_over_time(`), trailing junk, and invalid regex operands
-- [x] `scalar.go` — **constant metric queries** for the Grafana Loki datasource health check: `ParseScalarQuery` evaluates `vector(N)` with `+ - * /`, parens, and unary sign (design §11). Reads no stored data; every other function name still returns the explicit unsupported error
+- [x] `scalar.go` — **constant metric queries** for the Grafana Loki datasource health check: `ParseScalarQuery` evaluates `vector(<number>)` combined with `+ - * /`, parens, and unary sign (design §11). `vector()` takes a bare number, matching upstream LogQL's `vector OPEN_PARENTHESIS NUMBER CLOSE_PARENTHESIS` — no nested/arithmetic operand. Reads no stored data; every other function name still returns the explicit unsupported error
 - [x] `query.go` — `Reader` interface (`MatchingStreamIDs`, `StreamEntries`, `StreamLabelSet`, `LabelNames`, `LabelValues`); `QueryEngine`, `Direction` (backward/forward), `StreamResult`
-- [x] `query.go` — `QueryRange` (match → read `[start,end]` → line-filter → global order-by-direction + limit → regroup by stream, drop empty streams); `QueryInstant` = `QueryRange(sel, 0, time, limit, dir)`; `LabelNames`/`LabelValues` delegation
+- [x] `query.go` — `QueryRange` (match → read → line-filter → per-stream cap → global order-by-direction + limit → regroup by stream, drop empty streams), half-open `[start, end)` per Loki; `QueryInstant` shares the path with an **inclusive** end (`ts <= time`); `ctx` threaded for cancellation; `LabelNames`/`LabelValues` delegation
 - [x] `diskstore.go` — `StreamLabelSet(id)`, `LabelNames()`, `LabelValues(name)` merging head + persisted index (sorted-unique); `var _ Reader = (*Store)(nil)`
 
 **`internal/api` Loki endpoints + envelope**
