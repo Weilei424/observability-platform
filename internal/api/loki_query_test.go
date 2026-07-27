@@ -8,8 +8,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,7 +25,16 @@ import (
 
 func newLokiServer(t *testing.T) *api.Server {
 	t.Helper()
-	dir := t.TempDir()
+	srv, _, _ := newLokiServerAt(t, t.TempDir())
+	return srv
+}
+
+// newLokiServerAt builds a server over the log store rooted at dir, returning the
+// store and a close function so tests can flush the head to chunk files and
+// reopen the same directory to exercise the persisted read path. close is
+// idempotent, so an explicit call plus the registered cleanup is safe.
+func newLokiServerAt(t *testing.T, dir string) (*api.Server, *logs.Store, func()) {
+	t.Helper()
 	store, err := logs.NewStore(
 		filepath.Join(dir, "wal"),
 		filepath.Join(dir, "chunks"),
@@ -32,13 +44,15 @@ func newLokiServer(t *testing.T) *api.Server {
 	if err != nil {
 		t.Fatalf("new logs store: %v", err)
 	}
-	t.Cleanup(func() { _ = store.Close() })
+	var once sync.Once
+	closeStore := func() { once.Do(func() { _ = store.Close() }) }
+	t.Cleanup(closeStore)
 	cfg := &config.Config{HTTPAddr: ":0", DataDir: dir, LogLevel: "info"}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	mstore := metrics.NewMemoryStore()
 	engine := metrics.NewQueryEngine(mstore)
 	reg, _ := observability.NewRegistry(mstore, nil)
-	return api.New(cfg, log, mstore, engine, reg, store, logs.NewQueryEngine(store))
+	return api.New(cfg, log, mstore, engine, reg, store, logs.NewQueryEngine(store)), store, closeStore
 }
 
 func pushLogs(t *testing.T, srv *api.Server, body string) {
@@ -430,5 +444,226 @@ func TestLokiLabelEndpoints_AcceptAndIgnoreTimeParams(t *testing.T) {
 	}
 	if vresp.Status != "success" {
 		t.Fatalf("label values status = %q, want success", vresp.Status)
+	}
+}
+
+// TestLokiQueryRange_PersistedChunks_TextFilter exercises the path the Phase 4.4
+// DoD actually names — "text filtering works inside candidate chunks". The head
+// is flushed to chunk files and the store reopened, so the query has to decode
+// chunks off disk rather than read the in-memory head.
+func TestLokiQueryRange_PersistedChunks_TextFilter(t *testing.T) {
+	dir := t.TempDir()
+	srv, store, closeStore := newLokiServerAt(t, dir)
+	pushLogs(t, srv, twoStreams)
+	if err := store.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	closeStore() // simulate a restart: nothing survives in memory
+
+	chunks, err := os.ReadDir(filepath.Join(dir, "chunks"))
+	if err != nil {
+		t.Fatalf("read chunks dir: %v", err)
+	}
+	if len(chunks) == 0 {
+		t.Fatal("no chunk files written; the test would pass on head reads alone")
+	}
+
+	srv2, _, _ := newLokiServerAt(t, dir)
+
+	q := url.Values{}
+	q.Set("query", `{service="api"} |= "error"`)
+	q.Set("start", "0")
+	q.Set("end", "1000")
+	q.Set("direction", "forward")
+	w := getLoki(t, srv2, "/loki/api/v1/query_range", q)
+	if w.Code != 200 {
+		t.Fatalf("code = %d, body = %s", w.Code, w.Body.String())
+	}
+	var resp lokiStreamsResp
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Data.Result) != 1 || len(resp.Data.Result[0].Values) != 2 {
+		t.Fatalf("filtered chunk read = %+v, want 2 matching lines", resp.Data.Result)
+	}
+	if resp.Data.Result[0].Values[0][1] != "GET /a error" || resp.Data.Result[0].Values[1][1] != "GET /c error" {
+		t.Fatalf("chunk-read lines = %+v", resp.Data.Result[0].Values)
+	}
+
+	// A regex filter over the same persisted chunks.
+	q.Set("query", `{service="api"} |~ "/[ac] error"`)
+	w = getLoki(t, srv2, "/loki/api/v1/query_range", q)
+	resp = lokiStreamsResp{}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if len(resp.Data.Result) != 1 || len(resp.Data.Result[0].Values) != 2 {
+		t.Fatalf("regex over chunks = %+v, want 2", resp.Data.Result)
+	}
+
+	// Label discovery survives the restart too — it is served from the manifest.
+	w = getLoki(t, srv2, "/loki/api/v1/labels", url.Values{})
+	var labelsResp struct {
+		Data []string `json:"data"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &labelsResp)
+	if len(labelsResp.Data) != 1 || labelsResp.Data[0] != "service" {
+		t.Fatalf("labels after restart = %+v", labelsResp.Data)
+	}
+
+	// New writes land in the head and must merge with the persisted chunks.
+	pushLogs(t, srv2, `{"streams":[{"stream":{"service":"api"},"values":[["400","GET /d error"]]}]}`)
+	q.Set("query", `{service="api"} |= "error"`)
+	w = getLoki(t, srv2, "/loki/api/v1/query_range", q)
+	resp = lokiStreamsResp{}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if len(resp.Data.Result) != 1 || len(resp.Data.Result[0].Values) != 3 {
+		t.Fatalf("head+chunk merge = %+v, want 3", resp.Data.Result)
+	}
+}
+
+// TestLokiQueryRange_EndIsExclusive pins Loki's range semantics over HTTP:
+// "Loki returns results with timestamp greater or equal to [start]" and "lower
+// than [end]".
+func TestLokiQueryRange_EndIsExclusive(t *testing.T) {
+	srv := newLokiServer(t)
+	pushLogs(t, srv, twoStreams) // service=api at ts 100, 200, 300
+
+	q := url.Values{}
+	q.Set("query", `{service="api"}`)
+	q.Set("start", "100")
+	q.Set("end", "300")
+	q.Set("direction", "forward")
+	w := getLoki(t, srv, "/loki/api/v1/query_range", q)
+	var resp lokiStreamsResp
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Data.Result) != 1 || len(resp.Data.Result[0].Values) != 2 {
+		t.Fatalf("[100,300) = %+v, want 2 values", resp.Data.Result)
+	}
+	if resp.Data.Result[0].Values[0][0] != "100" || resp.Data.Result[0].Values[1][0] != "200" {
+		t.Fatalf("values = %+v, want ts 100 and 200", resp.Data.Result[0].Values)
+	}
+
+	// The boundary entry belongs to the next window, exactly once.
+	q.Set("start", "300")
+	q.Set("end", "400")
+	w = getLoki(t, srv, "/loki/api/v1/query_range", q)
+	resp = lokiStreamsResp{}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if len(resp.Data.Result) != 1 || len(resp.Data.Result[0].Values) != 1 || resp.Data.Result[0].Values[0][0] != "300" {
+		t.Fatalf("[300,400) = %+v, want exactly ts 300", resp.Data.Result)
+	}
+}
+
+type lokiVectorResp struct {
+	Status string `json:"status"`
+	Data   struct {
+		ResultType string `json:"resultType"`
+		Result     []struct {
+			Metric map[string]string `json:"metric"`
+			Value  [2]any            `json:"value"`
+		} `json:"result"`
+	} `json:"data"`
+}
+
+// TestLokiInstantQuery_GrafanaHealthCheck reproduces the request Grafana's Loki
+// datasource sends to verify a connection: Grafana 11.1.0
+// (pkg/tsdb/loki/healthcheck.go) runs `vector(1)+vector(1)` as an instant query
+// over [Unix 1, Unix 4] and requires one frame, two fields, one row, and the
+// value 2. A parse error here is what turns the datasource "Save & test" red.
+func TestLokiInstantQuery_GrafanaHealthCheck(t *testing.T) {
+	srv := newLokiServer(t)
+
+	q := url.Values{}
+	q.Set("query", "vector(1)+vector(1)")
+	q.Set("direction", "backward")
+	q.Set("time", strconv.FormatInt(time.Unix(4, 0).UnixNano(), 10))
+	w := getLoki(t, srv, "/loki/api/v1/query", q)
+	if w.Code != 200 {
+		t.Fatalf("health check code = %d, body = %s", w.Code, w.Body.String())
+	}
+	var resp lokiVectorResp
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Status != "success" || resp.Data.ResultType != "vector" {
+		t.Fatalf("envelope = %+v, want success/vector", resp)
+	}
+	if len(resp.Data.Result) != 1 {
+		t.Fatalf("result = %+v, want exactly one sample (Grafana requires one frame with one row)", resp.Data.Result)
+	}
+	sample := resp.Data.Result[0]
+	if len(sample.Metric) != 0 {
+		t.Fatalf("metric = %+v, want no labels", sample.Metric)
+	}
+	if ts, ok := sample.Value[0].(float64); !ok || ts != 4 {
+		t.Fatalf("sample timestamp = %v, want 4 (epoch seconds)", sample.Value[0])
+	}
+	if v, ok := sample.Value[1].(string); !ok || v != "2" {
+		t.Fatalf("sample value = %v, want the string \"2\"", sample.Value[1])
+	}
+}
+
+// TestLokiInstantQuery_UnsupportedMetricQuery guards the shim's boundary: a
+// query that would have to read stored samples still fails explicitly.
+func TestLokiInstantQuery_UnsupportedMetricQuery(t *testing.T) {
+	srv := newLokiServer(t)
+	for _, query := range []string{
+		`rate({service="api"}[5m])`,
+		`sum by (level) (count_over_time({service="api"}[1m]))`,
+	} {
+		q := url.Values{}
+		q.Set("query", query)
+		w := getLoki(t, srv, "/loki/api/v1/query", q)
+		if w.Code != 400 {
+			t.Fatalf("query %q code = %d, want 400", query, w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "unsupported") {
+			t.Fatalf("query %q body = %q, want an explicit unsupported error", query, w.Body.String())
+		}
+	}
+	// query_range stays log-only: the constant subset is an instant-query shim.
+	q := url.Values{}
+	q.Set("query", "vector(1)+vector(1)")
+	q.Set("start", "0")
+	q.Set("end", "1000")
+	if w := getLoki(t, srv, "/loki/api/v1/query_range", q); w.Code != 400 {
+		t.Fatalf("query_range vector() code = %d, want 400", w.Code)
+	}
+}
+
+// TestLokiQuery_EscapedOperands proves a label value or filter operand
+// containing a quote — pushable, since ingest only requires valid UTF-8 — is
+// also queryable.
+func TestLokiQuery_EscapedOperands(t *testing.T) {
+	srv := newLokiServer(t)
+	pushLogs(t, srv, `{"streams":[
+	 {"stream":{"service":"say \"hi\""},"values":[["100","{\"event\":\"login\"}"],["200","plain line"]]}
+	]}`)
+
+	q := url.Values{}
+	q.Set("query", `{service="say \"hi\""} |= "\"event\":\"login\""`)
+	q.Set("start", "0")
+	q.Set("end", "1000")
+	q.Set("direction", "forward")
+	w := getLoki(t, srv, "/loki/api/v1/query_range", q)
+	if w.Code != 200 {
+		t.Fatalf("code = %d, body = %s", w.Code, w.Body.String())
+	}
+	var resp lokiStreamsResp
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Data.Result) != 1 || len(resp.Data.Result[0].Values) != 1 {
+		t.Fatalf("escaped query = %+v, want the one JSON line", resp.Data.Result)
+	}
+	if resp.Data.Result[0].Stream["service"] != `say "hi"` {
+		t.Fatalf("stream label = %q", resp.Data.Result[0].Stream["service"])
+	}
+
+	// A malformed selector must be a 400, not a query for a different value.
+	q.Set("query", `{service="a"junk"b"}`)
+	if w := getLoki(t, srv, "/loki/api/v1/query_range", q); w.Code != 400 {
+		t.Fatalf("malformed selector code = %d, want 400", w.Code)
 	}
 }
