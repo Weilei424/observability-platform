@@ -732,14 +732,64 @@ func TestLokiQueryRange_TimestampFormats(t *testing.T) {
 		})
 	}
 
-	// Still rejected: nonsense, and values too large to hold as int64 nanoseconds.
-	for _, bad := range []string{"not-a-time", "99999999999999999999", "1e999"} {
+	// Rejected: nonsense, and anything outside Go's representable nanosecond
+	// window. Time.UnixNano is undefined there and wraps, so without an explicit
+	// range check these would become garbage query bounds instead of a 400 — a
+	// wrapped negative `start` silently widens the window rather than erroring.
+	for _, bad := range []string{
+		"not-a-time",
+		"99999999999999999999", // overflows int64 outright
+		"1e999",
+		"9223372036.9",         // whole part in range, total nanoseconds is not
+		"-9223372036.9",        // same at the negative boundary
+		"9223372037",           // one second past the representable maximum
+		"2300-01-01T00:00:00Z", // RFC3339 past year 2262
+		"1000-01-01T00:00:00Z", // RFC3339 before year 1678
+	} {
 		q := url.Values{}
 		q.Set("query", `{service="api"}`)
 		q.Set("start", bad)
 		if w := getLoki(t, srv, "/loki/api/v1/query_range", q); w.Code != 400 {
 			t.Errorf("start=%q code = %d, want 400", bad, w.Code)
 		}
+	}
+
+	// Accepted at the boundary itself, so the check rejects only what it must.
+	q := url.Values{}
+	q.Set("query", `{service="api"}`)
+	q.Set("start", ns(0))
+	q.Set("end", "9223372036")
+	if w := getLoki(t, srv, "/loki/api/v1/query_range", q); w.Code != 200 {
+		t.Errorf("end at the representable maximum: code = %d, want 200", w.Code)
+	}
+}
+
+// TestLokiQueryRange_NegativeTimestampDigitRule pins the parity detail that Loki
+// measures the *raw* string when choosing seconds vs nanoseconds: "-1234567890"
+// is 11 characters, so it is nanoseconds upstream even though it holds 10 digits.
+// Trimming the sign first would silently shift such a bound by a factor of 1e9.
+func TestLokiQueryRange_NegativeTimestampDigitRule(t *testing.T) {
+	srv := newLokiServer(t)
+	pushLogs(t, srv, fmt.Sprintf(`{"streams":[{"stream":{"service":"api"},"values":[[%q,"hit"]]}]}`, ns(100)))
+
+	// Read as -1234567890 ns (just before the epoch), not -1234567890 s. Either
+	// way the entry is in range, so assert the request is accepted and the window
+	// really does start before the epoch by checking the entry comes back.
+	q := url.Values{}
+	q.Set("query", `{service="api"}`)
+	q.Set("start", "-1234567890")
+	q.Set("end", ns(1000))
+	q.Set("direction", "forward")
+	w := getLoki(t, srv, "/loki/api/v1/query_range", q)
+	if w.Code != 200 {
+		t.Fatalf("code = %d, body = %s", w.Code, w.Body.String())
+	}
+	var resp lokiStreamsResp
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Data.Result) != 1 || len(resp.Data.Result[0].Values) != 1 {
+		t.Fatalf("negative-ns start = %+v, want the one entry", resp.Data.Result)
 	}
 }
 
