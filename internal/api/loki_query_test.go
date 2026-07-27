@@ -85,10 +85,18 @@ type lokiStreamsResp struct {
 	} `json:"data"`
 }
 
-const twoStreams = `{"streams":[
- {"stream":{"service":"api"},"values":[["100","GET /a error"],["200","GET /b ok"],["300","GET /c error"]]},
- {"stream":{"service":"web"},"values":[["150","render error"]]}
-]}`
+// Loki reads an integer timestamp of 10 digits or fewer as *seconds* and only a
+// longer one as nanoseconds (pkg/loghttp/params.go), so fixtures use realistic
+// 19-digit nanosecond epochs. ns() keeps the readable small offsets while putting
+// a correctly-scaled value on the wire.
+const tsBase int64 = 1_700_000_000_000_000_000 // 2023-11-14T22:13:20Z
+
+func ns(offset int64) string { return strconv.FormatInt(tsBase+offset, 10) }
+
+var twoStreams = fmt.Sprintf(`{"streams":[
+ {"stream":{"service":"api"},"values":[[%q,"GET /a error"],[%q,"GET /b ok"],[%q,"GET /c error"]]},
+ {"stream":{"service":"web"},"values":[[%q,"render error"]]}
+]}`, ns(100), ns(200), ns(300), ns(150))
 
 func TestLokiQueryRange_LabelOnly(t *testing.T) {
 	srv := newLokiServer(t)
@@ -96,8 +104,8 @@ func TestLokiQueryRange_LabelOnly(t *testing.T) {
 
 	q := url.Values{}
 	q.Set("query", `{service="api"}`)
-	q.Set("start", "0")
-	q.Set("end", "1000")
+	q.Set("start", ns(0))
+	q.Set("end", ns(1000))
 	q.Set("direction", "forward")
 	w := getLoki(t, srv, "/loki/api/v1/query_range", q)
 	if w.Code != 200 {
@@ -113,8 +121,8 @@ func TestLokiQueryRange_LabelOnly(t *testing.T) {
 	if resp.Data.Result[0].Stream["service"] != "api" || len(resp.Data.Result[0].Values) != 3 {
 		t.Fatalf("api stream = %+v", resp.Data.Result[0])
 	}
-	if resp.Data.Result[0].Values[0][0] != "100" {
-		t.Fatalf("first value ts = %q, want 100", resp.Data.Result[0].Values[0][0])
+	if resp.Data.Result[0].Values[0][0] != ns(100) {
+		t.Fatalf("first value ts = %q, want %s", resp.Data.Result[0].Values[0][0], ns(100))
 	}
 	if resp.Data.Result[0].Values[0][1] != "GET /a error" {
 		t.Fatalf("first value line = %q, want %q", resp.Data.Result[0].Values[0][1], "GET /a error")
@@ -126,8 +134,8 @@ func TestLokiQueryRange_TimeRangeNarrows(t *testing.T) {
 	pushLogs(t, srv, twoStreams)
 	q := url.Values{}
 	q.Set("query", `{service="api"}`)
-	q.Set("start", "0")
-	q.Set("end", "250")
+	q.Set("start", ns(0))
+	q.Set("end", ns(250))
 	q.Set("direction", "forward")
 	w := getLoki(t, srv, "/loki/api/v1/query_range", q)
 	var resp lokiStreamsResp
@@ -144,8 +152,8 @@ func TestLokiQueryRange_TextFilters(t *testing.T) {
 	// |= "error"
 	q := url.Values{}
 	q.Set("query", `{service="api"} |= "error"`)
-	q.Set("start", "0")
-	q.Set("end", "1000")
+	q.Set("start", ns(0))
+	q.Set("end", ns(1000))
 	q.Set("direction", "forward")
 	w := getLoki(t, srv, "/loki/api/v1/query_range", q)
 	var resp lokiStreamsResp
@@ -169,7 +177,7 @@ func TestLokiInstantQuery_UpToTime(t *testing.T) {
 	pushLogs(t, srv, twoStreams)
 	q := url.Values{}
 	q.Set("query", `{service="api"}`)
-	q.Set("time", "250")
+	q.Set("time", ns(250))
 	w := getLoki(t, srv, "/loki/api/v1/query", q)
 	if w.Code != 200 {
 		t.Fatalf("code = %d, body = %s", w.Code, w.Body.String())
@@ -185,10 +193,10 @@ func TestLokiLabels(t *testing.T) {
 	srv := newLokiServer(t)
 	// The "api" stream carries a second, distinct label name ("level") so that
 	// LabelNames() sortedness across more than one name is actually exercised.
-	pushLogs(t, srv, `{"streams":[
-	 {"stream":{"service":"api","level":"info"},"values":[["100","GET /a error"]]},
-	 {"stream":{"service":"web"},"values":[["150","render error"]]}
-	]}`)
+	pushLogs(t, srv, fmt.Sprintf(`{"streams":[
+	 {"stream":{"service":"api","level":"info"},"values":[[%q,"GET /a error"]]},
+	 {"stream":{"service":"web"},"values":[[%q,"render error"]]}
+	]}`, ns(100), ns(150)))
 	w := getLoki(t, srv, "/loki/api/v1/labels", url.Values{})
 	var resp struct {
 		Status string   `json:"status"`
@@ -224,8 +232,8 @@ func TestLokiQueryRange_UnsupportedAndBadParams(t *testing.T) {
 	// Unsupported metric query → 400 plain text.
 	q := url.Values{}
 	q.Set("query", `rate({service="api"}[5m])`)
-	q.Set("start", "0")
-	q.Set("end", "1000")
+	q.Set("start", ns(0))
+	q.Set("end", ns(1000))
 	w := getLoki(t, srv, "/loki/api/v1/query_range", q)
 	if w.Code != 400 {
 		t.Fatalf("unsupported code = %d", w.Code)
@@ -237,8 +245,8 @@ func TestLokiQueryRange_UnsupportedAndBadParams(t *testing.T) {
 	// Bad limit → 400.
 	q = url.Values{}
 	q.Set("query", `{service="api"}`)
-	q.Set("start", "0")
-	q.Set("end", "1000")
+	q.Set("start", ns(0))
+	q.Set("end", ns(1000))
 	q.Set("limit", "abc")
 	w = getLoki(t, srv, "/loki/api/v1/query_range", q)
 	if w.Code != 400 {
@@ -339,14 +347,14 @@ func TestLokiQueryRange_NilLogQuery(t *testing.T) {
 // other test in this file sets direction=forward explicitly.
 func TestLokiQueryRange_BackwardDefaultOrder(t *testing.T) {
 	srv := newLokiServer(t)
-	pushLogs(t, srv, `{"streams":[
-	 {"stream":{"service":"api"},"values":[["100","a"],["200","b"],["300","c"]]}
-	]}`)
+	pushLogs(t, srv, fmt.Sprintf(`{"streams":[
+	 {"stream":{"service":"api"},"values":[[%q,"a"],[%q,"b"],[%q,"c"]]}
+	]}`, ns(100), ns(200), ns(300)))
 
 	q := url.Values{}
 	q.Set("query", `{service="api"}`)
-	q.Set("start", "0")
-	q.Set("end", "1000")
+	q.Set("start", ns(0))
+	q.Set("end", ns(1000))
 	// No 'direction' set: exercises the backward default.
 	w := getLoki(t, srv, "/loki/api/v1/query_range", q)
 	if w.Code != 200 {
@@ -360,7 +368,7 @@ func TestLokiQueryRange_BackwardDefaultOrder(t *testing.T) {
 		t.Fatalf("result = %+v", resp.Data.Result)
 	}
 	vals := resp.Data.Result[0].Values
-	if vals[0][0] != "300" || vals[1][0] != "200" || vals[2][0] != "100" {
+	if vals[0][0] != ns(300) || vals[1][0] != ns(200) || vals[2][0] != ns(100) {
 		t.Fatalf("values not newest-first: %+v", vals)
 	}
 }
@@ -370,15 +378,15 @@ func TestLokiQueryRange_BackwardDefaultOrder(t *testing.T) {
 // streams share the "env" label so a single selector matches both.
 func TestLokiQueryRange_GlobalLimitAcrossStreams(t *testing.T) {
 	srv := newLokiServer(t)
-	pushLogs(t, srv, `{"streams":[
-	 {"stream":{"env":"prod","service":"api"},"values":[["100","a1"],["300","a2"]]},
-	 {"stream":{"env":"prod","service":"web"},"values":[["200","w1"],["400","w2"]]}
-	]}`)
+	pushLogs(t, srv, fmt.Sprintf(`{"streams":[
+	 {"stream":{"env":"prod","service":"api"},"values":[[%q,"a1"],[%q,"a2"]]},
+	 {"stream":{"env":"prod","service":"web"},"values":[[%q,"w1"],[%q,"w2"]]}
+	]}`, ns(100), ns(300), ns(200), ns(400)))
 
 	q := url.Values{}
 	q.Set("query", `{env="prod"}`)
-	q.Set("start", "0")
-	q.Set("end", "1000")
+	q.Set("start", ns(0))
+	q.Set("end", ns(1000))
 	q.Set("limit", "2")
 	// No 'direction' set: default backward, so the global limit keeps the two
 	// newest entries overall regardless of which stream they belong to.
@@ -398,26 +406,28 @@ func TestLokiQueryRange_GlobalLimitAcrossStreams(t *testing.T) {
 			got[v[0]] = true
 		}
 	}
-	if total != 2 || !got["400"] || !got["300"] {
+	if total != 2 || !got[ns(400)] || !got[ns(300)] {
 		t.Fatalf("global limit result = %+v (total=%d, ts set=%+v)", resp.Data.Result, total, got)
 	}
 }
 
 // TestLokiLabelEndpoints_AcceptAndIgnoreTimeParams proves the label endpoints
-// tolerate start/end/query params rather than rejecting them: Grafana always
-// sends these on its datasource health check, and erroring on them would
-// break it.
+// tolerate start/end/query params rather than rejecting them: Grafana sends
+// these whenever it browses labels for Explore's selector UI and autocomplete,
+// and erroring on them would break that. (The datasource *health* check is a
+// different request entirely — an instant vector(1)+vector(1) query; see
+// TestLokiInstantQuery_GrafanaHealthCheck.)
 func TestLokiLabelEndpoints_AcceptAndIgnoreTimeParams(t *testing.T) {
 	srv := newLokiServer(t)
-	pushLogs(t, srv, `{"streams":[{"stream":{"service":"api"},"values":[["100","a"]]}]}`)
+	pushLogs(t, srv, fmt.Sprintf(`{"streams":[{"stream":{"service":"api"},"values":[[%q,"a"]]}]}`, ns(100)))
 
 	type lokiStatusResp struct {
 		Status string `json:"status"`
 	}
 
 	q := url.Values{}
-	q.Set("start", "0")
-	q.Set("end", "1000")
+	q.Set("start", ns(0))
+	q.Set("end", ns(1000))
 	q.Set("query", `{service="api"}`)
 	w := getLoki(t, srv, "/loki/api/v1/labels", q)
 	if w.Code != 200 {
@@ -472,8 +482,8 @@ func TestLokiQueryRange_PersistedChunks_TextFilter(t *testing.T) {
 
 	q := url.Values{}
 	q.Set("query", `{service="api"} |= "error"`)
-	q.Set("start", "0")
-	q.Set("end", "1000")
+	q.Set("start", ns(0))
+	q.Set("end", ns(1000))
 	q.Set("direction", "forward")
 	w := getLoki(t, srv2, "/loki/api/v1/query_range", q)
 	if w.Code != 200 {
@@ -510,7 +520,7 @@ func TestLokiQueryRange_PersistedChunks_TextFilter(t *testing.T) {
 	}
 
 	// New writes land in the head and must merge with the persisted chunks.
-	pushLogs(t, srv2, `{"streams":[{"stream":{"service":"api"},"values":[["400","GET /d error"]]}]}`)
+	pushLogs(t, srv2, fmt.Sprintf(`{"streams":[{"stream":{"service":"api"},"values":[[%q,"GET /d error"]]}]}`, ns(400)))
 	q.Set("query", `{service="api"} |= "error"`)
 	w = getLoki(t, srv2, "/loki/api/v1/query_range", q)
 	resp = lokiStreamsResp{}
@@ -529,8 +539,8 @@ func TestLokiQueryRange_EndIsExclusive(t *testing.T) {
 
 	q := url.Values{}
 	q.Set("query", `{service="api"}`)
-	q.Set("start", "100")
-	q.Set("end", "300")
+	q.Set("start", ns(100))
+	q.Set("end", ns(300))
 	q.Set("direction", "forward")
 	w := getLoki(t, srv, "/loki/api/v1/query_range", q)
 	var resp lokiStreamsResp
@@ -540,17 +550,17 @@ func TestLokiQueryRange_EndIsExclusive(t *testing.T) {
 	if len(resp.Data.Result) != 1 || len(resp.Data.Result[0].Values) != 2 {
 		t.Fatalf("[100,300) = %+v, want 2 values", resp.Data.Result)
 	}
-	if resp.Data.Result[0].Values[0][0] != "100" || resp.Data.Result[0].Values[1][0] != "200" {
-		t.Fatalf("values = %+v, want ts 100 and 200", resp.Data.Result[0].Values)
+	if resp.Data.Result[0].Values[0][0] != ns(100) || resp.Data.Result[0].Values[1][0] != ns(200) {
+		t.Fatalf("values = %+v, want ts %s and %s", resp.Data.Result[0].Values, ns(100), ns(200))
 	}
 
 	// The boundary entry belongs to the next window, exactly once.
-	q.Set("start", "300")
-	q.Set("end", "400")
+	q.Set("start", ns(300))
+	q.Set("end", ns(400))
 	w = getLoki(t, srv, "/loki/api/v1/query_range", q)
 	resp = lokiStreamsResp{}
 	_ = json.Unmarshal(w.Body.Bytes(), &resp)
-	if len(resp.Data.Result) != 1 || len(resp.Data.Result[0].Values) != 1 || resp.Data.Result[0].Values[0][0] != "300" {
+	if len(resp.Data.Result) != 1 || len(resp.Data.Result[0].Values) != 1 || resp.Data.Result[0].Values[0][0] != ns(300) {
 		t.Fatalf("[300,400) = %+v, want exactly ts 300", resp.Data.Result)
 	}
 }
@@ -596,8 +606,12 @@ func TestLokiInstantQuery_GrafanaHealthCheck(t *testing.T) {
 	if len(sample.Metric) != 0 {
 		t.Fatalf("metric = %+v, want no labels", sample.Metric)
 	}
-	if ts, ok := sample.Value[0].(float64); !ok || ts != 4 {
-		t.Fatalf("sample timestamp = %v, want 4 (epoch seconds)", sample.Value[0])
+	// Grafana sends End.UnixNano() = 4000000000, which is 10 digits — so Loki's
+	// own rule reads it as 4000000000 *seconds*, not 4 seconds. We echo the same
+	// instant real Loki would. Grafana only validates the value field, so the
+	// quirk is invisible to the health check either way.
+	if ts, ok := sample.Value[0].(float64); !ok || ts != 4e9 {
+		t.Fatalf("sample timestamp = %v, want 4e9 (epoch seconds, per Loki's <=10-digit rule)", sample.Value[0])
 	}
 	if v, ok := sample.Value[1].(string); !ok || v != "2" {
 		t.Fatalf("sample value = %v, want the string \"2\"", sample.Value[1])
@@ -625,8 +639,8 @@ func TestLokiInstantQuery_UnsupportedMetricQuery(t *testing.T) {
 	// query_range stays log-only: the constant subset is an instant-query shim.
 	q := url.Values{}
 	q.Set("query", "vector(1)+vector(1)")
-	q.Set("start", "0")
-	q.Set("end", "1000")
+	q.Set("start", ns(0))
+	q.Set("end", ns(1000))
 	if w := getLoki(t, srv, "/loki/api/v1/query_range", q); w.Code != 400 {
 		t.Fatalf("query_range vector() code = %d, want 400", w.Code)
 	}
@@ -637,14 +651,14 @@ func TestLokiInstantQuery_UnsupportedMetricQuery(t *testing.T) {
 // also queryable.
 func TestLokiQuery_EscapedOperands(t *testing.T) {
 	srv := newLokiServer(t)
-	pushLogs(t, srv, `{"streams":[
-	 {"stream":{"service":"say \"hi\""},"values":[["100","{\"event\":\"login\"}"],["200","plain line"]]}
-	]}`)
+	pushLogs(t, srv, fmt.Sprintf(`{"streams":[
+	 {"stream":{"service":"say \"hi\""},"values":[[%q,"{\"event\":\"login\"}"],[%q,"plain line"]]}
+	]}`, ns(100), ns(200)))
 
 	q := url.Values{}
 	q.Set("query", `{service="say \"hi\""} |= "\"event\":\"login\""`)
-	q.Set("start", "0")
-	q.Set("end", "1000")
+	q.Set("start", ns(0))
+	q.Set("end", ns(1000))
 	q.Set("direction", "forward")
 	w := getLoki(t, srv, "/loki/api/v1/query_range", q)
 	if w.Code != 200 {
@@ -665,5 +679,96 @@ func TestLokiQuery_EscapedOperands(t *testing.T) {
 	q.Set("query", `{service="a"junk"b"}`)
 	if w := getLoki(t, srv, "/loki/api/v1/query_range", q); w.Code != 400 {
 		t.Fatalf("malformed selector code = %d, want 400", w.Code)
+	}
+}
+
+// TestLokiQueryRange_TimestampFormats covers the three formats Loki accepts, and
+// in particular its digit-length rule: an integer of 10 digits or fewer is
+// seconds, a longer one is nanoseconds. Sending a plain second-granularity epoch
+// — what a hand-written curl naturally uses — has to select the right window.
+func TestLokiQueryRange_TimestampFormats(t *testing.T) {
+	srv := newLokiServer(t)
+	// One entry at 2023-11-14T22:13:20.000000100Z.
+	pushLogs(t, srv, fmt.Sprintf(`{"streams":[{"stream":{"service":"api"},"values":[[%q,"hit"]]}]}`, ns(100)))
+
+	const (
+		startSec = 1_699_999_999 // 10 digits → seconds
+		endSec   = 1_700_000_001
+	)
+	cases := []struct {
+		name        string
+		start, end  string
+		wantEntries int
+	}{
+		{"integer seconds", strconv.Itoa(startSec), strconv.Itoa(endSec), 1},
+		{"integer nanoseconds", ns(0), ns(1000), 1},
+		{"float seconds", "1699999999.5", "1700000000.5", 1},
+		{"RFC3339", "2023-11-14T22:13:19Z", "2023-11-14T22:13:21Z", 1},
+		{"RFC3339Nano", "2023-11-14T22:13:20.000000000Z", "2023-11-14T22:13:20.000000200Z", 1},
+		{"seconds window before the entry", "1699999990", "1699999995", 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			q := url.Values{}
+			q.Set("query", `{service="api"}`)
+			q.Set("start", c.start)
+			q.Set("end", c.end)
+			q.Set("direction", "forward")
+			w := getLoki(t, srv, "/loki/api/v1/query_range", q)
+			if w.Code != 200 {
+				t.Fatalf("code = %d, body = %s", w.Code, w.Body.String())
+			}
+			var resp lokiStreamsResp
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			got := 0
+			for _, s := range resp.Data.Result {
+				got += len(s.Values)
+			}
+			if got != c.wantEntries {
+				t.Fatalf("[%s, %s) returned %d entries, want %d", c.start, c.end, got, c.wantEntries)
+			}
+		})
+	}
+
+	// Still rejected: nonsense, and values too large to hold as int64 nanoseconds.
+	for _, bad := range []string{"not-a-time", "99999999999999999999", "1e999"} {
+		q := url.Values{}
+		q.Set("query", `{service="api"}`)
+		q.Set("start", bad)
+		if w := getLoki(t, srv, "/loki/api/v1/query_range", q); w.Code != 400 {
+			t.Errorf("start=%q code = %d, want 400", bad, w.Code)
+		}
+	}
+}
+
+// TestLokiQueryRange_IntervalRejected covers the guardrail that an unimplemented
+// query feature errors rather than returning an unfiltered result. Loki's
+// `interval` thins a stream response; silently ignoring it would hand back more
+// entries than asked for while looking like it worked. `step` is different — Loki
+// itself ignores it on a stream response, so we accept it.
+func TestLokiQueryRange_IntervalRejected(t *testing.T) {
+	srv := newLokiServer(t)
+	pushLogs(t, srv, twoStreams)
+
+	q := url.Values{}
+	q.Set("query", `{service="api"}`)
+	q.Set("start", ns(0))
+	q.Set("end", ns(1000))
+	q.Set("interval", "5s")
+	w := getLoki(t, srv, "/loki/api/v1/query_range", q)
+	if w.Code != 400 {
+		t.Fatalf("interval code = %d, want 400; body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "interval") {
+		t.Fatalf("interval error body = %q, want it to name the parameter", w.Body.String())
+	}
+
+	// step is accepted and ignored, matching Loki on a stream response.
+	q.Del("interval")
+	q.Set("step", "5s")
+	if w := getLoki(t, srv, "/loki/api/v1/query_range", q); w.Code != 200 {
+		t.Fatalf("step code = %d, want 200; body = %s", w.Code, w.Body.String())
 	}
 }
