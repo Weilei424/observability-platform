@@ -1,6 +1,7 @@
 package logs
 
 import (
+	"context"
 	"sort"
 
 	"github.com/masonwheeler/observability-platform/internal/storage/index"
@@ -9,7 +10,7 @@ import (
 // Reader is the read surface a QueryEngine needs. *Store satisfies it.
 type Reader interface {
 	MatchingStreamIDs(matchers []index.Pair) []StreamID
-	StreamEntries(id StreamID, minTs, maxTs int64) ([]LogEntry, error)
+	StreamEntries(ctx context.Context, id StreamID, minTs, maxTs int64) ([]LogEntry, error)
 	StreamLabelSet(id StreamID) (StreamLabels, bool)
 	LabelNames() []string
 	LabelValues(name string) []string
@@ -37,36 +38,73 @@ type QueryEngine struct {
 // NewQueryEngine returns an engine reading from r.
 func NewQueryEngine(r Reader) *QueryEngine { return &QueryEngine{r: r} }
 
-// QueryRange evaluates sel over [startNs, endNs]: match streams by label, read
-// entries, apply line filters, order all surviving entries by dir, cap to limit
-// (limit <= 0 means no cap), then regroup by stream preserving global order. The
-// stream containing the first ordered entry leads. Empty streams are omitted.
-func (e *QueryEngine) QueryRange(sel LogSelector, startNs, endNs int64, limit int, dir Direction) ([]StreamResult, error) {
+// QueryRange evaluates sel over the half-open range [startNs, endNs), matching
+// Loki: results have a timestamp >= start and < end. Entries are line-filtered,
+// ordered by dir, capped at limit (limit <= 0 means no cap), then regrouped by
+// stream preserving global order. The stream containing the first ordered entry
+// leads. Empty streams are omitted.
+func (e *QueryEngine) QueryRange(ctx context.Context, sel LogSelector, startNs, endNs int64, limit int, dir Direction) ([]StreamResult, error) {
+	return e.query(ctx, sel, startNs, endNs, false, limit, dir)
+}
+
+// QueryInstant returns up to limit entries with ts <= timeNs, ordered by dir.
+// The end is inclusive here because timeNs is an evaluation instant, not a range
+// bound.
+func (e *QueryEngine) QueryInstant(ctx context.Context, sel LogSelector, timeNs int64, limit int, dir Direction) ([]StreamResult, error) {
+	return e.query(ctx, sel, 0, timeNs, true, limit, dir)
+}
+
+// taggedEntry carries the stream an entry came from plus its insertion order, so
+// the global sort can break ties deterministically.
+type taggedEntry struct {
+	id    StreamID
+	entry LogEntry
+	seq   int
+}
+
+func (e *QueryEngine) query(ctx context.Context, sel LogSelector, startNs, endNs int64, endInclusive bool, limit int, dir Direction) ([]StreamResult, error) {
 	ids := e.r.MatchingStreamIDs(sel.Matchers)
 
-	type tagged struct {
-		id    StreamID
-		entry LogEntry
-		seq   int
-	}
-	var all []tagged
+	var all []taggedEntry
 	labelsByID := make(map[StreamID]StreamLabels)
 	seq := 0
 	for _, id := range ids {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		labels, ok := e.r.StreamLabelSet(id)
 		if !ok {
 			continue
 		}
 		labelsByID[id] = labels
-		entries, err := e.r.StreamEntries(id, startNs, endNs)
+		// The store's range is inclusive on both ends, so it returns a superset
+		// when the caller wants a half-open range; the boundary drop below is what
+		// makes query_range's [start, end) exact.
+		entries, err := e.r.StreamEntries(ctx, id, startNs, endNs)
 		if err != nil {
 			return nil, err
 		}
+		kept := make([]LogEntry, 0, len(entries))
 		for _, en := range entries {
+			if !endInclusive && en.TimestampNs == endNs {
+				continue
+			}
 			if !passesFilters(en.Line, sel.LineFilters) {
 				continue
 			}
-			all = append(all, tagged{id: id, entry: en, seq: seq})
+			kept = append(kept, en)
+		}
+
+		// Cap each stream's contribution before the global merge. A global top-N
+		// can never draw more than N entries from any single stream, so ordering
+		// each stream by dir and keeping its first `limit` is lossless — and it
+		// bounds retained memory at O(streams x limit) instead of O(all matches).
+		sortEntries(kept, dir)
+		if limit > 0 && len(kept) > limit {
+			kept = kept[:limit]
+		}
+		for _, en := range kept {
+			all = append(all, taggedEntry{id: id, entry: en, seq: seq})
 			seq++
 		}
 	}
@@ -107,9 +145,16 @@ func (e *QueryEngine) QueryRange(sel LogSelector, startNs, endNs int64, limit in
 	return results, nil
 }
 
-// QueryInstant returns up to limit entries with ts <= timeNs, ordered by dir.
-func (e *QueryEngine) QueryInstant(sel LogSelector, timeNs int64, limit int, dir Direction) ([]StreamResult, error) {
-	return e.QueryRange(sel, 0, timeNs, limit, dir)
+// sortEntries orders entries by timestamp per dir. The sort is stable so entries
+// sharing a timestamp keep their insertion order, which is the same tie-break the
+// global sort applies.
+func sortEntries(entries []LogEntry, dir Direction) {
+	sort.SliceStable(entries, func(i, j int) bool {
+		if dir == Forward {
+			return entries[i].TimestampNs < entries[j].TimestampNs
+		}
+		return entries[i].TimestampNs > entries[j].TimestampNs
+	})
 }
 
 // LabelNames returns all stream label names.
