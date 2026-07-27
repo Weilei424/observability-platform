@@ -206,14 +206,29 @@ checksummed, so a v1 rebuild must fully decode rather than peek).
 - `internal/logs/logql.go` — LogQL subset parser: equality stream selector `{k="v"}`
   plus chained line filters `|=` / `!=` / `|~` / `!~`. Pipelines, formatters,
   metric/aggregation queries, and regex/negative label matchers return explicit errors.
+  String literals use Go lexing rules (`"a\"b"` and backtick raw strings, unescaped via
+  `strconv.Unquote`) because ingest accepts any UTF-8 label value, so a value containing
+  a quote must stay queryable. The selector is scanned rather than split, so malformed
+  input errors instead of silently becoming a different query.
+- `internal/logs/scalar.go` — constant metric queries (`vector(N)` with `+ - * /`),
+  accepted **only** on instant `/query`. This exists solely so Grafana's Loki datasource
+  health check (`vector(1)+vector(1)` must equal 2) passes; it reads no stored data, and
+  `rate`/`sum`/`count_over_time` still return the explicit unsupported error.
 - `internal/logs/query.go` — `QueryEngine` over a `Reader` interface (`*logs.Store`
-  satisfies it): match streams by label → read `[start,end]` entries → line-filter →
-  global order-by-direction + limit → regroup by stream.
+  satisfies it): match streams by label → read entries → line-filter → cap per stream →
+  global order-by-direction + limit → regroup by stream. `QueryRange` is half-open
+  `[start, end)` per Loki; `QueryInstant`'s `time` is inclusive. The per-stream cap is
+  lossless (a global top-N never draws more than N from one stream) and bounds memory at
+  O(streams × limit). `ctx` flows from the request into the store for cancellation.
+- `internal/logs/diskstore.go` — `StreamEntries` snapshots index refs + head entries
+  under `s.mu`, then decodes chunk files **outside** the lock, so cold-chunk queries do
+  not block ingestion. This relies on log chunk files being immutable and never deleted
+  — revisit when logs retention/compaction lands.
 - `internal/api/loki_query.go` + `loki_response.go` — `GET /loki/api/v1/{query,query_range,
   labels,label/{name}/values}`. Loki-native nanosecond timestamps, `limit`/`direction`
   defaults (100 / backward), and **plain-text** error bodies (deliberately distinct from
   the Prometheus JSON error envelope). Label endpoints accept but ignore `start`/`end`
-  this phase.
+  this phase. `GET`-only is sufficient: Grafana's Loki backend never posts.
 
 ---
 
