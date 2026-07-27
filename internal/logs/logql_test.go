@@ -94,3 +94,79 @@ func TestParseLogQL_Rejections(t *testing.T) {
 		}
 	}
 }
+
+// TestParseLogQL_EscapedStrings covers LogQL's two string forms. Stream label
+// values only have to be valid UTF-8 at ingest, so a value containing a quote is
+// pushable and therefore has to be queryable.
+func TestParseLogQL_EscapedStrings(t *testing.T) {
+	cases := []struct {
+		q         string
+		wantValue string
+	}{
+		{`{service="a\"b"}`, `a"b`},            // escaped quote in a label value
+		{"{service=`a\"b`}", `a"b`},            // raw string, no escape processing
+		{`{service="a\\b"}`, `a\b`},            // escaped backslash
+		{`{service="tab\there"}`, "tab\there"}, // standard Go escape
+		{`{path="/a,b}c"}`, `/a,b}c`},          // delimiters inside a value
+		{`{ service = "api" }`, `api`},         // spaces around the operator
+		{`{service="api",}`, `api`},            // tolerated trailing comma
+	}
+	for _, c := range cases {
+		sel, err := ParseLogQL(c.q)
+		if err != nil {
+			t.Errorf("ParseLogQL(%s) unexpected error: %v", c.q, err)
+			continue
+		}
+		if len(sel.Matchers) == 0 || sel.Matchers[0].Value != c.wantValue {
+			t.Errorf("ParseLogQL(%s) value = %+v, want %q", c.q, sel.Matchers, c.wantValue)
+		}
+	}
+}
+
+// TestParseLogQL_EscapedLineFilterOperands covers the JSON-search case: finding
+// a quoted key in a log line requires escaped quotes in the operand.
+func TestParseLogQL_EscapedLineFilterOperands(t *testing.T) {
+	sel, err := ParseLogQL(`{app="x"} |= "\"event\":\"login\"" |~ ` + "`" + `id=\d+` + "`")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(sel.LineFilters) != 2 {
+		t.Fatalf("got %d filters, want 2", len(sel.LineFilters))
+	}
+	if got, want := sel.LineFilters[0].Value, `"event":"login"`; got != want {
+		t.Errorf("filter operand = %q, want %q", got, want)
+	}
+	if !sel.LineFilters[0].Keep(`{"event":"login","user":"a"}`) {
+		t.Error("escaped operand should match the JSON line")
+	}
+	if sel.LineFilters[0].Keep(`{"event":"logout"}`) {
+		t.Error("escaped operand should not match a different event")
+	}
+	// The raw string reaches the regexp engine with its backslash intact.
+	if !sel.LineFilters[1].Keep("req id=42") || sel.LineFilters[1].Keep("req id=x") {
+		t.Error("raw-string regex operand wrong")
+	}
+}
+
+// TestParseLogQL_NeverSilentlyMisparses is the counterpart to the accept cases:
+// input that is not a well-formed selector must error rather than quietly become
+// a different, valid-looking query.
+func TestParseLogQL_NeverSilentlyMisparses(t *testing.T) {
+	cases := []string{
+		`{service="a"junk"b"}`,    // trailing junk once absorbed into the value
+		`{service="a" "b"}`,       // two adjacent strings
+		`{service="a" level="b"}`, // missing comma
+		`{service}`,               // no operator
+		`{="x"}`,                  // no label name
+		`{9bad="x"}`,              // label name starting with a digit
+		`{service="bad\q"}`,       // invalid escape sequence
+		`{service="unterminated}`,
+		"{service=`unterminated}",
+		`{service="a"`, // unclosed brace after a complete matcher
+	}
+	for _, q := range cases {
+		if sel, err := ParseLogQL(q); err == nil {
+			t.Errorf("ParseLogQL(%s) = %+v, nil error; want error", q, sel)
+		}
+	}
+}
