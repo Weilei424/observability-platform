@@ -218,8 +218,13 @@ checksummed, so a v1 rebuild must fully decode rather than peek).
   satisfies it): match streams by label → read entries → line-filter → cap per stream →
   global order-by-direction + limit → regroup by stream. `QueryRange` is half-open
   `[start, end)` per Loki; `QueryInstant`'s `time` is inclusive. The per-stream cap is
-  lossless (a global top-N never draws more than N from one stream) and bounds memory at
-  O(streams × limit). `ctx` flows from the request into the store for cancellation.
+  lossless (a global top-N never draws more than N from one stream) and bounds what is
+  carried *across* streams at O(streams × limit). It does **not** bound the transient
+  per-stream working set: `StreamEntries` still materializes every in-range entry for a
+  stream, so peak is O(largest matching stream + streams × limit) and one hot stream can
+  still dominate. Bounding that needs selection pushed into the read (a lazy per-stream
+  cursor feeding a k-way merge) — deferred; see design §9. `ctx` flows from the request
+  into the store for cancellation.
 - `internal/logs/diskstore.go` — `StreamEntries` snapshots index refs + head entries
   under `s.mu`, then decodes chunk files **outside** the lock, so cold-chunk queries do
   not block ingestion. This relies on log chunk files being immutable and never deleted
