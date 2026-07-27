@@ -387,8 +387,8 @@ Design: `docs/superpowers/specs/2026-07-25-phase-4.4-loki-query-api-design.md` �
 - [x] `loki_response.go` — `lokiResponse`/`lokiData`/`lokiStreamResult` (`resultType:"streams"`, values `["<tsNs>","<line>"]`, `stats:{}`); success writer; **plain-text** error writer (Loki-faithful, distinct from the Prometheus JSON envelope)
 - [x] `loki_response.go` — `resultType:"vector"` envelope + `writeLokiVector` for the constant metric subset (sample `[<epoch seconds>, "<value>"]`, no labels)
 - [x] `loki_query.go` — instant `/query` routes non-`{` expressions to `ParseScalarQuery` and returns the vector envelope; `query_range` stays log-only
-- [x] `loki_query.go` — `parseLokiTime` (ns epoch / RFC3339, not float-seconds), `limit` (default 100, reject `<=0`), `direction` (default backward) parsing
-- [x] `loki_query.go` — `handleLokiQueryRange` (end default now / start default end−1h; `end<start` → 400; ignore `step`/`interval`) and `handleLokiQuery` (instant; `time` default now)
+- [x] `loki_query.go` — `parseLokiTime` mirroring Loki's `parseTimestamp`: float seconds, integer seconds (≤10 digits), integer nanoseconds (>10 digits), RFC3339/RFC3339Nano; out-of-range values rejected. `limit` (default 100, reject `<=0`), `direction` (default backward) parsing
+- [x] `loki_query.go` — `handleLokiQueryRange` (end default now / start default end−1h; `end<start` → 400; accept and ignore `step`, as Loki does on a stream response; **reject `interval`** with 400 since it thins results and ignoring it would over-return) and `handleLokiQuery` (instant; `time` default now)
 - [x] `loki_query.go` — `handleLokiLabels`, `handleLokiLabelValues` (accept + ignore `start`/`end`/`query` this phase)
 - [x] `server.go` — add `logQuery *logs.QueryEngine` field + `api.New` param; `router.go` — register the 4 `GET` routes
 - [x] `cmd/server/main.go` — `logs.NewQueryEngine(logStore)` → `api.New`; update all other `api.New(` call sites (e.g. `server_test.go`)
