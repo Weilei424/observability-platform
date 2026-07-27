@@ -2,6 +2,7 @@ package logs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -556,5 +557,80 @@ func TestStreamEntries_ConcurrentWithAppend(t *testing.T) {
 		if e.TimestampNs != int64(i+1) {
 			t.Fatalf("entry %d ts = %d, want %d", i, e.TimestampNs, i+1)
 		}
+	}
+}
+
+// errAfterNCtx reports itself cancelled only after Err has been consulted n
+// times. StreamEntries checks ctx.Err() once per chunk, so this makes
+// "cancelled part-way through a multi-chunk read" deterministic instead of
+// racing a timer.
+type errAfterNCtx struct {
+	context.Context
+	mu    sync.Mutex
+	calls int
+	after int
+}
+
+func (c *errAfterNCtx) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	if c.calls > c.after {
+		return context.Canceled
+	}
+	return nil
+}
+
+func (c *errAfterNCtx) seen() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
+// TestStreamEntries_CancelledBetweenChunkReads covers the per-chunk ctx check in
+// StreamEntries, which a context cancelled before the call never reaches — the
+// engine bails out first.
+func TestStreamEntries_CancelledBetweenChunkReads(t *testing.T) {
+	dir := t.TempDir()
+	s := newTestStore(t, dir, 1) // flush per append: one chunk file per entry
+	t.Cleanup(func() { _ = s.Close() })
+	labels := mustLabels(t, map[string]string{"service": "api"})
+	id := StreamIDOf(labels)
+
+	const chunks = 4
+	for i := 1; i <= chunks; i++ {
+		if err := s.Append(labels, int64(i), fmt.Sprintf("line-%d", i)); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	files, err := os.ReadDir(filepath.Join(dir, "chunks"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) < 2 {
+		t.Fatalf("got %d chunk files, need >= 2 to cancel between reads", len(files))
+	}
+
+	// A plain background context reads everything: the baseline the cancelled
+	// run has to differ from.
+	all, err := s.StreamEntries(context.Background(), id, 0, int64(chunks))
+	if err != nil {
+		t.Fatalf("baseline StreamEntries: %v", err)
+	}
+	if len(all) != chunks {
+		t.Fatalf("baseline entries = %d, want %d", len(all), chunks)
+	}
+
+	ctx := &errAfterNCtx{Context: context.Background(), after: 1}
+	got, err := s.StreamEntries(ctx, id, 0, int64(chunks))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("StreamEntries err = %v, want context.Canceled", err)
+	}
+	if got != nil {
+		t.Errorf("cancelled read returned %d entries, want nil (no partial result)", len(got))
+	}
+	// One check passed, the next cancelled: the loop really did run per chunk.
+	if ctx.seen() != 2 {
+		t.Errorf("ctx.Err() consulted %d times, want 2 (once per chunk until cancelled)", ctx.seen())
 	}
 }
