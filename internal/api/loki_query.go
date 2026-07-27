@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -12,18 +13,50 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/logs"
 )
 
-// parseLokiTime parses a Loki timestamp: a nanosecond Unix epoch (integer) or
-// RFC3339/RFC3339Nano. Loki does not use Prometheus float-seconds.
+// maxEpochSeconds is the largest whole-second epoch that still fits in an int64
+// nanosecond count (~year 2262). Beyond it the ns conversion would silently wrap.
+const maxEpochSeconds = math.MaxInt64 / int64(time.Second)
+
+// parseLokiTime parses a Loki timestamp, mirroring Loki's own parseTimestamp
+// (pkg/loghttp/params.go) so the same string means the same instant here:
+//
+//   - contains '.'        → float seconds       ("1700000000.5")
+//   - integer, ≤10 digits → whole seconds       ("1700000000")
+//   - integer, >10 digits → nanoseconds         ("1700000000000000000")
+//   - otherwise           → RFC3339 / RFC3339Nano
+//
+// The digit-length rule is surprising, but it is the upstream contract and it is
+// what a hand-written `curl ...&start=1700000000` depends on: without it a
+// second-granularity epoch would be read as a few nanoseconds after 1970 and
+// quietly return nothing.
 func parseLokiTime(s string) (int64, error) {
-	if ns, err := strconv.ParseInt(s, 10, 64); err == nil {
-		return ns, nil
+	if strings.Contains(s, ".") {
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
+			sec, frac := math.Modf(f)
+			if sec > float64(maxEpochSeconds) || sec < float64(-maxEpochSeconds) {
+				return 0, fmt.Errorf("timestamp %q is outside the representable nanosecond range", s)
+			}
+			// Round to microseconds first, as Loki does, so float noise in the
+			// fractional part does not leak into the nanosecond value.
+			frac = math.Round(frac*1000) / 1000
+			return time.Unix(int64(sec), int64(frac*float64(time.Second))).UnixNano(), nil
+		}
+	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		if len(strings.TrimPrefix(s, "-")) > 10 {
+			return n, nil // already nanoseconds
+		}
+		if n > maxEpochSeconds || n < -maxEpochSeconds {
+			return 0, fmt.Errorf("timestamp %q is outside the representable nanosecond range", s)
+		}
+		return n * int64(time.Second), nil
 	}
 	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
 		if t, err := time.Parse(layout, s); err == nil {
 			return t.UnixNano(), nil
 		}
 	}
-	return 0, fmt.Errorf("invalid timestamp %q: want a nanosecond epoch or RFC3339", s)
+	return 0, fmt.Errorf("invalid timestamp %q: want a Unix epoch (seconds, float seconds, or nanoseconds) or RFC3339", s)
 }
 
 func parseLokiLimit(s string) (int, error) {
@@ -130,6 +163,18 @@ func (s *Server) handleLokiQueryRange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.Form
+
+	// `step` is for metric queries and Loki ignores it on a stream response, so
+	// ignoring it here matches upstream. `interval` is different: it thins a
+	// stream response, returning the entry at start and then the next one at or
+	// after each interval boundary. Ignoring it would hand back *more* entries
+	// than asked for and look like a working filter, so it is rejected outright
+	// per the project guardrail that unsupported query features error explicitly.
+	if q.Get("interval") != "" {
+		writeLokiError(w, http.StatusBadRequest,
+			"unsupported parameter 'interval': log entry sampling is not implemented; omit it to receive every matching entry")
+		return
+	}
 
 	endNs := time.Now().UnixNano()
 	var err error
