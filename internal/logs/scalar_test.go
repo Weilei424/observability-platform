@@ -79,6 +79,38 @@ func TestParseScalarQuery_RealMetricQueriesStayUnsupported(t *testing.T) {
 	}
 }
 
+// TestParseScalarQuery_VectorTakesANumber pins the shim to upstream LogQL's
+// production `vector OPEN_PARENTHESIS NUMBER CLOSE_PARENTHESIS`. An operand that
+// is anything other than a bare numeric literal is a shape Loki itself rejects,
+// so accepting it would make the shim wrong in a way that is invisible until
+// someone relies on it.
+func TestParseScalarQuery_VectorTakesANumber(t *testing.T) {
+	for _, q := range []string{
+		`vector(vector(1))`, // nested vector
+		`vector(1+1)`,       // arithmetic operand
+		`vector((1))`,       // parenthesized operand
+		`vector(-1)`,        // signed operand: negate outside instead
+		`vector(x)`,
+	} {
+		if got, err := ParseScalarQuery(q); err == nil {
+			t.Errorf("ParseScalarQuery(%q) = %v, nil error; want error (vector() takes a number)", q, got)
+		}
+	}
+	// Arithmetic still composes outside the parentheses, so nothing is lost.
+	for _, c := range []struct {
+		q    string
+		want float64
+	}{
+		{`-vector(1)`, -1},
+		{`vector(1)+vector(1)`, 2},
+	} {
+		got, err := ParseScalarQuery(c.q)
+		if err != nil || got != c.want {
+			t.Errorf("ParseScalarQuery(%q) = %v, %v; want %v, nil", c.q, got, err, c.want)
+		}
+	}
+}
+
 func TestParseScalarQuery_Rejections(t *testing.T) {
 	cases := []string{
 		``,
