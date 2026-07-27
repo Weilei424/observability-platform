@@ -1,6 +1,7 @@
 package logs
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"path/filepath"
@@ -222,9 +223,20 @@ func (s *Store) MatchingStreamIDs(matchers []index.Pair) []StreamID {
 // StreamEntries returns the stream's entries in [minTs, maxTs] from persisted
 // chunks and the head, sorted by timestamp and deduped by (tsNs, line). The dedup
 // neutralizes the flush crash window (chunk written, WAL not yet checkpointed).
-func (s *Store) StreamEntries(id StreamID, minTs, maxTs int64) ([]LogEntry, error) {
+//
+// Only the index lookup and the head copy hold s.mu; chunk files are read and
+// decompressed outside it, so a query over cold chunks does not block ingestion.
+// That is safe because a chunk file is immutable once written and is never
+// deleted or rewritten (logs have no compaction or retention yet) — a ref taken
+// under the lock stays readable afterwards. Revisit when logs retention lands.
+func (s *Store) StreamEntries(ctx context.Context, id StreamID, minTs, maxTs int64) ([]LogEntry, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	refs := append([]ChunkRef(nil), s.index.chunkRefs(id, minTs, maxTs)...)
+	var headEntries []LogEntry
+	if hs := s.head[id]; hs != nil {
+		headEntries = append([]LogEntry(nil), hs.entries...)
+	}
+	s.mu.Unlock()
 
 	type key struct {
 		ts   int64
@@ -233,7 +245,10 @@ func (s *Store) StreamEntries(id StreamID, minTs, maxTs int64) ([]LogEntry, erro
 	seen := make(map[key]struct{})
 	var out []LogEntry
 
-	for _, ref := range s.index.chunkRefs(id, minTs, maxTs) {
+	for _, ref := range refs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		gotID, _, c, err := readChunkFile(filepath.Join(s.chunksDir, ref.Name))
 		if err != nil {
 			return nil, err
@@ -257,18 +272,16 @@ func (s *Store) StreamEntries(id StreamID, minTs, maxTs int64) ([]LogEntry, erro
 			out = append(out, LogEntry{StreamID: id, TimestampNs: ts, Line: line})
 		}
 	}
-	if hs := s.head[id]; hs != nil {
-		for _, e := range hs.entries {
-			if e.TimestampNs < minTs || e.TimestampNs > maxTs {
-				continue
-			}
-			k := key{e.TimestampNs, e.Line}
-			if _, dup := seen[k]; dup {
-				continue
-			}
-			seen[k] = struct{}{}
-			out = append(out, e)
+	for _, e := range headEntries {
+		if e.TimestampNs < minTs || e.TimestampNs > maxTs {
+			continue
 		}
+		k := key{e.TimestampNs, e.Line}
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, e)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].TimestampNs < out[j].TimestampNs })
 	return out, nil
