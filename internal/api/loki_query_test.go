@@ -319,3 +319,116 @@ func TestLokiQueryRange_NilLogQuery(t *testing.T) {
 		t.Fatalf("code = %d, want 500; body = %s", w.Code, w.Body.String())
 	}
 }
+
+// TestLokiQueryRange_BackwardDefaultOrder proves 'direction' defaults to
+// 'backward' (newest-first) when omitted, per the Loki API contract. Every
+// other test in this file sets direction=forward explicitly.
+func TestLokiQueryRange_BackwardDefaultOrder(t *testing.T) {
+	srv := newLokiServer(t)
+	pushLogs(t, srv, `{"streams":[
+	 {"stream":{"service":"api"},"values":[["100","a"],["200","b"],["300","c"]]}
+	]}`)
+
+	q := url.Values{}
+	q.Set("query", `{service="api"}`)
+	q.Set("start", "0")
+	q.Set("end", "1000")
+	// No 'direction' set: exercises the backward default.
+	w := getLoki(t, srv, "/loki/api/v1/query_range", q)
+	if w.Code != 200 {
+		t.Fatalf("code = %d, body = %s", w.Code, w.Body.String())
+	}
+	var resp lokiStreamsResp
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Data.Result) != 1 || len(resp.Data.Result[0].Values) != 3 {
+		t.Fatalf("result = %+v", resp.Data.Result)
+	}
+	vals := resp.Data.Result[0].Values
+	if vals[0][0] != "300" || vals[1][0] != "200" || vals[2][0] != "100" {
+		t.Fatalf("values not newest-first: %+v", vals)
+	}
+}
+
+// TestLokiQueryRange_GlobalLimitAcrossStreams proves 'limit' truncates
+// globally across all matched streams (newest-first), not per-stream. Two
+// streams share the "env" label so a single selector matches both.
+func TestLokiQueryRange_GlobalLimitAcrossStreams(t *testing.T) {
+	srv := newLokiServer(t)
+	pushLogs(t, srv, `{"streams":[
+	 {"stream":{"env":"prod","service":"api"},"values":[["100","a1"],["300","a2"]]},
+	 {"stream":{"env":"prod","service":"web"},"values":[["200","w1"],["400","w2"]]}
+	]}`)
+
+	q := url.Values{}
+	q.Set("query", `{env="prod"}`)
+	q.Set("start", "0")
+	q.Set("end", "1000")
+	q.Set("limit", "2")
+	// No 'direction' set: default backward, so the global limit keeps the two
+	// newest entries overall regardless of which stream they belong to.
+	w := getLoki(t, srv, "/loki/api/v1/query_range", q)
+	if w.Code != 200 {
+		t.Fatalf("code = %d, body = %s", w.Code, w.Body.String())
+	}
+	var resp lokiStreamsResp
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	total := 0
+	got := map[string]bool{}
+	for _, rs := range resp.Data.Result {
+		total += len(rs.Values)
+		for _, v := range rs.Values {
+			got[v[0]] = true
+		}
+	}
+	if total != 2 || !got["400"] || !got["300"] {
+		t.Fatalf("global limit result = %+v (total=%d, ts set=%+v)", resp.Data.Result, total, got)
+	}
+}
+
+// TestLokiLabelEndpoints_AcceptAndIgnoreTimeParams proves the label endpoints
+// tolerate start/end/query params rather than rejecting them: Grafana always
+// sends these on its datasource health check, and erroring on them would
+// break it.
+func TestLokiLabelEndpoints_AcceptAndIgnoreTimeParams(t *testing.T) {
+	srv := newLokiServer(t)
+	pushLogs(t, srv, `{"streams":[{"stream":{"service":"api"},"values":[["100","a"]]}]}`)
+
+	type lokiStatusResp struct {
+		Status string `json:"status"`
+	}
+
+	q := url.Values{}
+	q.Set("start", "0")
+	q.Set("end", "1000")
+	q.Set("query", `{service="api"}`)
+	w := getLoki(t, srv, "/loki/api/v1/labels", q)
+	if w.Code != 200 {
+		t.Fatalf("labels code = %d, body = %s", w.Code, w.Body.String())
+	}
+	var lresp lokiStatusResp
+	if err := json.Unmarshal(w.Body.Bytes(), &lresp); err != nil {
+		t.Fatalf("unmarshal labels: %v", err)
+	}
+	if lresp.Status != "success" {
+		t.Fatalf("labels status = %q, want success", lresp.Status)
+	}
+
+	q2 := url.Values{}
+	q2.Set("start", "0")
+	q2.Set("end", "1000")
+	w = getLoki(t, srv, "/loki/api/v1/label/service/values", q2)
+	if w.Code != 200 {
+		t.Fatalf("label values code = %d, body = %s", w.Code, w.Body.String())
+	}
+	var vresp lokiStatusResp
+	if err := json.Unmarshal(w.Body.Bytes(), &vresp); err != nil {
+		t.Fatalf("unmarshal label values: %v", err)
+	}
+	if vresp.Status != "success" {
+		t.Fatalf("label values status = %q, want success", vresp.Status)
+	}
+}
