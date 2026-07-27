@@ -13,9 +13,27 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/logs"
 )
 
-// maxEpochSeconds is the largest whole-second epoch that still fits in an int64
-// nanosecond count (~year 2262). Beyond it the ns conversion would silently wrap.
+// maxEpochSeconds is the largest whole-second epoch whose nanosecond count still
+// fits in an int64 (~year 2262). It only guards the float→int64 conversion below;
+// the authoritative range check is nanosOf.
 const maxEpochSeconds = math.MaxInt64 / int64(time.Second)
+
+// Go can represent Unix nanoseconds only between these instants (1678-09-21 and
+// 2262-04-11). Time.UnixNano is documented as undefined outside that window — it
+// wraps rather than failing — so every path that converts a time.Time to
+// nanoseconds has to be bounded first, or an out-of-range request silently
+// becomes a garbage query bound instead of a 400.
+var (
+	minNanoTime = time.Unix(0, math.MinInt64)
+	maxNanoTime = time.Unix(0, math.MaxInt64)
+)
+
+func nanosOf(t time.Time, raw string) (int64, error) {
+	if t.Before(minNanoTime) || t.After(maxNanoTime) {
+		return 0, fmt.Errorf("timestamp %q is outside the representable nanosecond range (1678-2262)", raw)
+	}
+	return t.UnixNano(), nil
+}
 
 // parseLokiTime parses a Loki timestamp, mirroring Loki's own parseTimestamp
 // (pkg/loghttp/params.go) so the same string means the same instant here:
@@ -33,27 +51,30 @@ func parseLokiTime(s string) (int64, error) {
 	if strings.Contains(s, ".") {
 		if f, err := strconv.ParseFloat(s, 64); err == nil {
 			sec, frac := math.Modf(f)
+			// Bound before the int64 conversion, which is undefined for a float
+			// outside int64's range. nanosOf then does the exact check.
 			if sec > float64(maxEpochSeconds) || sec < float64(-maxEpochSeconds) {
-				return 0, fmt.Errorf("timestamp %q is outside the representable nanosecond range", s)
+				return 0, fmt.Errorf("timestamp %q is outside the representable nanosecond range (1678-2262)", s)
 			}
-			// Round to microseconds first, as Loki does, so float noise in the
-			// fractional part does not leak into the nanosecond value.
+			// Loki rounds the fraction to milliseconds, so float noise in the
+			// low digits does not leak into the nanosecond value. Sub-millisecond
+			// precision in a float timestamp is dropped, upstream and here alike.
 			frac = math.Round(frac*1000) / 1000
-			return time.Unix(int64(sec), int64(frac*float64(time.Second))).UnixNano(), nil
+			return nanosOf(time.Unix(int64(sec), int64(frac*float64(time.Second))), s)
 		}
 	}
 	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
-		if len(strings.TrimPrefix(s, "-")) > 10 {
+		// Loki measures the raw string, sign included: "-1234567890" is 11
+		// characters and so reads as nanoseconds, not seconds. Mirroring the raw
+		// length keeps the parity claim literally true.
+		if len(s) > 10 {
 			return n, nil // already nanoseconds
 		}
-		if n > maxEpochSeconds || n < -maxEpochSeconds {
-			return 0, fmt.Errorf("timestamp %q is outside the representable nanosecond range", s)
-		}
-		return n * int64(time.Second), nil
+		return nanosOf(time.Unix(n, 0), s)
 	}
 	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
 		if t, err := time.Parse(layout, s); err == nil {
-			return t.UnixNano(), nil
+			return nanosOf(t, s)
 		}
 	}
 	return 0, fmt.Errorf("invalid timestamp %q: want a Unix epoch (seconds, float seconds, or nanoseconds) or RFC3339", s)
