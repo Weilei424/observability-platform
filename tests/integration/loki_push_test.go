@@ -2,6 +2,7 @@ package integration_test
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -106,7 +107,7 @@ func TestLokiPush_DiskStore_SurvivesFlushAndRestart(t *testing.T) {
 	_, store2 := newDiskLogServer(t, dataDir)
 	defer store2.Close()
 	sl, _ := logs.NewStreamLabels(map[string]string{"service": "api"})
-	entries, err := store2.StreamEntries(logs.StreamIDOf(sl), 0, 1<<62)
+	entries, err := store2.StreamEntries(context.Background(), logs.StreamIDOf(sl), 0, 1<<62)
 	if err != nil {
 		t.Fatalf("StreamEntries: %v", err)
 	}
