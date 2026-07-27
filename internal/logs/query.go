@@ -97,8 +97,16 @@ func (e *QueryEngine) query(ctx context.Context, sel LogSelector, startNs, endNs
 
 		// Cap each stream's contribution before the global merge. A global top-N
 		// can never draw more than N entries from any single stream, so ordering
-		// each stream by dir and keeping its first `limit` is lossless — and it
-		// bounds retained memory at O(streams x limit) instead of O(all matches).
+		// each stream by dir and keeping its first `limit` is lossless.
+		//
+		// This bounds what is *carried across* streams at O(streams x limit)
+		// rather than O(all matches). It does not bound the transient per-stream
+		// working set: StreamEntries still materializes every in-range entry for
+		// the stream (plus its dedup map), and `kept` above is sized to that. Peak
+		// is therefore O(largest matching stream + streams x limit). Bounding the
+		// transient set needs selection pushed down into the read — a lazy
+		// per-stream cursor feeding a k-way merge — which is the deferred
+		// streaming work noted in the design's known limitations.
 		sortEntries(kept, dir)
 		if limit > 0 && len(kept) > limit {
 			kept = kept[:limit]
