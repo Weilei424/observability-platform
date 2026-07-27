@@ -1,9 +1,12 @@
 package logs
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/masonwheeler/observability-platform/internal/storage/index"
@@ -48,7 +51,7 @@ func TestStore_RebuildsIndexWhenManifestMissing(t *testing.T) {
 
 	s2 := newTestStore(t, dir, 1<<30)
 	defer s2.Close()
-	got, err := s2.StreamEntries(id, 0, 1000)
+	got, err := s2.StreamEntries(context.Background(), id, 0, 1000)
 	if err != nil {
 		t.Fatalf("StreamEntries: %v", err)
 	}
@@ -86,7 +89,7 @@ func TestStore_RebuildsIndexWhenManifestCorrupt(t *testing.T) {
 
 	s2 := newTestStore(t, dir, 1<<30)
 	defer s2.Close()
-	got, err := s2.StreamEntries(id, 0, 1000)
+	got, err := s2.StreamEntries(context.Background(), id, 0, 1000)
 	if err != nil {
 		t.Fatalf("StreamEntries: %v", err)
 	}
@@ -255,7 +258,7 @@ func TestStore_SurvivesRestart(t *testing.T) {
 	s2 := newTestStore(t, dir, 1<<30)
 	defer s2.Close()
 	id := StreamIDOf(labels)
-	got, err := s2.StreamEntries(id, 0, 1000)
+	got, err := s2.StreamEntries(context.Background(), id, 0, 1000)
 	if err != nil {
 		t.Fatalf("StreamEntries: %v", err)
 	}
@@ -295,7 +298,7 @@ func TestStore_RecoversUnflushedEntriesFromWAL(t *testing.T) {
 	// Restart: recovery must come purely from WAL replay.
 	s2 := newTestStore(t, dir, 1<<30)
 	defer s2.Close()
-	got, err := s2.StreamEntries(id, 0, 1000)
+	got, err := s2.StreamEntries(context.Background(), id, 0, 1000)
 	if err != nil {
 		t.Fatalf("StreamEntries: %v", err)
 	}
@@ -318,7 +321,7 @@ func TestStore_CheckpointPreventsDoubleCount(t *testing.T) {
 
 	s2 := newTestStore(t, dir, 1<<30)
 	defer s2.Close()
-	got, err := s2.StreamEntries(StreamIDOf(labels), 0, 1000)
+	got, err := s2.StreamEntries(context.Background(), StreamIDOf(labels), 0, 1000)
 	if err != nil {
 		t.Fatalf("StreamEntries: %v", err)
 	}
@@ -483,11 +486,75 @@ func TestStore_MergeDedupsCrashWindow(t *testing.T) {
 
 	s2 := newTestStore(t, dir, 1<<30) // manifest has the chunk; WAL still has "dup"
 	defer s2.Close()
-	got, err := s2.StreamEntries(id, 0, 1000)
+	got, err := s2.StreamEntries(context.Background(), id, 0, 1000)
 	if err != nil {
 		t.Fatalf("StreamEntries: %v", err)
 	}
 	if len(got) != 1 {
 		t.Fatalf("entries = %d, want 1 (crash-window duplicate must be deduped)", len(got))
+	}
+}
+
+// TestStreamEntries_ConcurrentWithAppend covers the read path that decodes chunk
+// files outside s.mu. Appends (and the flushes they trigger) must run
+// concurrently with queries without racing and without a reader observing a
+// partial view. Run with -race for this to mean anything.
+func TestStreamEntries_ConcurrentWithAppend(t *testing.T) {
+	// A small flush threshold guarantees real chunk files get written mid-test,
+	// so readers hit the file-decode path rather than only the head.
+	s := newTestStore(t, t.TempDir(), 256)
+	t.Cleanup(func() { _ = s.Close() })
+	labels := mustLabels(t, map[string]string{"service": "api"})
+	id := StreamIDOf(labels)
+
+	const writes = 150
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 1; i <= writes; i++ {
+			if err := s.Append(labels, int64(i), fmt.Sprintf("line-%d", i)); err != nil {
+				t.Errorf("append %d: %v", i, err)
+				return
+			}
+		}
+	}()
+
+	for r := 0; r < 4; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var last int
+			for i := 0; i < 50; i++ {
+				got, err := s.StreamEntries(context.Background(), id, 0, int64(writes))
+				if err != nil {
+					t.Errorf("StreamEntries: %v", err)
+					return
+				}
+				// Entries only ever accumulate, so a later read must never see
+				// fewer than an earlier one — that would mean a flush briefly
+				// dropped data from the reader's view.
+				if len(got) < last {
+					t.Errorf("entry count went backwards: %d then %d", last, len(got))
+					return
+				}
+				last = len(got)
+			}
+		}()
+	}
+	wg.Wait()
+
+	got, err := s.StreamEntries(context.Background(), id, 0, int64(writes))
+	if err != nil {
+		t.Fatalf("final StreamEntries: %v", err)
+	}
+	if len(got) != writes {
+		t.Fatalf("final entry count = %d, want %d", len(got), writes)
+	}
+	for i, e := range got {
+		if e.TimestampNs != int64(i+1) {
+			t.Fatalf("entry %d ts = %d, want %d", i, e.TimestampNs, i+1)
+		}
 	}
 }
