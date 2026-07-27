@@ -1,8 +1,10 @@
 package logs
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/masonwheeler/observability-platform/internal/storage/index"
@@ -70,110 +72,147 @@ func ParseLogQL(q string) (LogSelector, error) {
 	}
 	if s[0] != '{' {
 		if metricQueryRe.MatchString(s) {
-			return LogSelector{}, fmt.Errorf("parse error: unsupported LogQL feature: metric and aggregation queries (e.g. rate(), count_over_time()) are not supported")
+			return LogSelector{}, errUnsupportedMetricQuery
 		}
 		return LogSelector{}, fmt.Errorf("parse error: query must start with a stream selector '{...}'")
 	}
-	closeIdx := findSelectorEnd(s)
-	if closeIdx == -1 {
-		return LogSelector{}, fmt.Errorf("parse error: unclosed '{' in stream selector")
-	}
-	matchers, err := parseStreamMatchers(s[1:closeIdx])
+	matchers, n, err := parseStreamSelector(s)
 	if err != nil {
 		return LogSelector{}, err
 	}
 	if len(matchers) == 0 {
 		return LogSelector{}, fmt.Errorf("parse error: stream selector must contain at least one label matcher")
 	}
-	filters, err := parseLineFilters(strings.TrimSpace(s[closeIdx+1:]))
+	filters, err := parseLineFilters(strings.TrimSpace(s[n:]))
 	if err != nil {
 		return LogSelector{}, err
 	}
 	return LogSelector{Matchers: matchers, LineFilters: filters}, nil
 }
 
-// findSelectorEnd returns the index of the '}' closing the selector that starts at
-// s[0]=='{', ignoring braces inside quoted strings so a '}' in a label value (or a
-// later line-filter operand) does not end it early.
-func findSelectorEnd(s string) int {
-	inQuote := false
-	for i := 0; i < len(s); i++ {
-		switch s[i] {
-		case '"':
-			inQuote = !inQuote
-		case '}':
-			if !inQuote {
-				return i
+// errUnsupportedMetricQuery is returned for real metric/aggregation LogQL. The
+// constant-expression subset accepted by ParseScalarQuery (see scalar.go) is the
+// one exception, and only on the instant-query path.
+var errUnsupportedMetricQuery = errors.New("parse error: unsupported LogQL feature: metric and aggregation queries (e.g. rate(), count_over_time()) are not supported")
+
+// scanString scans a LogQL string literal at the start of s and returns its
+// unescaped value plus the bytes consumed including both delimiters. Two forms
+// are recognized, matching LogQL (which lexes strings with Go's rules):
+//
+//	"a\"b"  double-quoted, backslash escapes processed
+//	`a"b`   backtick-quoted raw string, no escape processing
+//
+// Escape-aware scanning is what lets a '"' appear inside a label value or a
+// line-filter operand — e.g. |= "\"event\"" for JSON lines — without the
+// literal terminating early.
+func scanString(s string) (value string, n int, err error) {
+	if s == "" {
+		return "", 0, fmt.Errorf("expected a quoted string")
+	}
+	switch s[0] {
+	case '`':
+		end := strings.IndexByte(s[1:], '`')
+		if end == -1 {
+			return "", 0, fmt.Errorf("unterminated raw string %s", s)
+		}
+		return s[1 : 1+end], end + 2, nil
+	case '"':
+		for i := 1; i < len(s); i++ {
+			switch s[i] {
+			case '\\':
+				i++ // skip the escaped byte; strconv.Unquote validates the sequence
+			case '"':
+				v, err := strconv.Unquote(s[:i+1])
+				if err != nil {
+					return "", 0, fmt.Errorf("invalid string literal %s: %w", s[:i+1], err)
+				}
+				return v, i + 1, nil
 			}
 		}
+		return "", 0, fmt.Errorf("unterminated string %s", s)
+	default:
+		return "", 0, fmt.Errorf("expected a double-quoted or backtick-quoted string near %q", s)
 	}
-	return -1
 }
 
-func parseStreamMatchers(inner string) ([]index.Pair, error) {
-	inner = strings.TrimSpace(inner)
-	if inner == "" {
-		return nil, nil
+func skipSpace(s string, i int) int {
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r') {
+		i++
 	}
+	return i
+}
+
+// parseStreamSelector parses `{name="value", ...}` starting at s[0]=='{' and
+// returns the matchers plus the bytes consumed through the closing '}'.
+//
+// It scans the selector rather than splitting on delimiters, so anything that is
+// not exactly a matcher list is a parse error — never a value that silently
+// absorbs the junk around it.
+func parseStreamSelector(s string) ([]index.Pair, int, error) {
 	var matchers []index.Pair
-	for _, part := range splitLogQLComma(inner) {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
+	i := 1 // past '{'
+	for {
+		i = skipSpace(s, i)
+		if i >= len(s) {
+			return nil, 0, fmt.Errorf("parse error: unclosed '{' in stream selector")
 		}
-		m, err := parseLabelMatcher(part)
+		if s[i] == '}' {
+			return matchers, i + 1, nil
+		}
+
+		name, next, err := scanLabelName(s, i)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
-		matchers = append(matchers, m)
-	}
-	return matchers, nil
-}
+		i = skipSpace(s, next)
+		if i >= len(s) {
+			return nil, 0, fmt.Errorf("parse error: unclosed '{' in stream selector")
+		}
+		switch {
+		case strings.HasPrefix(s[i:], "=~"), strings.HasPrefix(s[i:], "!="), strings.HasPrefix(s[i:], "!~"):
+			return nil, 0, fmt.Errorf("parse error: unsupported label matcher operator %q on label %q; only '=' is supported", s[i:i+2], name)
+		case s[i] == '=':
+			i++
+		default:
+			return nil, 0, fmt.Errorf("parse error: expected '=' after label name %q in stream selector, got %q", name, s[i:])
+		}
 
-// splitLogQLComma splits on commas that are not inside double-quoted strings.
-func splitLogQLComma(s string) []string {
-	var parts []string
-	inQuote := false
-	start := 0
-	for i := 0; i < len(s); i++ {
+		i = skipSpace(s, i)
+		value, n, err := scanString(s[i:])
+		if err != nil {
+			return nil, 0, fmt.Errorf("parse error: label %q: %w", name, err)
+		}
+		matchers = append(matchers, index.Pair{Name: name, Value: value})
+
+		i = skipSpace(s, i+n)
+		if i >= len(s) {
+			return nil, 0, fmt.Errorf("parse error: unclosed '{' in stream selector")
+		}
 		switch s[i] {
-		case '"':
-			inQuote = !inQuote
 		case ',':
-			if !inQuote {
-				parts = append(parts, s[start:i])
-				start = i + 1
-			}
+			i++
+		case '}':
+			return matchers, i + 1, nil
+		default:
+			return nil, 0, fmt.Errorf("parse error: expected ',' or '}' after the value of label %q, got %q", name, s[i:])
 		}
 	}
-	return append(parts, s[start:])
 }
 
-// parseLabelMatcher parses a single `name="value"` equality matcher, rejecting
-// =~, !=, and !~ operators explicitly.
-func parseLabelMatcher(s string) (index.Pair, error) {
-	eq := strings.IndexByte(s, '=')
-	if eq == -1 {
-		return index.Pair{}, fmt.Errorf("parse error: label matcher must use '=': %q", s)
+// scanLabelName reads a label name at s[i] and returns it with the next index.
+// The loop takes the identifier charset; logqlLabelNameRe enforces the rest of
+// the rule (non-empty, no leading digit).
+func scanLabelName(s string, i int) (string, int, error) {
+	start := i
+	for i < len(s) && (s[i] == '_' ||
+		(s[i] >= 'a' && s[i] <= 'z') || (s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= '0' && s[i] <= '9')) {
+		i++
 	}
-	if eq > 0 && (s[eq-1] == '!' || s[eq-1] == '~') {
-		return index.Pair{}, fmt.Errorf("parse error: unsupported label matcher operator in %q; only '=' is supported", s)
-	}
-	if eq+1 < len(s) && s[eq+1] == '~' {
-		return index.Pair{}, fmt.Errorf("parse error: unsupported label matcher operator '=~' in %q; only '=' is supported", s)
-	}
-	name := strings.TrimSpace(s[:eq])
-	if name == "" {
-		return index.Pair{}, fmt.Errorf("parse error: empty label name in %q", s)
-	}
+	name := s[start:i]
 	if !logqlLabelNameRe.MatchString(name) {
-		return index.Pair{}, fmt.Errorf("parse error: invalid label name %q", name)
+		return "", 0, fmt.Errorf("parse error: expected a label name in stream selector, got %q", s[start:])
 	}
-	raw := strings.TrimSpace(s[eq+1:])
-	if len(raw) < 2 || raw[0] != '"' || raw[len(raw)-1] != '"' {
-		return index.Pair{}, fmt.Errorf("parse error: label value must be double-quoted in %q", s)
-	}
-	return index.Pair{Name: name, Value: raw[1 : len(raw)-1]}, nil
+	return name, i, nil
 }
 
 // parseLineFilters parses the chained line filters that follow a selector.
@@ -198,14 +237,10 @@ func parseLineFilters(s string) ([]LineFilter, error) {
 			return nil, fmt.Errorf("parse error: unsupported LogQL feature near %q; only line filters |=, !=, |~, !~ are supported", s)
 		}
 		rest := strings.TrimSpace(s[2:])
-		if rest == "" || rest[0] != '"' {
-			return nil, fmt.Errorf("parse error: line filter operand must be a double-quoted string near %q", s)
+		value, n, err := scanString(rest)
+		if err != nil {
+			return nil, fmt.Errorf("parse error: line filter %s: %w", s[:2], err)
 		}
-		end := strings.IndexByte(rest[1:], '"')
-		if end == -1 {
-			return nil, fmt.Errorf("parse error: unterminated line filter operand near %q", s)
-		}
-		value := rest[1 : 1+end]
 		f := LineFilter{Op: op, Value: value}
 		if op == FilterMatch || op == FilterNotMatch {
 			re, err := regexp.Compile(value)
@@ -215,7 +250,7 @@ func parseLineFilters(s string) ([]LineFilter, error) {
 			f.re = re
 		}
 		filters = append(filters, f)
-		s = strings.TrimSpace(rest[1+end+1:])
+		s = strings.TrimSpace(rest[n:])
 	}
 	return filters, nil
 }
