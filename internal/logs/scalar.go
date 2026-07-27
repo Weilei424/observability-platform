@@ -1,6 +1,7 @@
 package logs
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -18,7 +19,10 @@ import (
 //	expr    = term { ("+" | "-") term }
 //	term    = unary { ("*" | "/") unary }
 //	unary   = [ "+" | "-" ] primary
-//	primary = number | "(" expr ")" | "vector" "(" expr ")"
+//	primary = number | "(" expr ")" | "vector" "(" number ")"
+//
+// vector() takes a bare number, matching upstream LogQL's
+// `vector OPEN_PARENTHESIS NUMBER CLOSE_PARENTHESIS`.
 
 // ParseScalarQuery evaluates a constant metric query and returns its value. Any
 // identifier other than vector() — i.e. every query that would have to read
@@ -136,7 +140,8 @@ func (p *scalarParser) primary() (float64, error) {
 	}
 }
 
-// call parses `vector(expr)`. Every other function name is a real metric query.
+// call parses `vector(<number>)`. Every other function name is a real metric
+// query.
 func (p *scalarParser) call() (float64, error) {
 	name, next, err := scanIdent(p.s, p.i)
 	if err != nil {
@@ -150,17 +155,47 @@ func (p *scalarParser) call() (float64, error) {
 		return 0, fmt.Errorf("parse error: expected '(' after %q", name)
 	}
 	p.i++
-	v, err := p.expr()
+	p.skipSpace()
+	// Upstream LogQL's production is `vector OPEN_PARENTHESIS NUMBER
+	// CLOSE_PARENTHESIS`: the operand is a bare numeric literal, not an
+	// expression. Matching that shape exactly means vector(vector(1)),
+	// vector(1+1) and vector((1)) are rejected here just as Loki rejects them,
+	// rather than being quietly evaluated. Nothing is lost — arithmetic composes
+	// outside the parentheses, as in vector(1)+vector(1).
+	operand := p.i
+	if p.i >= len(p.s) || !isNumberStart(p.s[p.i]) {
+		return 0, errVectorOperand(p.s[operand:])
+	}
+	v, err := p.number()
 	if err != nil {
 		return 0, err
 	}
-	return v, p.expectClose()
+	// A trailing operator is an operand-shape error, not a missing paren — report
+	// the rule that was actually violated. Running out of input really is a
+	// missing paren.
+	p.skipSpace()
+	if p.i >= len(p.s) {
+		return 0, errMissingCloseParen
+	}
+	if p.s[p.i] != ')' {
+		return 0, errVectorOperand(p.s[operand:])
+	}
+	p.i++
+	return v, nil
 }
+
+func errVectorOperand(got string) error {
+	return fmt.Errorf("parse error: vector() takes a number, got %q", got)
+}
+
+func isNumberStart(c byte) bool { return (c >= '0' && c <= '9') || c == '.' }
+
+var errMissingCloseParen = errors.New("parse error: missing ')' in query")
 
 func (p *scalarParser) expectClose() error {
 	p.skipSpace()
 	if p.i >= len(p.s) || p.s[p.i] != ')' {
-		return fmt.Errorf("parse error: missing ')' in query")
+		return errMissingCloseParen
 	}
 	p.i++
 	return nil
