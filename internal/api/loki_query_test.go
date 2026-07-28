@@ -743,6 +743,7 @@ func TestLokiQueryRange_TimestampFormats(t *testing.T) {
 		"9223372036.9",         // whole part in range, total nanoseconds is not
 		"-9223372036.9",        // same at the negative boundary
 		"9223372037",           // one second past the representable maximum
+		"9223372036854775808",  // one nanosecond past the representable maximum
 		"2300-01-01T00:00:00Z", // RFC3339 past year 2262
 		"1000-01-01T00:00:00Z", // RFC3339 before year 1678
 	} {
@@ -754,13 +755,17 @@ func TestLokiQueryRange_TimestampFormats(t *testing.T) {
 		}
 	}
 
-	// Accepted at the boundary itself, so the check rejects only what it must.
-	q := url.Values{}
-	q.Set("query", `{service="api"}`)
-	q.Set("start", ns(0))
-	q.Set("end", "9223372036")
-	if w := getLoki(t, srv, "/loki/api/v1/query_range", q); w.Code != 200 {
-		t.Errorf("end at the representable maximum: code = %d, want 200", w.Code)
+	// Accepted at the boundaries themselves, so the check rejects only what it
+	// must: the largest whole second on the seconds branch, and the exact
+	// nanosecond maximum on the nanosecond branch.
+	for _, end := range []string{"9223372036", "9223372036854775807"} {
+		q := url.Values{}
+		q.Set("query", `{service="api"}`)
+		q.Set("start", ns(0))
+		q.Set("end", end)
+		if w := getLoki(t, srv, "/loki/api/v1/query_range", q); w.Code != 200 {
+			t.Errorf("end=%s at the representable maximum: code = %d, want 200", end, w.Code)
+		}
 	}
 }
 
@@ -768,28 +773,33 @@ func TestLokiQueryRange_TimestampFormats(t *testing.T) {
 // measures the *raw* string when choosing seconds vs nanoseconds: "-1234567890"
 // is 11 characters, so it is nanoseconds upstream even though it holds 10 digits.
 // Trimming the sign first would silently shift such a bound by a factor of 1e9.
+// Ingest only accepts positive nanosecond timestamps, so no fixture can sit
+// between the two candidate instants; the range's *validity* is the observable
+// difference instead. parseLokiTime's own value assertions live in
+// loki_time_test.go.
 func TestLokiQueryRange_NegativeTimestampDigitRule(t *testing.T) {
 	srv := newLokiServer(t)
-	pushLogs(t, srv, fmt.Sprintf(`{"streams":[{"stream":{"service":"api"},"values":[[%q,"hit"]]}]}`, ns(100)))
+	pushLogs(t, srv, twoStreams)
 
-	// Read as -1234567890 ns (just before the epoch), not -1234567890 s. Either
-	// way the entry is in range, so assert the request is accepted and the window
-	// really does start before the epoch by checking the entry comes back.
+	// start is 14 characters, so it reads as nanoseconds (-1000s) under either
+	// rule. end="-1234567890" is 11 characters, so it too is nanoseconds
+	// (-1.234567890s) and the range is valid. Trim the sign first and end becomes
+	// 10 digits of *seconds* — 1930-11-18Z, decades before start — and the
+	// handler answers 400 instead.
 	q := url.Values{}
 	q.Set("query", `{service="api"}`)
-	q.Set("start", "-1234567890")
-	q.Set("end", ns(1000))
-	q.Set("direction", "forward")
+	q.Set("start", "-1000000000000")
+	q.Set("end", "-1234567890")
 	w := getLoki(t, srv, "/loki/api/v1/query_range", q)
 	if w.Code != 200 {
-		t.Fatalf("code = %d, body = %s", w.Code, w.Body.String())
+		t.Fatalf("code = %d, body = %s; a 400 means the bound was read as seconds", w.Code, w.Body.String())
 	}
 	var resp lokiStreamsResp
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(resp.Data.Result) != 1 || len(resp.Data.Result[0].Values) != 1 {
-		t.Fatalf("negative-ns start = %+v, want the one entry", resp.Data.Result)
+	if len(resp.Data.Result) != 0 {
+		t.Fatalf("pre-epoch window = %+v, want no entries", resp.Data.Result)
 	}
 }
 
@@ -820,5 +830,93 @@ func TestLokiQueryRange_IntervalRejected(t *testing.T) {
 	q.Set("step", "5s")
 	if w := getLoki(t, srv, "/loki/api/v1/query_range", q); w.Code != 200 {
 		t.Fatalf("step code = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+}
+
+// entryLines runs a query_range expected to succeed and returns the log lines in
+// response order.
+func entryLines(t *testing.T, srv *api.Server, q url.Values) []string {
+	t.Helper()
+	w := getLoki(t, srv, "/loki/api/v1/query_range", q)
+	if w.Code != 200 {
+		t.Fatalf("code = %d, body = %s", w.Code, w.Body.String())
+	}
+	var resp lokiStreamsResp
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	var lines []string
+	for _, s := range resp.Data.Result {
+		for _, v := range s.Values {
+			lines = append(lines, v[1])
+		}
+	}
+	return lines
+}
+
+// TestLokiQueryRange_Since covers Loki's `since`: a duration that positions
+// `start` relative to `end`. Ignoring it would quietly serve the one-hour
+// default instead of the requested window.
+func TestLokiQueryRange_Since(t *testing.T) {
+	srv := newLokiServer(t)
+	pushLogs(t, srv, twoStreams)
+
+	// end at ns(300), since 150ns → [ns(150), ns(300)); the api stream's entries
+	// sit at 100/200/300, so only the middle one is in range. The default
+	// one-hour window would return all three.
+	q := url.Values{}
+	q.Set("query", `{service="api"}`)
+	q.Set("end", ns(300))
+	q.Set("since", "150ns")
+	q.Set("direction", "forward")
+	if got := entryLines(t, srv, q); len(got) != 1 || got[0] != "GET /b ok" {
+		t.Fatalf("since=150ns returned %v, want just the ns(200) entry", got)
+	}
+
+	// An explicit start supersedes since, per the upstream contract.
+	q.Set("start", ns(0))
+	if got := entryLines(t, srv, q); len(got) != 2 {
+		t.Fatalf("start+since returned %v, want start to win with 2 entries", got)
+	}
+
+	// A malformed or negative duration is a 400 rather than a silent fallback.
+	for _, bad := range []string{"5", "5 minutes", "-5m"} {
+		q := url.Values{}
+		q.Set("query", `{service="api"}`)
+		q.Set("since", bad)
+		w := getLoki(t, srv, "/loki/api/v1/query_range", q)
+		if w.Code != 400 {
+			t.Errorf("since=%q code = %d, want 400", bad, w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "since") {
+			t.Errorf("since=%q error body = %q, want it to name the parameter", bad, w.Body.String())
+		}
+	}
+}
+
+// TestLokiQueryRange_SinceAnchorsToNow pins the upstream rule that a relative
+// start is measured from min(end, now): with `end` in the future, "the last
+// hour" must still mean the last hour of real data, not an empty future window.
+func TestLokiQueryRange_SinceAnchorsToNow(t *testing.T) {
+	srv := newLokiServer(t)
+	recent := time.Now().Add(-30 * time.Minute).UnixNano()
+	pushLogs(t, srv, fmt.Sprintf(
+		`{"streams":[{"stream":{"service":"api"},"values":[[%q,"recent"]]}]}`,
+		strconv.FormatInt(recent, 10)))
+
+	future := strconv.FormatInt(time.Now().Add(24*time.Hour).UnixNano(), 10)
+
+	// Anchored at end, [end-1h, end) would start 23 hours from now and match
+	// nothing; anchored at now it covers the 30-minute-old entry.
+	for _, name := range []string{"since", "default"} {
+		q := url.Values{}
+		q.Set("query", `{service="api"}`)
+		q.Set("end", future)
+		if name == "since" {
+			q.Set("since", "1h")
+		}
+		if got := entryLines(t, srv, q); len(got) != 1 || got[0] != "recent" {
+			t.Errorf("%s with a future end returned %v, want the 30-minute-old entry", name, got)
+		}
 	}
 }
