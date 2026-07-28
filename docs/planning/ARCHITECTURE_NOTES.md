@@ -237,6 +237,12 @@ checksummed, so a v1 rebuild must fully decode rather than peek).
   defaults (100 / backward), and **plain-text** error bodies (deliberately distinct from
   the Prometheus JSON error envelope). Label endpoints accept but ignore `start`/`end`
   this phase. `GET`-only is sufficient: Grafana's Loki backend never posts.
+- `query_range` time bounds follow upstream precedence: an explicit `start` beats
+  `since` (a duration), which beats the one-hour default. A relative start is measured
+  from `min(end, now)`, so `end` in the future still means "the last hour of data"
+  rather than an empty future window. `step` is accepted and ignored (Loki does the same
+  on a stream response); `interval` is **rejected** with a 400, because ignoring it would
+  return more entries than asked for while looking like it worked.
 
 ---
 
@@ -306,15 +312,22 @@ Required:
 {service="api"}
 {service="api", level="error"}
 {service="api"} |= "timeout"
+{service="api"} != "healthz"
+{service="api"} |~ "timeout|deadline"
+{service="api"} !~ "^debug"
 ```
+
+Line filters take all four operators (`|=`, `!=`, `|~`, `!~`) and chain, so **regex
+applies to log *lines***. Label matchers inside `{...}` remain equality-only.
 
 Explicitly unsupported in v1:
 
 ```text
-regex filters
+regex label matchers — {service=~"api|web"} and {service!~"..."}
+non-equality label matchers — {service!="api"}
 line formatting
 JSON parsing pipeline
-metric queries from logs
+metric queries from logs (except the constant vector() datasource health check)
 complex LogQL aggregations
 ```
 
