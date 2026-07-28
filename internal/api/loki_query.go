@@ -80,6 +80,24 @@ func parseLokiTime(s string) (int64, error) {
 	return 0, fmt.Errorf("invalid timestamp %q: want a Unix epoch (seconds, float seconds, or nanoseconds) or RFC3339", s)
 }
 
+// sinceStart resolves Loki's `since` parameter — a Go duration measured back
+// from anchorNs — into an absolute start timestamp.
+func sinceStart(s string, anchorNs int64) (int64, error) {
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("%q is not a duration: want a Go duration such as 5m or 1h30m", s)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("duration %q is negative: 'since' measures backwards from 'end' already", s)
+	}
+	// anchorNs-d underflows once the duration reaches past the low end of the
+	// int64 window; wrapping would silently produce a bogus bound instead of a 400.
+	if anchorNs < math.MinInt64+int64(d) {
+		return 0, fmt.Errorf("duration %q reaches outside the representable nanosecond range (1678-2262)", s)
+	}
+	return anchorNs - int64(d), nil
+}
+
 func parseLokiLimit(s string) (int, error) {
 	if s == "" {
 		return 100, nil
@@ -197,7 +215,8 @@ func (s *Server) handleLokiQueryRange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	endNs := time.Now().UnixNano()
+	nowNs := time.Now().UnixNano()
+	endNs := nowNs
 	var err error
 	if raw := q.Get("end"); raw != "" {
 		endNs, err = parseLokiTime(raw)
@@ -206,7 +225,26 @@ func (s *Server) handleLokiQueryRange(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	startNs := endNs - int64(time.Hour)
+
+	// Loki anchors a *relative* start to min(end, now): a caller asking for the
+	// last five minutes with `end` in the future wants the last five minutes of
+	// data, not an all-future window. Both the one-hour default and `since` hang
+	// off this anchor.
+	anchorNs := endNs
+	if anchorNs > nowNs {
+		anchorNs = nowNs
+	}
+
+	// Precedence, per the upstream range-query contract: an explicit `start`
+	// supersedes `since`, which supersedes the one-hour default.
+	startNs := anchorNs - int64(time.Hour)
+	if raw := q.Get("since"); raw != "" {
+		startNs, err = sinceStart(raw, anchorNs)
+		if err != nil {
+			writeLokiError(w, http.StatusBadRequest, "invalid 'since' parameter: "+err.Error())
+			return
+		}
+	}
 	if raw := q.Get("start"); raw != "" {
 		startNs, err = parseLokiTime(raw)
 		if err != nil {
