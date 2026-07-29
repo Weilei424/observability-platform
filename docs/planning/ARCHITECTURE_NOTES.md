@@ -245,9 +245,18 @@ checksummed, so a v1 rebuild must fully decode rather than peek).
   `model.ParseDuration`, so `1d`/`1w`/`1y` and a bare `0` are valid while `150ns` and
   `1.5h` are not. `metrics.ParsePromDuration` is that grammar, already in the tree for
   PromQL range selectors and `step`, so the Loki path reuses it rather than promoting
-  `prometheus/common` to a direct dependency. `step` is accepted and ignored (Loki does
-  the same on a stream response); `interval` is **rejected** with a 400, because ignoring
-  it would return more entries than asked for while looking like it worked.
+  `prometheus/common` to a direct dependency.
+- `step` has **no effect** on a stream response, but it is still parsed and validated,
+  because upstream runs one `ParseRangeQuery` across both log and metric queries: float
+  seconds or a Prometheus duration, non-positive rejected, and the 11,000-points-per-
+  timeseries safety limit enforced. Accepting `step=bogus` with a 200 would be the
+  divergence, not the leniency. An absent `step` needs no check — upstream then derives
+  it from the range (`max(floor(rangeSeconds/250), 1)` seconds), which cannot trip
+  either rule. `interval` is **rejected** with a 400, because ignoring it would return
+  more entries than asked for while looking like it worked.
+- `direction` is matched case-insensitively, as upstream does by upper-casing the value
+  before looking up its protobuf enum. Grafana sends lowercase, so this only matters to
+  hand-written clients — but the API advertises Loki compatibility.
 
 ---
 
