@@ -64,7 +64,7 @@ func TestParseLokiTime_Rejects(t *testing.T) {
 		"9223372036.9",         // whole part in range, total nanoseconds is not
 		"-9223372036.9",        // same at the negative boundary
 		"2300-01-01T00:00:00Z", // past year 2262
-		"1000-01-01T00:00:00Z", // before year 1678
+		"1000-01-01T00:00:00Z", // before the 1677 lower bound
 	} {
 		if got, err := parseLokiTime(bad); err == nil {
 			t.Errorf("parseLokiTime(%q) = %d, want an error", bad, got)
