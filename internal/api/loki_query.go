@@ -19,11 +19,14 @@ import (
 // the authoritative range check is nanosOf.
 const maxEpochSeconds = math.MaxInt64 / int64(time.Second)
 
-// Go can represent Unix nanoseconds only between these instants (1678-09-21 and
-// 2262-04-11). Time.UnixNano is documented as undefined outside that window — it
-// wraps rather than failing — so every path that converts a time.Time to
-// nanoseconds has to be bounded first, or an out-of-range request silently
-// becomes a garbage query bound instead of a 400.
+// Go can represent Unix nanoseconds only between 1677-09-21T00:12:43.145224192Z
+// and 2262-04-11T23:47:16.854775807Z — the int64 extremes exactly. (Go's own
+// UnixNano doc rounds the lower end up to "before the year 1678"; the real bound
+// is three months earlier, so error text quotes 1677.) Time.UnixNano is
+// documented as undefined outside that window — it wraps rather than failing —
+// so every path that converts a time.Time to nanoseconds has to be bounded
+// first, or an out-of-range request silently becomes a garbage query bound
+// instead of a 400.
 var (
 	minNanoTime = time.Unix(0, math.MinInt64)
 	maxNanoTime = time.Unix(0, math.MaxInt64)
@@ -31,7 +34,7 @@ var (
 
 func nanosOf(t time.Time, raw string) (int64, error) {
 	if t.Before(minNanoTime) || t.After(maxNanoTime) {
-		return 0, fmt.Errorf("timestamp %q is outside the representable nanosecond range (1678-2262)", raw)
+		return 0, fmt.Errorf("timestamp %q is outside the representable nanosecond range (1677-2262)", raw)
 	}
 	return t.UnixNano(), nil
 }
@@ -55,7 +58,7 @@ func parseLokiTime(s string) (int64, error) {
 			// Bound before the int64 conversion, which is undefined for a float
 			// outside int64's range. nanosOf then does the exact check.
 			if sec > float64(maxEpochSeconds) || sec < float64(-maxEpochSeconds) {
-				return 0, fmt.Errorf("timestamp %q is outside the representable nanosecond range (1678-2262)", s)
+				return 0, fmt.Errorf("timestamp %q is outside the representable nanosecond range (1677-2262)", s)
 			}
 			// Loki rounds the fraction to milliseconds, so float noise in the
 			// low digits does not leak into the nanosecond value. Sub-millisecond
@@ -98,11 +101,11 @@ func sinceStart(s string, anchorNs int64) (int64, error) {
 	// Both conversions below wrap rather than fail, and a wrapped bound is worse
 	// than an error: it lands somewhere plausible instead of returning a 400.
 	if ms < 0 || ms > math.MaxInt64/int64(time.Millisecond) {
-		return 0, fmt.Errorf("duration %q reaches outside the representable nanosecond range (1678-2262)", s)
+		return 0, fmt.Errorf("duration %q reaches outside the representable nanosecond range (1677-2262)", s)
 	}
 	ns := ms * int64(time.Millisecond)
 	if anchorNs < math.MinInt64+ns {
-		return 0, fmt.Errorf("duration %q reaches outside the representable nanosecond range (1678-2262)", s)
+		return 0, fmt.Errorf("duration %q reaches outside the representable nanosecond range (1677-2262)", s)
 	}
 	return anchorNs - ns, nil
 }
@@ -118,8 +121,11 @@ func parseLokiLimit(s string) (int, error) {
 	return n, nil
 }
 
+// parseLokiDirection is case-insensitive because upstream is: Loki upper-cases
+// the value before matching it against its protobuf enum names, so "BACKWARD"
+// and "Forward" are as valid as the lowercase spellings Grafana happens to send.
 func parseLokiDirection(s string) (logs.Direction, error) {
-	switch s {
+	switch strings.ToLower(s) {
 	case "", "backward":
 		return logs.Backward, nil
 	case "forward":
@@ -212,12 +218,11 @@ func (s *Server) handleLokiQueryRange(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.Form
 
-	// `step` is for metric queries and Loki ignores it on a stream response, so
-	// ignoring it here matches upstream. `interval` is different: it thins a
-	// stream response, returning the entry at start and then the next one at or
-	// after each interval boundary. Ignoring it would hand back *more* entries
-	// than asked for and look like a working filter, so it is rejected outright
-	// per the project guardrail that unsupported query features error explicitly.
+	// `interval` thins a stream response, returning the entry at start and then
+	// the next one at or after each interval boundary. Ignoring it would hand back
+	// *more* entries than asked for and look like a working filter, so it is
+	// rejected outright per the project guardrail that unsupported query features
+	// error explicitly.
 	if q.Get("interval") != "" {
 		writeLokiError(w, http.StatusBadRequest,
 			"unsupported parameter 'interval': log entry sampling is not implemented; omit it to receive every matching entry")
@@ -265,10 +270,53 @@ func (s *Server) handleLokiQueryRange(w http.ResponseWriter, r *http.Request) {
 		writeLokiError(w, http.StatusBadRequest, "invalid time range: 'end' must be >= 'start'")
 		return
 	}
+	if !validLokiStep(w, q.Get("step"), startNs, endNs) {
+		return
+	}
 
 	s.respondLokiStreams(w, r, "loki query_range failed", func() ([]logs.StreamResult, error) {
 		return s.logQuery.QueryRange(r.Context(), sel, startNs, endNs, limit, dir)
 	})
+}
+
+// maxLokiPoints is Loki's safety limit on points per timeseries — enough for 60s
+// resolution over a week, or 1h resolution over a year.
+const maxLokiPoints = 11000
+
+// validLokiStep validates the `step` parameter, writing the plain-text 400 itself
+// on failure. `step` does not shape a *stream* response, and this deliberately
+// does not use it for sampling — but upstream still parses and checks it, because
+// query_range shares one parser across log and metric queries. So a bogus, zero,
+// or negative step is a 400 rather than a silent success, and the points limit
+// applies to log queries too.
+//
+// An absent `step` needs no check: upstream then derives it from the range
+// itself (`max(floor(rangeSeconds/250), 1)` seconds), which is positive by
+// construction and yields at most 250 points.
+func validLokiStep(w http.ResponseWriter, raw string, startNs, endNs int64) bool {
+	if raw == "" {
+		return true
+	}
+	// Float seconds or a Prometheus duration, exactly as upstream's
+	// parseSecondsOrDuration accepts — the same pair the Prometheus `step` takes.
+	stepMs, err := parseDurationParam("step", raw)
+	if err != nil {
+		writeLokiError(w, http.StatusBadRequest, "invalid 'step' parameter: "+raw)
+		return false
+	}
+	if stepMs <= 0 {
+		writeLokiError(w, http.StatusBadRequest, "invalid 'step' parameter: must be greater than 0")
+		return false
+	}
+	// endNs >= startNs is already established, so a negative difference can only
+	// mean the span overflowed int64 — which is far past the limit either way.
+	rangeNs := endNs - startNs
+	if rangeNs < 0 || rangeNs/int64(time.Millisecond)/stepMs > maxLokiPoints {
+		writeLokiError(w, http.StatusBadRequest,
+			fmt.Sprintf("exceeded maximum resolution of %d points per timeseries; try decreasing the query resolution ('step')", maxLokiPoints))
+		return false
+	}
+	return true
 }
 
 // handleLokiQuery serves the instant query endpoint. It accepts two expression
