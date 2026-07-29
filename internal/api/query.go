@@ -10,6 +10,18 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 )
 
+// secondsToMillis converts float seconds to whole milliseconds. The int64
+// conversion is undefined for a float outside int64's range, so callers must
+// honour ok=false: without the bound, "1e300" would become a garbage bound or
+// step rather than a 400.
+func secondsToMillis(f float64) (int64, bool) {
+	ms := math.Round(f * 1000)
+	if math.IsNaN(ms) || math.IsInf(ms, 0) || ms > float64(math.MaxInt64) || ms < float64(math.MinInt64) {
+		return 0, false
+	}
+	return int64(ms), true
+}
+
 // parseTimeParam parses a Prometheus time parameter (time, start, end).
 // Accepts Unix timestamp as float seconds or RFC3339/RFC3339Nano.
 func parseTimeParam(name, s string) (int64, error) {
@@ -18,10 +30,11 @@ func parseTimeParam(name, s string) (int64, error) {
 	}
 	f, err := strconv.ParseFloat(s, 64)
 	if err == nil {
-		if math.IsNaN(f) || math.IsInf(f, 0) {
+		ms, ok := secondsToMillis(f)
+		if !ok {
 			return 0, fmt.Errorf("invalid parameter '%s': %s", name, s)
 		}
-		return int64(math.Round(f * 1000)), nil
+		return ms, nil
 	}
 	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
 		if t, err := time.Parse(layout, s); err == nil {
@@ -39,10 +52,11 @@ func parseDurationParam(name, s string) (int64, error) {
 	}
 	f, err := strconv.ParseFloat(s, 64)
 	if err == nil {
-		if math.IsNaN(f) || math.IsInf(f, 0) {
+		ms, ok := secondsToMillis(f)
+		if !ok {
 			return 0, fmt.Errorf("invalid parameter '%s': %s", name, s)
 		}
-		return int64(math.Round(f * 1000)), nil
+		return ms, nil
 	}
 	ms, err := metrics.ParsePromDuration(s)
 	if err != nil {
