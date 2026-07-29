@@ -856,21 +856,24 @@ func entryLines(t *testing.T, srv *api.Server, q url.Values) []string {
 
 // TestLokiQueryRange_Since covers Loki's `since`: a duration that positions
 // `start` relative to `end`. Ignoring it would quietly serve the one-hour
-// default instead of the requested window.
+// default instead of the requested window. Its smallest unit is a millisecond,
+// so this fixture is spaced in minutes rather than reusing twoStreams.
 func TestLokiQueryRange_Since(t *testing.T) {
+	const minute = int64(60 * time.Second)
 	srv := newLokiServer(t)
-	pushLogs(t, srv, twoStreams)
+	pushLogs(t, srv, fmt.Sprintf(
+		`{"streams":[{"stream":{"service":"api"},"values":[[%q,"old"],[%q,"mid"],[%q,"new"]]}]}`,
+		ns(0), ns(minute), ns(2*minute)))
 
-	// end at ns(300), since 150ns → [ns(150), ns(300)); the api stream's entries
-	// sit at 100/200/300, so only the middle one is in range. The default
-	// one-hour window would return all three.
+	// end at +2m, since 1m → [+1m, +2m): only "mid". The one-hour default would
+	// return all three, so a silently ignored `since` fails here.
 	q := url.Values{}
 	q.Set("query", `{service="api"}`)
-	q.Set("end", ns(300))
-	q.Set("since", "150ns")
+	q.Set("end", ns(2*minute))
+	q.Set("since", "1m")
 	q.Set("direction", "forward")
-	if got := entryLines(t, srv, q); len(got) != 1 || got[0] != "GET /b ok" {
-		t.Fatalf("since=150ns returned %v, want just the ns(200) entry", got)
+	if got := entryLines(t, srv, q); len(got) != 1 || got[0] != "mid" {
+		t.Fatalf(`since=1m returned %v, want just "mid"`, got)
 	}
 
 	// An explicit start supersedes since, per the upstream contract.
@@ -878,9 +881,27 @@ func TestLokiQueryRange_Since(t *testing.T) {
 	if got := entryLines(t, srv, q); len(got) != 2 {
 		t.Fatalf("start+since returned %v, want start to win with 2 entries", got)
 	}
+	q.Del("start")
 
-	// A malformed or negative duration is a 400 rather than a silent fallback.
-	for _, bad := range []string{"5", "5 minutes", "-5m"} {
+	// Units Go's time.ParseDuration rejects but Loki accepts, and the bare "0"
+	// that needs no unit at all. "0" collapses the window to [end, end).
+	// end stays at +2m and the range is half-open, so "new" is out either way.
+	q.Set("since", "1d")
+	if got := entryLines(t, srv, q); len(got) != 2 {
+		t.Errorf(`since=1d returned %v, want "old" and "mid"`, got)
+	}
+	q.Set("since", "1w")
+	if got := entryLines(t, srv, q); len(got) != 2 {
+		t.Errorf(`since=1w returned %v, want "old" and "mid"`, got)
+	}
+	q.Set("since", "0")
+	if got := entryLines(t, srv, q); len(got) != 0 {
+		t.Errorf("since=0 returned %v, want an empty window", got)
+	}
+
+	// Anything outside the Prometheus duration grammar is a 400 rather than a
+	// silent fallback — including "150ns" and "1.5h", which Go's parser accepts.
+	for _, bad := range []string{"5", "5 minutes", "-5m", "150ns", "1.5h", "30m1h"} {
 		q := url.Values{}
 		q.Set("query", `{service="api"}`)
 		q.Set("since", bad)
