@@ -745,7 +745,7 @@ func TestLokiQueryRange_TimestampFormats(t *testing.T) {
 		"9223372037",           // one second past the representable maximum
 		"9223372036854775808",  // one nanosecond past the representable maximum
 		"2300-01-01T00:00:00Z", // RFC3339 past year 2262
-		"1000-01-01T00:00:00Z", // RFC3339 before year 1678
+		"1000-01-01T00:00:00Z", // RFC3339 before the 1677 lower bound
 	} {
 		q := url.Values{}
 		q.Set("query", `{service="api"}`)
@@ -825,11 +825,107 @@ func TestLokiQueryRange_IntervalRejected(t *testing.T) {
 		t.Fatalf("interval error body = %q, want it to name the parameter", w.Body.String())
 	}
 
-	// step is accepted and ignored, matching Loki on a stream response.
+	// A valid step is accepted and has no effect on a stream response.
 	q.Del("interval")
 	q.Set("step", "5s")
 	if w := getLoki(t, srv, "/loki/api/v1/query_range", q); w.Code != 200 {
 		t.Fatalf("step code = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+}
+
+// TestLokiQueryRange_StepValidated covers the half of `step` that is not inert:
+// upstream shares one range-query parser across log and metric queries, so it
+// parses and range-checks `step` even though the value cannot shape a stream
+// response. Accepting garbage silently would diverge from that.
+func TestLokiQueryRange_StepValidated(t *testing.T) {
+	const ms = int64(time.Millisecond)
+	srv := newLokiServer(t)
+	pushLogs(t, srv, twoStreams)
+
+	base := func() url.Values {
+		q := url.Values{}
+		q.Set("query", `{service="api"}`)
+		q.Set("start", ns(0))
+		q.Set("end", ns(1000))
+		q.Set("direction", "forward")
+		return q
+	}
+
+	for _, bad := range []string{"bogus", "0", "-5", "-1m", "1e300", "5 minutes"} {
+		q := base()
+		q.Set("step", bad)
+		w := getLoki(t, srv, "/loki/api/v1/query_range", q)
+		if w.Code != 400 {
+			t.Errorf("step=%q code = %d, want 400", bad, w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "step") {
+			t.Errorf("step=%q error body = %q, want it to name the parameter", bad, w.Body.String())
+		}
+	}
+
+	// Both spellings upstream accepts: float seconds and a Prometheus duration.
+	// Neither thins the response — all three api entries still come back.
+	for _, good := range []string{"5", "0.5", "5s", "1m"} {
+		q := base()
+		q.Set("step", good)
+		if got := entryLines(t, srv, q); len(got) != 3 {
+			t.Errorf("step=%q returned %v, want all 3 entries unsampled", good, got)
+		}
+	}
+
+	// The 11,000-point safety limit, at its boundary. The literal is upstream's
+	// own constant, spelled out here so changing ours fails this parity test. An
+	// 11,000ms range stepped every 1ms is exactly at the cap; one wider is over.
+	const maxPoints = 11000
+	q := base()
+	q.Set("step", "1ms")
+	q.Set("end", ns(maxPoints*ms))
+	if w := getLoki(t, srv, "/loki/api/v1/query_range", q); w.Code != 200 {
+		t.Errorf("exactly %d points: code = %d, want 200; body = %s", maxPoints, w.Code, w.Body.String())
+	}
+	q.Set("end", ns((maxPoints+1)*ms))
+	w := getLoki(t, srv, "/loki/api/v1/query_range", q)
+	if w.Code != 400 {
+		t.Errorf("%d points: code = %d, want 400", maxPoints+1, w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "resolution") {
+		t.Errorf("over-limit body = %q, want it to mention the resolution limit", w.Body.String())
+	}
+}
+
+// TestLokiDirectionCaseInsensitive pins parity with upstream's parser, which
+// upper-cases the value before matching its enum. Grafana sends lowercase, so
+// only a hand-written client notices — but the API advertises Loki compatibility.
+func TestLokiDirectionCaseInsensitive(t *testing.T) {
+	srv := newLokiServer(t)
+	pushLogs(t, srv, twoStreams)
+
+	for _, dir := range []string{"FORWARD", "Forward", "fOrWaRd"} {
+		q := url.Values{}
+		q.Set("query", `{service="api"}`)
+		q.Set("start", ns(0))
+		q.Set("end", ns(1000))
+		q.Set("direction", dir)
+		got := entryLines(t, srv, q)
+		if len(got) != 3 || got[0] != "GET /a error" {
+			t.Errorf("direction=%q returned %v, want 3 entries oldest-first", dir, got)
+		}
+	}
+
+	// Backward, upper-cased, orders newest-first.
+	q := url.Values{}
+	q.Set("query", `{service="api"}`)
+	q.Set("start", ns(0))
+	q.Set("end", ns(1000))
+	q.Set("direction", "BACKWARD")
+	if got := entryLines(t, srv, q); len(got) != 3 || got[0] != "GET /c error" {
+		t.Errorf("direction=BACKWARD returned %v, want 3 entries newest-first", got)
+	}
+
+	// Still rejected when it is not a direction at all, whatever the casing.
+	q.Set("direction", "SIDEWAYS")
+	if w := getLoki(t, srv, "/loki/api/v1/query_range", q); w.Code != 400 {
+		t.Errorf("direction=SIDEWAYS code = %d, want 400", w.Code)
 	}
 }
 
