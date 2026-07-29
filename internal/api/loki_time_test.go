@@ -72,6 +72,55 @@ func TestParseLokiTime_Rejects(t *testing.T) {
 	}
 }
 
+// TestParseLokiStep pins that `step` is kept at nanosecond resolution, as
+// upstream does. A millisecond-rounded parser gets both directions wrong: it
+// rejects a legal 100µs step as zero, and rounds a 500µs step up to 1ms — which
+// halves the computed point count and lets an over-limit query through.
+func TestParseLokiStep(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		want int64
+	}{
+		// Float seconds, including sub-millisecond values.
+		{"5", 5_000_000_000},
+		{"0.5", 500_000_000},
+		{"0.0005", 500_000},
+		{"0.0001", 100_000},
+		{"1e-9", 1},
+		// The Prometheus duration grammar, same as `since`.
+		{"5s", 5_000_000_000},
+		{"1ms", 1_000_000},
+		{"1h30m", 5_400_000_000_000},
+		{"1d", 86_400_000_000_000},
+		{"0", 0},
+	} {
+		got, err := parseLokiStep(c.in)
+		if err != nil {
+			t.Errorf("parseLokiStep(%q) returned error %v, want %d", c.in, err, c.want)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("parseLokiStep(%q) = %d ns, want %d", c.in, got, c.want)
+		}
+	}
+
+	for _, bad := range []string{
+		"",
+		"bogus",
+		"5 minutes",
+		"1e300", // overflows nanoseconds on the float path
+		"NaN",
+		// Fits in int64 milliseconds but overflows int64 nanoseconds, which is
+		// the resolution the grammar actually works at. Upstream rejects it.
+		"106752d",
+		"99999999999w",
+	} {
+		if got, err := parseLokiStep(bad); err == nil {
+			t.Errorf("parseLokiStep(%q) = %d, want an error", bad, got)
+		}
+	}
+}
+
 // TestSinceStart covers the `since` duration arithmetic and, above all, the
 // grammar: upstream parses it with Prometheus's model.ParseDuration, so the
 // accepted set differs from Go's time.ParseDuration in both directions — `1d`
