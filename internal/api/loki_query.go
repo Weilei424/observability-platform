@@ -90,24 +90,41 @@ func parseLokiTime(s string) (int64, error) {
 // The grammar is Prometheus's, not Go's: upstream parses `since` with
 // prometheus/common's model.ParseDuration (pkg/loghttp/params.go), so `1d` and
 // `1w` are valid while `150ns` and `1.5h` are not, and a bare `0` is the one
-// value allowed without a unit. metrics.ParsePromDuration is that same grammar,
-// already implemented here for PromQL range selectors and the `step` parameter.
-// The grammar has no sign, so a negative duration is unrepresentable.
+// value allowed without a unit. metrics.ParsePromDurationNanos is that same
+// grammar at the same resolution. The grammar has no sign, so a negative
+// duration is unrepresentable.
 func sinceStart(s string, anchorNs int64) (int64, error) {
-	ms, err := metrics.ParsePromDuration(s)
+	ns, err := metrics.ParsePromDurationNanos(s)
 	if err != nil {
 		return 0, fmt.Errorf("%q is not a duration: want a Prometheus duration such as 5m, 1h30m, 1d, or 0", s)
 	}
-	// Both conversions below wrap rather than fail, and a wrapped bound is worse
-	// than an error: it lands somewhere plausible instead of returning a 400.
-	if ms < 0 || ms > math.MaxInt64/int64(time.Millisecond) {
-		return 0, fmt.Errorf("duration %q reaches outside the representable nanosecond range (1677-2262)", s)
-	}
-	ns := ms * int64(time.Millisecond)
+	// The subtraction wraps rather than fails, and a wrapped bound is worse than
+	// an error: it lands somewhere plausible instead of returning a 400.
 	if anchorNs < math.MinInt64+ns {
 		return 0, fmt.Errorf("duration %q reaches outside the representable nanosecond range (1677-2262)", s)
 	}
 	return anchorNs - ns, nil
+}
+
+// parseLokiStep parses `step` the way upstream's parseSecondsOrDuration does:
+// float seconds first, then the Prometheus duration grammar. It returns
+// **nanoseconds**, not milliseconds, because that is the resolution Loki keeps —
+// a sub-millisecond step is legal there and decides whether the points limit
+// trips. Rounding to milliseconds would reject a valid 100µs step and accept an
+// invalid 500µs one.
+func parseLokiStep(s string) (int64, error) {
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		ns := f * float64(time.Second)
+		// float64(math.MaxInt64) rounds *up* to 2^63, which is one past the last
+		// representable int64, so the upper bound has to exclude it. The lower
+		// bound is exactly -2^63 and is representable, so it stays inclusive.
+		if math.IsNaN(ns) || ns >= float64(math.MaxInt64) || ns < float64(math.MinInt64) {
+			return 0, fmt.Errorf("step %q is out of range", s)
+		}
+		// Truncate rather than round: upstream converts with time.Duration(ts).
+		return int64(ns), nil
+	}
+	return metrics.ParsePromDurationNanos(s)
 }
 
 func parseLokiLimit(s string) (int, error) {
@@ -297,21 +314,20 @@ func validLokiStep(w http.ResponseWriter, raw string, startNs, endNs int64) bool
 	if raw == "" {
 		return true
 	}
-	// Float seconds or a Prometheus duration, exactly as upstream's
-	// parseSecondsOrDuration accepts — the same pair the Prometheus `step` takes.
-	stepMs, err := parseDurationParam("step", raw)
+	stepNs, err := parseLokiStep(raw)
 	if err != nil {
 		writeLokiError(w, http.StatusBadRequest, "invalid 'step' parameter: "+raw)
 		return false
 	}
-	if stepMs <= 0 {
+	if stepNs <= 0 {
 		writeLokiError(w, http.StatusBadRequest, "invalid 'step' parameter: must be greater than 0")
 		return false
 	}
 	// endNs >= startNs is already established, so a negative difference can only
 	// mean the span overflowed int64 — which is far past the limit either way.
+	// The division is upstream's `end.Sub(start) / step`, both sides in ns.
 	rangeNs := endNs - startNs
-	if rangeNs < 0 || rangeNs/int64(time.Millisecond)/stepMs > maxLokiPoints {
+	if rangeNs < 0 || rangeNs/stepNs > maxLokiPoints {
 		writeLokiError(w, http.StatusBadRequest,
 			fmt.Sprintf("exceeded maximum resolution of %d points per timeseries; try decreasing the query resolution ('step')", maxLokiPoints))
 		return false
