@@ -237,12 +237,17 @@ checksummed, so a v1 rebuild must fully decode rather than peek).
   defaults (100 / backward), and **plain-text** error bodies (deliberately distinct from
   the Prometheus JSON error envelope). Label endpoints accept but ignore `start`/`end`
   this phase. `GET`-only is sufficient: Grafana's Loki backend never posts.
-- `query_range` time bounds follow upstream precedence: an explicit `start` beats
-  `since` (a duration), which beats the one-hour default. A relative start is measured
-  from `min(end, now)`, so `end` in the future still means "the last hour of data"
-  rather than an empty future window. `step` is accepted and ignored (Loki does the same
-  on a stream response); `interval` is **rejected** with a 400, because ignoring it would
-  return more entries than asked for while looking like it worked.
+- `query_range` time bounds follow upstream precedence (`determineBounds` in
+  `pkg/loghttp/params.go`): an explicit `start` beats `since` (a duration), which beats
+  the one-hour default. A relative start is measured from `min(end, now)`, so `end` in
+  the future still means "the last hour of data" rather than an empty future window.
+  `since` uses the **Prometheus** duration grammar, not Go's — Loki parses it with
+  `model.ParseDuration`, so `1d`/`1w`/`1y` and a bare `0` are valid while `150ns` and
+  `1.5h` are not. `metrics.ParsePromDuration` is that grammar, already in the tree for
+  PromQL range selectors and `step`, so the Loki path reuses it rather than promoting
+  `prometheus/common` to a direct dependency. `step` is accepted and ignored (Loki does
+  the same on a stream response); `interval` is **rejected** with a 400, because ignoring
+  it would return more entries than asked for while looking like it worked.
 
 ---
 
