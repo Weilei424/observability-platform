@@ -72,9 +72,10 @@ func TestParseLokiTime_Rejects(t *testing.T) {
 	}
 }
 
-// TestSinceStart covers the `since` duration arithmetic, including the
-// underflow guard that keeps a far-reaching duration from wrapping into a
-// bogus (and much later) start bound.
+// TestSinceStart covers the `since` duration arithmetic and, above all, the
+// grammar: upstream parses it with Prometheus's model.ParseDuration, so the
+// accepted set differs from Go's time.ParseDuration in both directions — `1d`
+// and `1w` are Loki-valid and Go-invalid, `150ns` and `1.5h` are the reverse.
 func TestSinceStart(t *testing.T) {
 	const anchor int64 = 1_700_000_000_000_000_000
 
@@ -82,10 +83,14 @@ func TestSinceStart(t *testing.T) {
 		in   string
 		want int64
 	}{
-		{"0s", anchor},
+		{"0", anchor}, // the one value allowed without a unit
+		{"500ms", anchor - 500_000_000},
 		{"5m", anchor - 300_000_000_000},
 		{"1h30m", anchor - 5_400_000_000_000},
-		{"200ns", anchor - 200},
+		// Valid upstream, rejected by Go's parser, which stops at hours.
+		{"1d", anchor - 86_400_000_000_000},
+		{"1w", anchor - 604_800_000_000_000},
+		{"1y", anchor - 31_536_000_000_000_000},
 	} {
 		got, err := sinceStart(c.in, anchor)
 		if err != nil {
@@ -102,10 +107,17 @@ func TestSinceStart(t *testing.T) {
 		anchor int64
 	}{
 		{"", anchor},
-		{"5", anchor},          // unitless
-		{"5 minutes", anchor},  // not a Go duration
-		{"-5m", anchor},        // negative: `since` already measures backwards
-		{"2562047h", -1 << 62}, // ~292 years back from an already-early anchor
+		{"5", anchor},         // unitless and nonzero
+		{"5 minutes", anchor}, // not a duration at all
+		{"-5m", anchor},       // the grammar has no sign
+		// Accepted by Go's parser, rejected upstream: sub-millisecond units and
+		// fractional values are outside the Prometheus grammar.
+		{"150ns", anchor},
+		{"1.5h", anchor},
+		{"30m1h", anchor},   // units must run longest-to-shortest
+		{"99999999999w", 0}, // overflows int64 milliseconds while parsing
+		{"106752d", 0},      // fits in milliseconds, overflows the ns conversion
+		{"8000w", -1 << 62}, // reaches past the low end of the ns window
 	} {
 		if got, err := sinceStart(bad.in, bad.anchor); err == nil {
 			t.Errorf("sinceStart(%q, %d) = %d, want an error", bad.in, bad.anchor, got)
