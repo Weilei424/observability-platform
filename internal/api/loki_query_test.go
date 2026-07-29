@@ -851,7 +851,7 @@ func TestLokiQueryRange_StepValidated(t *testing.T) {
 		return q
 	}
 
-	for _, bad := range []string{"bogus", "0", "-5", "-1m", "1e300", "5 minutes"} {
+	for _, bad := range []string{"bogus", "0", "-5", "-1m", "1e300", "5 minutes", "106752d"} {
 		q := base()
 		q.Set("step", bad)
 		w := getLoki(t, srv, "/loki/api/v1/query_range", q)
@@ -890,6 +890,24 @@ func TestLokiQueryRange_StepValidated(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "resolution") {
 		t.Errorf("over-limit body = %q, want it to mention the resolution limit", w.Body.String())
+	}
+
+	// Sub-millisecond steps, where rounding to milliseconds gets the verdict
+	// wrong in *both* directions. 6s at 500µs is 12,000 points and must be
+	// rejected; rounding 0.0005 up to 1ms would compute 6,000 and allow it.
+	q = base()
+	q.Set("step", "0.0005")
+	q.Set("end", ns(6*int64(time.Second)))
+	if w := getLoki(t, srv, "/loki/api/v1/query_range", q); w.Code != 400 {
+		t.Errorf("6s range at 500µs (12,000 points): code = %d, want 400", w.Code)
+	}
+	// 1s at 100µs is 10,000 points and must be allowed; rounding 0.0001 down to
+	// zero would reject it as a non-positive step.
+	q = base()
+	q.Set("step", "0.0001")
+	q.Set("end", ns(int64(time.Second)))
+	if w := getLoki(t, srv, "/loki/api/v1/query_range", q); w.Code != 200 {
+		t.Errorf("1s range at 100µs (10,000 points): code = %d, want 200; body = %s", w.Code, w.Body.String())
 	}
 }
 
