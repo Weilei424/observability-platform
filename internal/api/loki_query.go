@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/masonwheeler/observability-platform/internal/logs"
+	"github.com/masonwheeler/observability-platform/internal/metrics"
 )
 
 // maxEpochSeconds is the largest whole-second epoch whose nanosecond count still
@@ -80,22 +81,30 @@ func parseLokiTime(s string) (int64, error) {
 	return 0, fmt.Errorf("invalid timestamp %q: want a Unix epoch (seconds, float seconds, or nanoseconds) or RFC3339", s)
 }
 
-// sinceStart resolves Loki's `since` parameter — a Go duration measured back
-// from anchorNs — into an absolute start timestamp.
+// sinceStart resolves Loki's `since` parameter — a duration measured back from
+// anchorNs — into an absolute start timestamp.
+//
+// The grammar is Prometheus's, not Go's: upstream parses `since` with
+// prometheus/common's model.ParseDuration (pkg/loghttp/params.go), so `1d` and
+// `1w` are valid while `150ns` and `1.5h` are not, and a bare `0` is the one
+// value allowed without a unit. metrics.ParsePromDuration is that same grammar,
+// already implemented here for PromQL range selectors and the `step` parameter.
+// The grammar has no sign, so a negative duration is unrepresentable.
 func sinceStart(s string, anchorNs int64) (int64, error) {
-	d, err := time.ParseDuration(s)
+	ms, err := metrics.ParsePromDuration(s)
 	if err != nil {
-		return 0, fmt.Errorf("%q is not a duration: want a Go duration such as 5m or 1h30m", s)
+		return 0, fmt.Errorf("%q is not a duration: want a Prometheus duration such as 5m, 1h30m, 1d, or 0", s)
 	}
-	if d < 0 {
-		return 0, fmt.Errorf("duration %q is negative: 'since' measures backwards from 'end' already", s)
-	}
-	// anchorNs-d underflows once the duration reaches past the low end of the
-	// int64 window; wrapping would silently produce a bogus bound instead of a 400.
-	if anchorNs < math.MinInt64+int64(d) {
+	// Both conversions below wrap rather than fail, and a wrapped bound is worse
+	// than an error: it lands somewhere plausible instead of returning a 400.
+	if ms < 0 || ms > math.MaxInt64/int64(time.Millisecond) {
 		return 0, fmt.Errorf("duration %q reaches outside the representable nanosecond range (1678-2262)", s)
 	}
-	return anchorNs - int64(d), nil
+	ns := ms * int64(time.Millisecond)
+	if anchorNs < math.MinInt64+ns {
+		return 0, fmt.Errorf("duration %q reaches outside the representable nanosecond range (1678-2262)", s)
+	}
+	return anchorNs - ns, nil
 }
 
 func parseLokiLimit(s string) (int, error) {
