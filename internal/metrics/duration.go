@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 )
 
@@ -18,11 +19,17 @@ var promDurationUnit = map[string]struct {
 	"ms": {1, 1},
 }
 
-// ParsePromDuration parses a Prometheus duration string like "15s", "1m", "1h30m".
-// Units must appear in strictly decreasing order (longest-to-shortest) with no repeats.
+// ParsePromDuration parses a Prometheus duration string like "15s", "1m", "1h30m",
+// returning milliseconds. Units must appear in strictly decreasing order
+// (longest-to-shortest) with no repeats. This mirrors prometheus/common's
+// model.ParseDuration, which is also the grammar Loki uses for `since`.
 func ParsePromDuration(s string) (int64, error) {
 	if s == "" {
 		return 0, fmt.Errorf("empty duration")
+	}
+	// Prometheus allows a bare "0" without a unit, and only that value.
+	if s == "0" {
+		return 0, nil
 	}
 	var total int64
 	remaining := s
@@ -58,6 +65,11 @@ func ParsePromDuration(s string) (int64, error) {
 			return 0, fmt.Errorf("unit %q out of order or repeated in %q", unit, s)
 		}
 		lastRank = u.rank
+		// Overflow wraps to a plausible-looking (often smaller) millisecond count,
+		// which would silently become a valid range window or query bound.
+		if n > (math.MaxInt64-total)/u.mult {
+			return 0, fmt.Errorf("duration %q overflows int64 milliseconds", s)
+		}
 		total += n * u.mult
 	}
 	return total, nil
