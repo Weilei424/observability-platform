@@ -14,9 +14,16 @@ import (
 // conversion is undefined for a float outside int64's range, so callers must
 // honour ok=false: without the bound, "1e300" would become a garbage bound or
 // step rather than a 400.
+//
+// The upper bound is **exclusive** because float64(math.MaxInt64) rounds up to
+// 2^63 — one past the last representable int64. An inclusive `>` therefore lets
+// exactly 2^63 through, and "9223372036854775" (whose ×1000 lands on it) wraps
+// to MinInt64: a far-future timestamp comes back as a far-past one. The lower
+// bound stays inclusive since float64(math.MinInt64) is exactly -2^63, which
+// int64 does represent.
 func secondsToMillis(f float64) (int64, bool) {
 	ms := math.Round(f * 1000)
-	if math.IsNaN(ms) || math.IsInf(ms, 0) || ms > float64(math.MaxInt64) || ms < float64(math.MinInt64) {
+	if math.IsNaN(ms) || ms >= float64(math.MaxInt64) || ms < float64(math.MinInt64) {
 		return 0, false
 	}
 	return int64(ms), true
