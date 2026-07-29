@@ -243,7 +243,7 @@ checksummed, so a v1 rebuild must fully decode rather than peek).
   the future still means "the last hour of data" rather than an empty future window.
   `since` uses the **Prometheus** duration grammar, not Go's — Loki parses it with
   `model.ParseDuration`, so `1d`/`1w`/`1y` and a bare `0` are valid while `150ns` and
-  `1.5h` are not. `metrics.ParsePromDuration` is that grammar, already in the tree for
+  `1.5h` are not. `metrics.ParsePromDurationNanos` is that grammar, already in the tree for
   PromQL range selectors and `step`, so the Loki path reuses it rather than promoting
   `prometheus/common` to a direct dependency.
 - `step` has **no effect** on a stream response, but it is still parsed and validated,
@@ -254,6 +254,16 @@ checksummed, so a v1 rebuild must fully decode rather than peek).
   it from the range (`max(floor(rangeSeconds/250), 1)` seconds), which cannot trip
   either rule. `interval` is **rejected** with a 400, because ignoring it would return
   more entries than asked for while looking like it worked.
+- `step` is parsed at **nanosecond** resolution (`parseLokiStep`), not the millisecond
+  resolution the Prometheus query path uses. Loki keeps a `time.Duration`, so a
+  sub-millisecond step is legal and decides whether the points limit trips: `0.0001`
+  over a 1s range is a valid 10,000 points, and `0.0005` over 6s is an invalid 12,000.
+  Rounding to milliseconds gets *both* wrong — the first becomes a zero step and is
+  rejected, the second doubles to 1ms and is allowed. This is why
+  `metrics.ParsePromDuration` is a thin millisecond wrapper over
+  `ParsePromDurationNanos` rather than the other way round; the nanosecond form is also
+  what makes the grammar's range checks match upstream (`106752d` fits in int64
+  milliseconds but overflows int64 nanoseconds, and upstream rejects it).
 - `direction` is matched case-insensitively, as upstream does by upper-casing the value
   before looking up its protobuf enum. Grafana sends lowercase, so this only matters to
   hand-written clients — but the API advertises Loki compatibility.
