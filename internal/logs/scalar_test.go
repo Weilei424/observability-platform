@@ -14,8 +14,41 @@ func TestParseScalarQuery_GrafanaHealthCheck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("health-check query rejected: %v", err)
 	}
-	if got != 2 {
-		t.Fatalf("vector(1)+vector(1) = %v, want 2", got)
+	if got.Value != 2 {
+		t.Fatalf("vector(1)+vector(1) = %v, want 2", got.Value)
+	}
+	if !got.HasVector {
+		t.Fatal("vector(1)+vector(1) must report HasVector so the handler answers resultType:\"vector\"")
+	}
+}
+
+// TestParseScalarQuery_ResultKind pins which expressions are LiteralExprs and
+// which are VectorExprs, because the two answer different Loki result types even
+// though they carry the same number. Reporting the wrong one is invisible to a
+// value-only assertion and visible to any client that switches on resultType.
+func TestParseScalarQuery_ResultKind(t *testing.T) {
+	for _, c := range []struct {
+		q             string
+		wantHasVector bool
+	}{
+		{"1+1", false},
+		{"1", false},
+		{"-2.5", false},
+		{"(1+2)*3", false},
+		{"vector(1)", true},
+		{"vector(1)+vector(1)", true},
+		// A literal mixed with a vector() is still a VectorExpr upstream.
+		{"vector(1)+1", true},
+		{"1+vector(1)", true},
+	} {
+		got, err := ParseScalarQuery(c.q)
+		if err != nil {
+			t.Errorf("ParseScalarQuery(%q) error: %v", c.q, err)
+			continue
+		}
+		if got.HasVector != c.wantHasVector {
+			t.Errorf("ParseScalarQuery(%q).HasVector = %v, want %v", c.q, got.HasVector, c.wantHasVector)
+		}
 	}
 }
 
@@ -41,8 +74,8 @@ func TestParseScalarQuery_Arithmetic(t *testing.T) {
 			t.Errorf("ParseScalarQuery(%q) error: %v", c.q, err)
 			continue
 		}
-		if got != c.want {
-			t.Errorf("ParseScalarQuery(%q) = %v, want %v", c.q, got, c.want)
+		if got.Value != c.want {
+			t.Errorf("ParseScalarQuery(%q) = %v, want %v", c.q, got.Value, c.want)
 		}
 	}
 }
@@ -54,8 +87,8 @@ func TestParseScalarQuery_DivideByZero(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !math.IsInf(got, 1) {
-		t.Fatalf("vector(1)/vector(0) = %v, want +Inf", got)
+	if !math.IsInf(got.Value, 1) {
+		t.Fatalf("vector(1)/vector(0) = %v, want +Inf", got.Value)
 	}
 }
 
@@ -105,8 +138,8 @@ func TestParseScalarQuery_VectorTakesANumber(t *testing.T) {
 		{`vector(1)+vector(1)`, 2},
 	} {
 		got, err := ParseScalarQuery(c.q)
-		if err != nil || got != c.want {
-			t.Errorf("ParseScalarQuery(%q) = %v, %v; want %v, nil", c.q, got, err, c.want)
+		if err != nil || got.Value != c.want {
+			t.Errorf("ParseScalarQuery(%q) = %v, %v; want %v, nil", c.q, got.Value, err, c.want)
 		}
 	}
 }
