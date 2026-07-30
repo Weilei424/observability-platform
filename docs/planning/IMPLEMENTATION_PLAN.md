@@ -414,6 +414,29 @@ Development is **single-node first**. Distributed mode only begins after ingesti
 - Logs appear in Grafana Explore.
 - User can filter logs by service/level and search text.
 
+### Phase 4.6 — LogQL Metric Queries
+
+**Goal:** Serve the metric-query subset Grafana needs for log-volume visualization.
+
+**Scope:**
+- Parse `count_over_time({...}[<range>])` and `sum by (<labels>) (...)`.
+- Evaluate range vectors over stored entries with step bucketing.
+- Add the `resultType: "matrix"` response envelope.
+- Route metric expressions on `query_range`; keep every other metric function on an
+  explicit error.
+
+**DoD:**
+- `sum by (level) (count_over_time({service="api"}[5m]))` returns a matrix.
+- Grafana Explore's log-volume histogram renders instead of showing an error.
+- Still-unsupported LogQL (`rate`, `unwrap`, pipelines, regex label matchers) returns
+  explicit errors.
+- Tests cover parsing, step bucketing boundaries, and grouped counts.
+
+**Why this exists:** Grafana Explore issues a log-volume query automatically for every
+Loki query. Phase 4.5 documented the resulting 400 as intended behavior; this phase
+closes the gap. It is a query-engine feature, so it was deliberately kept out of the
+4.5 demo phase.
+
 ---
 
 ## Phase 5 — Packaging, Kubernetes, and Operational Demo
