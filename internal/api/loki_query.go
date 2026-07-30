@@ -369,13 +369,19 @@ func (s *Server) handleLokiQuery(w http.ResponseWriter, r *http.Request) {
 
 	// A query that does not open with a stream selector is a metric query; only
 	// the constant subset is supported and everything else errors explicitly.
+	// The result type follows the expression's shape, as upstream's does: a
+	// literal-only expression is a scalar, anything mentioning vector() a vector.
 	if trimmed := strings.TrimSpace(queryStr); trimmed != "" && trimmed[0] != '{' {
-		value, err := logs.ParseScalarQuery(trimmed)
+		res, err := logs.ParseScalarQuery(trimmed)
 		if err != nil {
 			writeLokiError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		writeLokiVector(w, timeNs, value)
+		if res.HasVector {
+			writeLokiVector(w, timeNs, res.Value)
+		} else {
+			writeLokiScalar(w, timeNs, res.Value)
+		}
 		return
 	}
 
