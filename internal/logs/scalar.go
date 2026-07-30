@@ -24,28 +24,42 @@ import (
 // vector() takes a bare number, matching upstream LogQL's
 // `vector OPEN_PARENTHESIS NUMBER CLOSE_PARENTHESIS`.
 
-// ParseScalarQuery evaluates a constant metric query and returns its value. Any
-// identifier other than vector() — i.e. every query that would have to read
-// stored samples — returns errUnsupportedMetricQuery.
-func ParseScalarQuery(q string) (float64, error) {
+// ScalarResult is an evaluated constant metric query.
+//
+// HasVector selects the Loki result type, which upstream derives from the AST
+// node rather than the value: a literal-only expression is a LiteralExpr and
+// answers `resultType: "scalar"`, while any expression mentioning vector() is a
+// VectorExpr and answers `resultType: "vector"` (pkg/logql/engine.go). Both
+// carry the same number, so collapsing the distinction is invisible until a
+// client switches on the type — which is exactly what Grafana's datasource does.
+type ScalarResult struct {
+	Value     float64
+	HasVector bool
+}
+
+// ParseScalarQuery evaluates a constant metric query. Any identifier other than
+// vector() — i.e. every query that would have to read stored samples — returns
+// errUnsupportedMetricQuery.
+func ParseScalarQuery(q string) (ScalarResult, error) {
 	p := &scalarParser{s: strings.TrimSpace(q)}
 	if p.s == "" {
-		return 0, fmt.Errorf("parse error: empty query")
+		return ScalarResult{}, fmt.Errorf("parse error: empty query")
 	}
 	v, err := p.expr()
 	if err != nil {
-		return 0, err
+		return ScalarResult{}, err
 	}
 	p.skipSpace()
 	if p.i != len(p.s) {
-		return 0, fmt.Errorf("parse error: unexpected %q after expression", p.s[p.i:])
+		return ScalarResult{}, fmt.Errorf("parse error: unexpected %q after expression", p.s[p.i:])
 	}
-	return v, nil
+	return ScalarResult{Value: v, HasVector: p.hasVector}, nil
 }
 
 type scalarParser struct {
-	s string
-	i int
+	s         string
+	i         int
+	hasVector bool // any vector() seen, making the whole expression a VectorExpr
 }
 
 func (p *scalarParser) skipSpace() { p.i = skipSpace(p.s, p.i) }
@@ -150,6 +164,7 @@ func (p *scalarParser) call() (float64, error) {
 	if name != "vector" {
 		return 0, errUnsupportedMetricQuery
 	}
+	p.hasVector = true
 	p.i = skipSpace(p.s, next)
 	if p.i >= len(p.s) || p.s[p.i] != '(' {
 		return 0, fmt.Errorf("parse error: expected '(' after %q", name)
