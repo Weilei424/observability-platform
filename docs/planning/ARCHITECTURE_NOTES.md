@@ -213,7 +213,13 @@ checksummed, so a v1 rebuild must fully decode rather than peek).
 - `internal/logs/scalar.go` — constant metric queries (`vector(N)` with `+ - * /`),
   accepted **only** on instant `/query`. This exists solely so Grafana's Loki datasource
   health check (`vector(1)+vector(1)` must equal 2) passes; it reads no stored data, and
-  `rate`/`sum`/`count_over_time` still return the explicit unsupported error.
+  `rate`/`sum`/`count_over_time` still return the explicit unsupported error. The
+  envelope's **result type follows the expression shape**, as upstream derives it from the
+  AST: a literal-only expression (`1+1`) is a LogQL LiteralExpr and answers
+  `resultType: "scalar"` with a bare `[ts, "value"]` pair, while anything mentioning
+  `vector()` is a VectorExpr and answers `resultType: "vector"`. Both carry the same
+  number, so collapsing them is invisible until a client switches on the type —
+  `ScalarResult.HasVector` keeps them apart.
 - `internal/logs/query.go` — `QueryEngine` over a `Reader` interface (`*logs.Store`
   satisfies it): match streams by label → read entries → line-filter → cap per stream →
   global order-by-direction + limit → regroup by stream. `QueryRange` is half-open
