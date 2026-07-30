@@ -618,6 +618,55 @@ func TestLokiInstantQuery_GrafanaHealthCheck(t *testing.T) {
 	}
 }
 
+// TestLokiInstantQuery_LiteralIsScalar pins the result *type* for a literal-only
+// expression. Upstream derives it from the AST — LiteralExpr answers "scalar",
+// VectorExpr "vector" (pkg/logql/engine.go) — and both carry the same number, so
+// answering "vector" for `1+1` is invisible to a value assertion and wrong to any
+// client that switches on resultType.
+func TestLokiInstantQuery_LiteralIsScalar(t *testing.T) {
+	srv := newLokiServer(t)
+
+	q := url.Values{}
+	q.Set("query", "1+1")
+	q.Set("time", strconv.FormatInt(time.Unix(4, 0).UnixNano(), 10))
+	w := getLoki(t, srv, "/loki/api/v1/query", q)
+	if w.Code != 200 {
+		t.Fatalf("code = %d, body = %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Status string `json:"status"`
+		Data   struct {
+			ResultType string `json:"resultType"`
+			Result     [2]any `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Status != "success" || resp.Data.ResultType != "scalar" {
+		t.Fatalf("envelope = %+v, want success/scalar", resp)
+	}
+	// A bare [ts, "value"] pair, not a list of samples.
+	if ts, ok := resp.Data.Result[0].(float64); !ok || ts != 4e9 {
+		t.Fatalf("scalar timestamp = %v, want 4e9", resp.Data.Result[0])
+	}
+	if v, ok := resp.Data.Result[1].(string); !ok || v != "2" {
+		t.Fatalf("scalar value = %v, want the string \"2\"", resp.Data.Result[1])
+	}
+
+	// The vector-bearing form still answers "vector" — the two must not collapse
+	// onto one type in either direction.
+	q.Set("query", "vector(1)+1")
+	w = getLoki(t, srv, "/loki/api/v1/query", q)
+	var vresp lokiVectorResp
+	if err := json.Unmarshal(w.Body.Bytes(), &vresp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if vresp.Data.ResultType != "vector" || len(vresp.Data.Result) != 1 {
+		t.Fatalf("vector(1)+1 envelope = %+v, want one vector sample", vresp.Data)
+	}
+}
+
 // TestLokiInstantQuery_UnsupportedMetricQuery guards the shim's boundary: a
 // query that would have to read stored samples still fails explicitly.
 func TestLokiInstantQuery_UnsupportedMetricQuery(t *testing.T) {
