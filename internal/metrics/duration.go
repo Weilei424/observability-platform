@@ -82,10 +82,13 @@ func ParsePromDurationNanos(s string) (int64, error) {
 			return 0, fmt.Errorf("unit %q out of order or repeated in %q", unit, s)
 		}
 		lastRank = u.rank
-		// Overflow wraps to a plausible-looking (often smaller) millisecond count,
-		// which would silently become a valid range window or query bound.
+		// Overflow wraps to a plausible-looking (often much smaller) nanosecond
+		// count, which would silently become a valid range window, step, or query
+		// bound. Upstream range-checks the same way, per unit and cumulatively.
+		// The unit matters: "106752d" fits in int64 milliseconds but not in int64
+		// nanoseconds, and nanoseconds is the resolution the grammar works at.
 		if n > (math.MaxInt64-total)/u.mult {
-			return 0, fmt.Errorf("duration %q overflows int64 milliseconds", s)
+			return 0, fmt.Errorf("duration %q overflows int64 nanoseconds", s)
 		}
 		total += n * u.mult
 	}
