@@ -909,6 +909,24 @@ func TestLokiQueryRange_StepValidated(t *testing.T) {
 	if w := getLoki(t, srv, "/loki/api/v1/query_range", q); w.Code != 200 {
 		t.Errorf("1s range at 100µs (10,000 points): code = %d, want 200; body = %s", w.Code, w.Body.String())
 	}
+
+	// The widest expressible range: end-start exceeds int64 nanoseconds and wraps.
+	// Upstream computes the span with time.Time.Sub, which saturates at the
+	// maximum Duration, so a ~292-year step yields one point and is accepted.
+	// Treating the wrapped negative as "over the limit" would 400 instead.
+	q = base()
+	q.Set("start", "-9223372036854775808")
+	q.Set("end", "9223372036854775807")
+	q.Set("step", "2562047h")
+	if w := getLoki(t, srv, "/loki/api/v1/query_range", q); w.Code != 200 {
+		t.Errorf("saturated full-range span at a 292-year step: code = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+	// The saturation must not become a blanket pass: the same span with a fine
+	// step is still far over the limit.
+	q.Set("step", "1s")
+	if w := getLoki(t, srv, "/loki/api/v1/query_range", q); w.Code != 400 {
+		t.Errorf("saturated full-range span at a 1s step: code = %d, want 400", w.Code)
+	}
 }
 
 // TestLokiDirectionCaseInsensitive pins parity with upstream's parser, which
