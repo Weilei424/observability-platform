@@ -405,12 +405,48 @@ Design: `docs/superpowers/specs/2026-07-25-phase-4.4-loki-query-api-design.md` �
 - [x] Verify: `go build ./...`, `go vet ./...`, `golangci-lint run`, `go test ./...` green
 
 ### Phase 4.5 — Grafana Logs Demo
-- [ ] Add Grafana datasource provisioning for Loki-compatible endpoint
-- [ ] Add sample app log generator
-- [ ] Add docs for Grafana Explore workflow
-- [ ] Verify: Grafana Loki datasource connects
-- [ ] Verify: logs appear in Grafana Explore
-- [ ] Verify: user can filter logs by service/level and search text
+Design: `docs/superpowers/specs/2026-07-30-phase-4.5-grafana-logs-demo-design.md` · Plan: `docs/superpowers/plans/2026-07-30-phase-4.5-grafana-logs-demo.md`
+
+**Sample app log generator** *(no backend code changes this phase)*
+- [ ] `examples/sample-app/main.go` — logs-only generator pushing five streams (`service` ∈ {api, worker} × `level` ∈ {info, warn, error}, constant `env=local`) to `POST /loki/api/v1/push`; plain-text lines (never JSON/logfmt, which are unsupported pipelines); `-addr`/`OBS_BACKEND_ADDR`, `-rate` (default 2 batches/s), `-duration`; log-and-continue on push failure. Emits **no metrics** — a second writer on `http_requests_total{service="api"}` would corrupt `rate()`; app metrics move here in Phase 5.1
+- [ ] `examples/sample-app/main_test.go` — decode the generated payload and run it through the real `logs.NewStreamLabels` / `logs.ValidateEntry`; pin the five-stream set and per-stream grouping
+
+**Packaging**
+- [ ] `deployments/docker/Dockerfile` — build `/sampleapp`; add the `sampleapp` distroless runtime stage
+- [ ] `deployments/docker/docker-compose.yml` — add the `sample-app` service; set `OBS_LOGS_FLUSH_THRESHOLD_BYTES: "16384"` on `backend` so the demo actually exercises the 4.3 chunk/index path instead of serving everything from the head buffer
+- [ ] `.gitignore` — ignore the locally built `sample-app` binary
+
+**Grafana provisioning**
+- [ ] `observability/grafana/datasources/loki.yml` — `observability-platform-logs`, `type: loki`, `uid: obs-loki`, `url: http://backend:8080`, `maxLines: 1000`
+- [ ] `observability/grafana/dashboards/logs.json` — `obs-logs-v1`: two logs panels plus a supported-subset text panel, driven by `service`/`level` `label_values` query variables (**single-select — *All* would emit an unsupported regex label matcher**) and a `search` textbox feeding `|= "$search"`
+
+**Smoke test, docs, cross-links**
+- [ ] `tests/e2e/logs_smoke.sh` — 16 checks under an isolated `service="smoke-test"` + per-run `run_id`: push → 204, streams envelope, `level=` narrowing, `|=` and `|~` filters, `/labels` + `/label/service/values`, **Grafana's exact datasource health-check request** (`vector(1)+vector(1)` at `time=4000000000` → `"value":[4,"2"]`), and metric LogQL → 400
+- [ ] `Makefile` — add `smoke-logs`; `smoke` runs metrics then logs
+- [ ] `docs/runbooks/grafana-logs-demo.md` — datasource test, Explore ladder, dashboard walkthrough, and the known-limitations table
+- [ ] `docs/runbooks/grafana-demo.md` + `README.md` — four services, cross-links to the logs runbook
+- [ ] `docs/planning/ARCHITECTURE_NOTES.md` — "Grafana demo assets (introduced in 4.5)": both datasource UIDs on one backend port, both dashboard UIDs, the demo-only flush override, and the known Loki gaps
+
+**Verify**
+- [ ] Verify: `go build ./...`, `go vet ./...`, `golangci-lint run`, `go test ./...` green
+- [ ] Verify: `make smoke` exits 0 against a locally run backend (metrics checks then logs checks)
+- [ ] Verify: every LogQL example in the runbook returns 200 (no example teaches a rejected query)
+- [ ] Verify *(requires Docker)*: `make local-up` builds and starts four services
+- [ ] Verify *(requires Docker)*: Loki datasource **Save & test** returns success
+- [ ] Verify *(requires Docker)*: logs appear in Grafana Explore; service/level/text filters narrow
+- [ ] Verify *(requires Docker)*: logs dashboard variables populate and both logs panels render
+
+### Phase 4.6 — LogQL Metric Queries
+- [ ] Parse the metric-query subset: `count_over_time({...}[<range>])` and `sum by (<labels>) (...)`
+- [ ] Evaluate range vectors over stored entries: step bucketing across `[start, end)`, per-step counts per stream
+- [ ] `resultType: "matrix"` response envelope (`values: [[<epoch seconds>, "<value>"]]`)
+- [ ] `query_range` routes metric expressions to the metric path; log expressions unchanged
+- [ ] Keep every still-unsupported feature on an explicit error (`rate`, `bytes_over_time`, `unwrap`, pipelines, regex label matchers)
+- [ ] Unit tests: parser accept/reject, step bucketing boundaries, `sum by` grouping, empty ranges
+- [ ] Integration test: Grafana's log-volume query `sum by (level) (count_over_time({service="api"}[5m]))` returns a matrix
+- [ ] Update `tests/e2e/logs_smoke.sh` — the check that currently asserts 400 for metric LogQL becomes a success assertion
+- [ ] Update `docs/runbooks/grafana-logs-demo.md` and `ARCHITECTURE_NOTES.md` — remove the log-volume gap from the limitations table
+- [ ] Verify *(requires Docker)*: Explore's log-volume histogram renders instead of erroring
 
 ---
 
