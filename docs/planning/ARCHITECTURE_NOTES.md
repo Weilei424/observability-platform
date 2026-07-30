@@ -252,8 +252,11 @@ checksummed, so a v1 rebuild must fully decode rather than peek).
   timeseries safety limit enforced. Accepting `step=bogus` with a 200 would be the
   divergence, not the leniency. An absent `step` needs no check — upstream then derives
   it from the range (`max(floor(rangeSeconds/250), 1)` seconds), which cannot trip
-  either rule. `interval` is **rejected** with a 400, because ignoring it would return
-  more entries than asked for while looking like it worked.
+  either rule. A span wider than int64 nanoseconds (~292 years) is **saturated** to the
+  maximum duration before the division, as `time.Time.Sub` does upstream — rejecting the
+  wrapped value outright would 400 a full-range query that a coarse step makes one point.
+  `interval` is **rejected** with a 400, because ignoring it would return more entries
+  than asked for while looking like it worked.
 - `step` is parsed at **nanosecond** resolution (`parseLokiStep`), not the millisecond
   resolution the Prometheus query path uses. Loki keeps a `time.Duration`, so a
   sub-millisecond step is legal and decides whether the points limit trips: `0.0001`
