@@ -324,10 +324,16 @@ func validLokiStep(w http.ResponseWriter, raw string, startNs, endNs int64) bool
 		return false
 	}
 	// endNs >= startNs is already established, so a negative difference can only
-	// mean the span overflowed int64 — which is far past the limit either way.
-	// The division is upstream's `end.Sub(start) / step`, both sides in ns.
+	// mean the true span exceeded int64 nanoseconds (~292 years) and wrapped.
+	// Saturate instead of rejecting: upstream computes the span with
+	// time.Time.Sub, which clamps to the maximum Duration, and a span that wide
+	// paired with a coarse enough step is still only a point or two — well inside
+	// the limit. The division below is then upstream's `end.Sub(start) / step`.
 	rangeNs := endNs - startNs
-	if rangeNs < 0 || rangeNs/stepNs > maxLokiPoints {
+	if rangeNs < 0 {
+		rangeNs = math.MaxInt64
+	}
+	if rangeNs/stepNs > maxLokiPoints {
 		writeLokiError(w, http.StatusBadRequest,
 			fmt.Sprintf("exceeded maximum resolution of %d points per timeseries; try decreasing the query resolution ('step')", maxLokiPoints))
 		return false
