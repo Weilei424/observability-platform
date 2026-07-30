@@ -45,6 +45,20 @@ type lokiVectorSample struct {
 	Value  [2]any            `json:"value"` // [<epoch seconds>, "<value>"]
 }
 
+// lokiScalarResponse is the `resultType: "scalar"` envelope, which upstream
+// returns for a literal-only expression such as `1+1`. The result is a bare
+// sample pair rather than a list of samples, and carries no labels.
+type lokiScalarResponse struct {
+	Status string         `json:"status"`
+	Data   lokiScalarData `json:"data"`
+}
+
+type lokiScalarData struct {
+	ResultType string         `json:"resultType"`
+	Result     [2]any         `json:"result"` // [<epoch seconds>, "<value>"]
+	Stats      map[string]any `json:"stats"`
+}
+
 // writeLokiStreams writes a Loki "streams" success envelope. A nil result
 // serializes as [] (never null); stats is an empty object placeholder.
 func writeLokiStreams(w http.ResponseWriter, result []lokiStreamResult) {
@@ -75,6 +89,19 @@ func writeLokiVector(w http.ResponseWriter, tsNs int64, value float64) {
 				Value:  [2]any{float64(tsNs) / 1e9, strconv.FormatFloat(value, 'f', -1, 64)},
 			}},
 			Stats: map[string]any{},
+		},
+	})
+}
+
+// writeLokiScalar writes a Loki "scalar" success envelope. Same timestamp and
+// value encoding as writeLokiVector; only the result shape and type differ.
+func writeLokiScalar(w http.ResponseWriter, tsNs int64, value float64) {
+	writeJSON(w, http.StatusOK, lokiScalarResponse{
+		Status: "success",
+		Data: lokiScalarData{
+			ResultType: "scalar",
+			Result:     [2]any{float64(tsNs) / 1e9, strconv.FormatFloat(value, 'f', -1, 64)},
+			Stats:      map[string]any{},
 		},
 	})
 }
