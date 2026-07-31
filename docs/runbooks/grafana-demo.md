@@ -11,10 +11,11 @@
 make local-up
 ```
 
-This starts three services:
+This starts four services:
 - **backend** on port 8080 — the observability backend
-- **grafana** on port 3000 — Grafana with provisioned datasource and dashboard
+- **grafana** on port 3000 — Grafana with provisioned datasources and dashboards
 - **load-generator** — continuously posts metrics to the backend
+- **sample-app** — continuously pushes log streams (see [`grafana-logs-demo.md`](grafana-logs-demo.md))
 
 ## Wait for data
 
