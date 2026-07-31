@@ -1,4 +1,4 @@
-.PHONY: build test lint run local-up local-down smoke bench bench-go bench-k6 help
+.PHONY: build test lint run local-up local-down smoke smoke-logs bench bench-go bench-k6 help
 
 ## build: Compile the backend binary
 build:
@@ -28,9 +28,14 @@ local-up:
 local-down:
 	docker compose -f deployments/docker/docker-compose.yml down
 
-## smoke: Run API smoke test against a running backend (set BACKEND_ADDR to override localhost:8080)
+## smoke: Run metrics + logs API smoke tests against a running backend (set BACKEND_ADDR to override localhost:8080)
 smoke:
 	bash tests/e2e/smoke.sh
+	bash tests/e2e/logs_smoke.sh
+
+## smoke-logs: Run the Loki API smoke test only
+smoke-logs:
+	bash tests/e2e/logs_smoke.sh
 
 ## bench-go: Run Go micro-benchmarks (storage/query engine, in-process)
 bench-go:
