@@ -1,0 +1,130 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {"type": "loki", "uid": "obs-loki"},
+      "gridPos": {"h": 11, "w": 24, "x": 0, "y": 0},
+      "id": 1,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": false,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "datasource": {"type": "loki", "uid": "obs-loki"},
+          "editorMode": "code",
+          "expr": "{service=\"$service\"} |= \"$search\"",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "All logs — $service",
+      "type": "logs"
+    },
+    {
+      "datasource": {"type": "loki", "uid": "obs-loki"},
+      "gridPos": {"h": 11, "w": 16, "x": 0, "y": 11},
+      "id": 2,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": false,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "datasource": {"type": "loki", "uid": "obs-loki"},
+          "editorMode": "code",
+          "expr": "{service=\"$service\", level=\"$level\"} |= \"$search\"",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "$level logs — $service",
+      "type": "logs"
+    },
+    {
+      "gridPos": {"h": 11, "w": 8, "x": 16, "y": 11},
+      "id": 3,
+      "options": {
+        "code": {"language": "plaintext", "showLineNumbers": false, "showMiniMap": false},
+        "content": "### Supported\n\n- Stream selectors, **equality only**:\n  `{service=\"api\", level=\"error\"}`\n- Line filters: `|=` `!=` `|~` `!~`\n- Endpoints: `query`, `query_range`, `labels`,\n  `label/{name}/values`\n\n### Not supported — returns an explicit 400\n\n- Metric queries (`count_over_time`, `rate`,\n  `sum by`) — this is why Explore's log-volume\n  histogram shows an error. Phase 4.6.\n- Pipelines: `| json`, `| logfmt`, `line_format`\n- Regex/negative **label** matchers: `=~` `!=` `!~`\n  (so the variables above are single-select)\n\n### Not implemented — returns 404\n\n- Live tail (`/loki/api/v1/tail`, needs WebSocket)\n- Query size estimate (`/loki/api/v1/index/stats`)\n\nWalkthrough: `docs/runbooks/grafana-logs-demo.md`",
+        "mode": "markdown"
+      },
+      "title": "Supported LogQL subset",
+      "type": "text"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": ["observability-platform"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "datasource": {"type": "loki", "uid": "obs-loki"},
+        "definition": "label_values(service)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Service",
+        "multi": false,
+        "name": "service",
+        "options": [],
+        "query": {"label": "service", "refId": "LokiVariableQueryEditor-VariableQuery", "stream": "", "type": 1},
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {},
+        "datasource": {"type": "loki", "uid": "obs-loki"},
+        "definition": "label_values(level)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Level",
+        "multi": false,
+        "name": "level",
+        "options": [],
+        "query": {"label": "level", "refId": "LokiVariableQueryEditor-VariableQuery", "stream": "", "type": 1},
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {"text": "", "value": ""},
+        "hide": 0,
+        "label": "Search",
+        "name": "search",
+        "options": [],
+        "query": "",
+        "skipUrlSync": false,
+        "type": "textbox"
+      }
+    ]
+  },
+  "time": {"from": "now-15m", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Observability Platform Logs",
+  "uid": "obs-logs-v1",
+  "version": 1
+}
