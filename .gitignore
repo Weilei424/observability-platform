@@ -28,8 +28,9 @@ go.work.sum
 .env
 
 # Runtime files
-server
-load-generator
+/server
+/load-generator
+/sample-app
 
 # Editor/IDE
 # .idea/
