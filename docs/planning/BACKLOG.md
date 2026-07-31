@@ -431,10 +431,11 @@ Design: `docs/superpowers/specs/2026-07-30-phase-4.5-grafana-logs-demo-design.md
 - [x] Verify: `go build ./...`, `go vet ./...`, `golangci-lint run`, `go test ./...` green
 - [x] Verify: `make smoke` exits 0 against a locally run backend (metrics checks then logs checks)
 - [x] Verify: every LogQL example in the runbook returns 200 (no example teaches a rejected query)
-- [ ] Verify *(requires Docker)*: `make local-up` builds and starts four services
-- [ ] Verify *(requires Docker)*: Loki datasource **Save & test** returns success
-- [ ] Verify *(requires Docker)*: logs appear in Grafana Explore; service/level/text filters narrow
-- [ ] Verify *(requires Docker)*: logs dashboard variables populate and both logs panels render
+- [x] Verify *(requires Docker)*: `make local-up` builds and starts four services
+- [x] Verify *(requires Docker)*: Loki datasource **Save & test** returns success — Grafana 11.1.0 `/api/datasources/uid/obs-loki/health` → `{"message":"Data source successfully connected.","status":"OK"}`, closing the verification gap Phase 4.4 §11 deferred to this phase
+- [x] Verify *(requires Docker)*: logs appear in Grafana Explore; service/level/text filters narrow — all four runbook queries run through Grafana's own `/api/ds/query`, each returning log rows; metric LogQL errors as documented
+- [x] Verify *(requires Docker)*: logs dashboard variables populate and both logs panels render — dashboard `obs-logs-v1` provisioned; both variable dropdowns resolve through Grafana's resource proxy (`service` → `[api, worker]`, `level` → `[error, info, warn]`); both panel expressions return rows, including the default empty-Search form `{service="api"} |= ""`. Verified through Grafana's HTTP APIs, not a visual render
+- [x] Verify *(requires Docker)*: the demo exercises the persisted chunk path — measured 23 flushes at a **32.4 s** mean interval, 6 chunks each (one per stream), confirming the `OBS_LOGS_FLUSH_THRESHOLD_BYTES=16384` override works as intended
 
 ### Phase 4.6 — LogQL Metric Queries
 - [ ] Parse the metric-query subset: `count_over_time({...}[<range>])` and `sum by (<labels>) (...)`
