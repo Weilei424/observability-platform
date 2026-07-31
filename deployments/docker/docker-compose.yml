@@ -9,6 +9,10 @@ services:
     environment:
       OBS_DATA_DIR: /data
       OBS_LOG_LEVEL: info
+      # Demo-only: the 8 MiB default means the head buffer never flushes at demo
+      # volume (~506 B/s), so every Grafana query would be served from memory and
+      # the Phase 4.3 chunk/index path would never run. 16 KiB flushes every ~32s.
+      OBS_LOGS_FLUSH_THRESHOLD_BYTES: "16384"
     volumes:
       - obs-data:/data
 
@@ -28,6 +32,17 @@ services:
       context: ../../
       dockerfile: deployments/docker/Dockerfile
       target: loadgen
+    environment:
+      OBS_BACKEND_ADDR: http://backend:8080
+    depends_on:
+      - backend
+    restart: on-failure
+
+  sample-app:
+    build:
+      context: ../../
+      dockerfile: deployments/docker/Dockerfile
+      target: sampleapp
     environment:
       OBS_BACKEND_ADDR: http://backend:8080
     depends_on:
