@@ -277,6 +277,27 @@ checksummed, so a v1 rebuild must fully decode rather than peek).
   before looking up its protobuf enum. Grafana sends lowercase, so this only matters to
   hand-written clients — but the API advertises Loki compatibility.
 
+### Grafana demo assets (introduced in 4.5)
+
+Both Grafana datasources point at the **same backend port**: `obs-prometheus`
+(type `prometheus`) and `obs-loki` (type `loki`), each `http://backend:8080`. One Go
+process serves both compatibility subsets; nothing proxies or translates between them.
+
+Provisioned dashboards: `obs-metrics-v1` (Observability Platform Metrics, 4.5's
+predecessor in 2.5) and `obs-logs-v1` (Observability Platform Logs). The logs dashboard's
+label variables are single-select by necessity — a multi-value selection interpolates a
+regex label matcher, which the equality-only index does not serve.
+
+The compose demo sets `OBS_LOGS_FLUSH_THRESHOLD_BYTES=16384` on the backend. This is a
+**demo-only** override of the 8 MiB default: at demo volume the head buffer would never
+cross the default threshold, so every query would be answered from memory and the 4.3
+chunk/index read path would never execute.
+
+Known gaps against a real Loki, all returning explicit errors or 404 rather than wrong
+answers: metric LogQL (Explore's log-volume histogram — Phase 4.6), live tail
+(`/loki/api/v1/tail`, needs WebSocket), and `/loki/api/v1/index/stats` (query size
+estimate).
+
 ---
 
 ## API Boundaries
