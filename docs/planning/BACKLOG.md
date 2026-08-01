@@ -435,7 +435,7 @@ Design: `docs/superpowers/specs/2026-07-30-phase-4.5-grafana-logs-demo-design.md
 - [x] Verify *(requires Docker)*: Loki datasource **Save & test** returns success — Grafana 11.1.0 `/api/datasources/uid/obs-loki/health` → `{"message":"Data source successfully connected.","status":"OK"}`, closing the verification gap Phase 4.4 §11 deferred to this phase
 - [x] Verify *(requires Docker)*: logs appear in Grafana Explore; service/level/text filters narrow — all four runbook queries run through Grafana's own `/api/ds/query`, each returning log rows; metric LogQL errors as documented
 - [x] Verify *(requires Docker)*: logs dashboard variables populate and both logs panels render — dashboard `obs-logs-v1` provisioned; both variable dropdowns resolve through Grafana's resource proxy (`service` → `[api, worker]`, `level` → `[error, info, warn]`); both panel expressions return rows, including the default empty-Search form `{service="api"} |= ""`. Verified through Grafana's HTTP APIs, not a visual render
-- [x] Verify *(requires Docker)*: the demo exercises the persisted chunk path — measured 23 flushes at a **32.4 s** mean interval, 6 chunks each (one per stream), confirming the `OBS_LOGS_FLUSH_THRESHOLD_BYTES=16384` override works as intended
+- [x] Verify *(requires Docker)*: the demo exercises the persisted chunk path — measured 29 flushes at a **32.0 s** mean interval, 28 of them writing exactly **5 chunks** (one per generated stream) and one writing 7 (the flush that caught the smoke test's two extra `service="smoke-test"` streams), confirming the `OBS_LOGS_FLUSH_THRESHOLD_BYTES=16384` override works as intended
 
 ### Phase 4.6 — LogQL Metric Queries
 - [ ] Parse the metric-query subset: `count_over_time({...}[<range>])` and `sum by (<labels>) (...)`
