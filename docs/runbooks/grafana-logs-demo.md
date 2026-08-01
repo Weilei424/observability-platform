@@ -135,6 +135,9 @@ Everything it asserts goes through Grafana's HTTP API rather than the backend's:
   actually serves, so the test cannot drift from the panels
 - log chunks reaching disk, which is what the demo's 16 KiB flush override is for
 - the data surviving a `docker compose restart backend`
+- all four containers still running at the end, and fresh sample-app rows arriving
+  after the restart — a producer that dies partway through leaves the label values
+  and seeded lines behind, so "it ran once" and "it is running" otherwise look the same
 
 Roughly 2–4 minutes on a warm image cache, longer on the first build. Useful env
 overrides: `OBS_COMPOSE_KEEP_UP=1` leaves the stack running for poking around,
