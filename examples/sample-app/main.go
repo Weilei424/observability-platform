@@ -201,7 +201,10 @@ func main() {
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	var batches, lines, errs int
 
-	log.Printf("sample-app: addr=%s rate=%.1f/s duration=%ds", *addr, *rate, *duration)
+	// %g, not %.1f: a fractional rate like 0.01 renders as "0.0" under one decimal
+	// place — the very value tickerInterval refuses to start on — so the startup
+	// line would show an operator a rate the program would have rejected.
+	log.Printf("sample-app: addr=%s rate=%g/s interval=%v duration=%ds", *addr, *rate, interval, *duration)
 
 	for {
 		select {
