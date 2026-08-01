@@ -168,6 +168,18 @@ func tickerInterval(rate float64) (time.Duration, error) {
 	return d, nil
 }
 
+// startupLine renders the one-line startup banner. It is a separate function so
+// the formatting can be pinned by a test.
+//
+// The rate uses %g rather than %.1f: one decimal place flattens 0.01 — and every
+// smaller accepted rate — to "0.0", which is the one value tickerInterval refuses
+// to start on, so the banner would report a rate the program would have rejected.
+// The resolved interval is printed beside it because that is what the process
+// will actually do; a rate near either representable bound makes that obvious.
+func startupLine(addr string, rate float64, interval time.Duration, duration int) string {
+	return fmt.Sprintf("sample-app: addr=%s rate=%g/s interval=%v duration=%ds", addr, rate, interval, duration)
+}
+
 func main() {
 	addr := flag.String("addr", defaultAddr(), "backend base URL; OBS_BACKEND_ADDR env var takes precedence if set")
 	rate := flag.Float64("rate", 2, "log batches per second (must be > 0)")
@@ -201,10 +213,7 @@ func main() {
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	var batches, lines, errs int
 
-	// %g, not %.1f: a fractional rate like 0.01 renders as "0.0" under one decimal
-	// place — the very value tickerInterval refuses to start on — so the startup
-	// line would show an operator a rate the program would have rejected.
-	log.Printf("sample-app: addr=%s rate=%g/s interval=%v duration=%ds", *addr, *rate, interval, *duration)
+	log.Print(startupLine(*addr, *rate, interval, *duration))
 
 	for {
 		select {
