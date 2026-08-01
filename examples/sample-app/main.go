@@ -149,7 +149,19 @@ func tickerInterval(rate float64) (time.Duration, error) {
 	if rate <= 0 {
 		return 0, fmt.Errorf("--rate must be greater than 0")
 	}
-	d := time.Duration(float64(time.Second) / rate)
+	// Bound the quotient BEFORE converting. Converting a float64 outside int64's
+	// range is implementation-defined — on amd64 it wraps negative — so a rate so
+	// small that the interval overflows would otherwise fall into the "too large"
+	// branch below and report the exact opposite of what went wrong.
+	//
+	// The comparison is >= because float64(math.MaxInt64) rounds up to 2^63, one
+	// past the largest representable Duration; the same off-by-one the Prometheus
+	// time-parameter bounds already guard against.
+	ivl := float64(time.Second) / rate
+	if ivl >= float64(math.MaxInt64) {
+		return 0, fmt.Errorf("--rate %v is too small; it yields an interval longer than the maximum %v", rate, time.Duration(math.MaxInt64))
+	}
+	d := time.Duration(ivl)
 	if d <= 0 {
 		return 0, fmt.Errorf("--rate %v is too large; it yields a sub-nanosecond interval", rate)
 	}
