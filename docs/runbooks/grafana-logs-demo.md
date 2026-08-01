@@ -113,6 +113,35 @@ too, so `make test` covers it.
 The script half pushes under `service="smoke-test"`, so that value appears in the
 **Service** dropdown afterwards — real data, correctly indexed, not a bug.
 
+## Test the whole stack through Grafana
+
+`make smoke-logs` never starts Grafana. To check the demo the way a viewer meets
+it — Compose up, Grafana provisioned, panels rendering — run:
+
+```bash
+make smoke-compose
+```
+
+This one owns its stack: it uses its own Compose project name (`obs-compose-e2e`)
+and removes its volumes at the end, so it will not touch a stack you started with
+`make local-up`. It does need ports 3000 and 8080 free, and fails immediately with
+a clear message if either is taken.
+
+Everything it asserts goes through Grafana's HTTP API rather than the backend's:
+
+- the Loki datasource health check — the **Save & test** button
+- the dashboard and both variable dropdowns, through the datasource resource proxy
+- both panel expressions through `/api/ds/query`, taken from the dashboard Grafana
+  actually serves, so the test cannot drift from the panels
+- log chunks reaching disk, which is what the demo's 16 KiB flush override is for
+- the data surviving a `docker compose restart backend`
+
+Roughly 2–4 minutes on a warm image cache, longer on the first build. Useful env
+overrides: `OBS_COMPOSE_KEEP_UP=1` leaves the stack running for poking around,
+and `OBS_COMPOSE_PROJECT` changes the project name.
+
+CI runs this on every push to `main` and every pull request.
+
 ## Known limitations
 
 Two different things are going on below, and they produce different HTTP statuses.
