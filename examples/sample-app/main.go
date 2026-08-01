@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -122,16 +123,26 @@ func encodePush(entries []entry) ([]byte, error) {
 	return json.Marshal(map[string]any{"streams": streams})
 }
 
-// postBatch sends one push and returns the status plus a short body snippet.
-func postBatch(client *http.Client, addr string, body []byte) (int, string, error) {
+// postBatch sends one push and reports whether the batch was accepted.
+//
+// The Loki push contract is exactly 204 No Content, so that is the only status
+// counted as a delivered batch. Accepting the whole 2xx range instead would let
+// a backend that regressed to 200 or 202 — a real compatibility break for every
+// Loki client, not just this one — keep incrementing the success counter while
+// the demo silently stopped matching the API it claims to implement.
+func postBatch(client *http.Client, addr string, body []byte) error {
 	resp, err := client.Post(addr+"/loki/api/v1/push", "application/json", bytes.NewReader(body))
 	if err != nil {
-		return 0, "", err
+		return err
 	}
 	defer resp.Body.Close()
 	snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
 	_, _ = io.Copy(io.Discard, resp.Body)
-	return resp.StatusCode, string(snippet), nil
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("unexpected status %d, want %d: %s",
+			resp.StatusCode, http.StatusNoContent, strings.TrimSpace(string(snippet)))
+	}
+	return nil
 }
 
 // tickerInterval converts a batches-per-second rate into a ticker interval,
@@ -230,14 +241,8 @@ func main() {
 			}
 			// A demo generator must survive a backend restart, so every failure is
 			// logged and counted rather than fatal.
-			status, snippet, err := postBatch(client, *addr, body)
-			if err != nil {
-				log.Printf("POST error: %v", err)
-				errs++
-				continue
-			}
-			if status < 200 || status >= 300 {
-				log.Printf("unexpected status %d: %s", status, snippet)
+			if err := postBatch(client, *addr, body); err != nil {
+				log.Printf("push failed: %v", err)
 				errs++
 				continue
 			}
