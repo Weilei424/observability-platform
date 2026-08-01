@@ -31,10 +31,14 @@ local-down:
 ## smoke: Run metrics + logs API smoke tests against a running backend (set BACKEND_ADDR to override localhost:8080)
 smoke:
 	bash tests/e2e/smoke.sh
-	bash tests/e2e/logs_smoke.sh
+	$(MAKE) --no-print-directory smoke-logs
 
-## smoke-logs: Run the Loki API smoke test only
+## smoke-logs: Validate Grafana provisioning, then run the Loki API smoke test
+# The Go step covers the provisioning files (no backend needed). It runs the
+# whole package rather than a -run filter, because a filter that matches nothing
+# exits 0 and would silently skip every provisioning check.
 smoke-logs:
+	go test ./tests/e2e/ -count=1
 	bash tests/e2e/logs_smoke.sh
 
 ## bench-go: Run Go micro-benchmarks (storage/query engine, in-process)
