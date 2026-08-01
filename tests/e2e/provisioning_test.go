@@ -24,6 +24,8 @@ import (
 	"testing"
 
 	yaml "go.yaml.in/yaml/v3"
+
+	"github.com/masonwheeler/observability-platform/internal/logs"
 )
 
 const (
@@ -246,36 +248,67 @@ func TestLogsDashboardIdentity(t *testing.T) {
 	}
 }
 
-// TestLogsDashboardVariables enforces the two constraints the dashboard cannot
-// survive losing. Multi-select or an *All* option makes Grafana interpolate
-// service=~"api|worker", and regex label matchers return 400 by design — the
-// dropdown would look fine and every panel would error.
+// wantVariables is the exact template variable list: name and kind, in order.
+// The kind matters as much as the name. A query variable is populated live from
+// /loki/api/v1/label/{name}/values; demoting one to custom or constant would
+// freeze the dropdown at hardcoded values — the demo would still render, but it
+// would have stopped reading anything from the backend, which is the whole
+// point of the panel.
+var wantVariables = []struct {
+	name string
+	kind string
+}{
+	{"service", "query"},
+	{"level", "query"},
+	{"search", "textbox"},
+}
+
+// TestLogsDashboardVariables enforces the constraints the dashboard cannot
+// survive losing. The loop is driven by wantVariables rather than by each
+// variable's own declared type, so a variable that changed kind fails the kind
+// assertion instead of quietly skipping every check below it.
 func TestLogsDashboardVariables(t *testing.T) {
+	wantDatasourceType := loadDatasource(t).Datasources[0].Type
 	d := loadDashboard(t)
 
-	var names []string
-	for _, v := range d.Templating.List {
-		names = append(names, v.Name)
-	}
-	want := []string{"service", "level", "search"}
-	if strings.Join(names, ",") != strings.Join(want, ",") {
-		t.Fatalf("variables = %v, want %v (panel expressions reference these by name)", names, want)
+	if len(d.Templating.List) != len(wantVariables) {
+		var got []string
+		for _, v := range d.Templating.List {
+			got = append(got, fmt.Sprintf("%s(%s)", v.Name, v.Type))
+		}
+		t.Fatalf("variables = %v, want exactly %d: %+v", got, len(wantVariables), wantVariables)
 	}
 
-	for _, v := range d.Templating.List {
-		if v.Type != "query" {
-			continue
-		}
-		t.Run(v.Name, func(t *testing.T) {
+	for i, want := range wantVariables {
+		v := d.Templating.List[i]
+		t.Run(want.name, func(t *testing.T) {
+			if v.Name != want.name {
+				t.Fatalf("variable %d is %q, want %q (panel expressions reference these by name)", i, v.Name, want.name)
+			}
+			if v.Type != want.kind {
+				t.Errorf("type = %q, want %q", v.Type, want.kind)
+			}
+
+			if want.kind == "textbox" {
+				// The runbook states an empty Search box means "no filter".
+				// A default here would open the dashboard pre-filtered.
+				var def string
+				if err := json.Unmarshal(v.Query, &def); err != nil {
+					t.Fatalf("textbox query is not a string: %v (raw: %s)", err, v.Query)
+				}
+				if def != "" {
+					t.Errorf("textbox default = %q, want empty; the dashboard would open pre-filtered", def)
+				}
+				return
+			}
+
 			if v.Multi {
 				t.Errorf("multi = true; multi-select interpolates a regex label matcher, which returns 400")
 			}
 			if v.IncludeAll {
 				t.Errorf("includeAll = true; the All option interpolates %s=~\"a|b\", which returns 400", v.Name)
 			}
-			if v.Datasource == nil || v.Datasource.UID != datasourceUID {
-				t.Errorf("datasource = %+v, want uid %q; a variable on the wrong datasource never populates", v.Datasource, datasourceUID)
-			}
+			checkDatasourceRef(t, "variable", v.Datasource, wantDatasourceType, datasourceUID)
 
 			var q lokiVariableQuery
 			if err := json.Unmarshal(v.Query, &q); err != nil {
@@ -300,30 +333,46 @@ func TestLogsDashboardVariables(t *testing.T) {
 	}
 }
 
+// checkDatasourceRef asserts one Grafana datasource reference points at the
+// provisioned datasource by *both* type and uid, each cross-referenced against
+// loki.yml rather than compared to a constant.
+//
+// The type is not decoration. Grafana resolves the datasource by uid but builds
+// the query editor and the query model from the type, so a reference reading
+// {"type": "prometheus", "uid": "obs-loki"} sends the panel's LogQL through the
+// Prometheus query path — the panel breaks while the uid still looks right.
+func checkDatasourceRef(t *testing.T, label string, ref *dsRef, wantType, wantUID string) {
+	t.Helper()
+	if ref == nil {
+		t.Errorf("%s has no datasource; it would fall back to Grafana's default", label)
+		return
+	}
+	if ref.Type != wantType {
+		t.Errorf("%s datasource type = %q, want %q (loki.yml)", label, ref.Type, wantType)
+	}
+	if ref.UID != wantUID {
+		t.Errorf("%s datasource uid = %q, want %q (loki.yml)", label, ref.UID, wantUID)
+	}
+}
+
 // TestLogsDashboardTargetsUseTheProvisionedDatasource cross-references every
-// panel target's uid against loki.yml's own uid, so the two files cannot drift
-// into two independent constants.
+// panel and target datasource reference against loki.yml's own type and uid, so
+// the two files cannot drift into independent constants.
 func TestLogsDashboardTargetsUseTheProvisionedDatasource(t *testing.T) {
-	wantUID := loadDatasource(t).Datasources[0].UID
+	ds := loadDatasource(t).Datasources[0]
 	d := loadDashboard(t)
 
 	targets := 0
 	for _, p := range d.Panels {
-		// A text panel legitimately has no datasource; a query panel that lost
-		// one falls back to Grafana's default datasource and renders an error.
-		if p.Datasource != nil && p.Datasource.UID != wantUID {
-			t.Errorf("panel %d (%q) datasource uid = %q, want %q", p.ID, p.Title, p.Datasource.UID, wantUID)
+		// A text panel legitimately has no datasource. A panel with targets is
+		// a query panel, and one that lost its datasource falls back to
+		// Grafana's default and renders an error.
+		if len(p.Targets) > 0 {
+			checkDatasourceRef(t, fmt.Sprintf("panel %d (%q)", p.ID, p.Title), p.Datasource, ds.Type, ds.UID)
 		}
 		for _, tg := range p.Targets {
 			targets++
-			if tg.Datasource == nil {
-				t.Errorf("panel %d (%q) target %q has no datasource", p.ID, p.Title, tg.RefID)
-				continue
-			}
-			if tg.Datasource.UID != wantUID {
-				t.Errorf("panel %d (%q) target %q datasource uid = %q, want %q (loki.yml)",
-					p.ID, p.Title, tg.RefID, tg.Datasource.UID, wantUID)
-			}
+			checkDatasourceRef(t, fmt.Sprintf("panel %d (%q) target %q", p.ID, p.Title, tg.RefID), tg.Datasource, ds.Type, ds.UID)
 		}
 	}
 	if targets == 0 {
@@ -331,27 +380,55 @@ func TestLogsDashboardTargetsUseTheProvisionedDatasource(t *testing.T) {
 	}
 }
 
-// selectorPattern captures the stream selector — the {...} at the head of a
-// LogQL expression — separately from any line filters that follow it. The
-// distinction matters: =~ and !~ are supported on lines and unsupported on
-// labels, so a blanket search for those operators would forbid a legal query.
-var selectorPattern = regexp.MustCompile(`^\{[^}]*\}`)
-
 // variablePattern matches Grafana's $name and ${name} interpolation syntax.
 var variablePattern = regexp.MustCompile(`\$\{?(\w+)\}?`)
 
-// TestLogsDashboardQueriesStayInsideTheSupportedSubset checks the panel
-// expressions themselves. Two ways a dashboard breaks silently: a stream
-// selector with a regex or negative label matcher (400 by design, because the
-// label index is equality-only), and a misspelled variable, which Grafana
-// leaves uninterpolated so the panel queries a literal "$sevice" and shows an
-// empty result rather than an error.
+// variableValues are the values Grafana would interpolate for a viewer with the
+// dropdowns on real demo streams, so each panel expression can be handed to the
+// production parser in the form the backend would actually receive.
+//
+// Search carries two: the empty default every viewer sees on first render —
+// |= "" must parse, and the runbook promises it matches every line — and an
+// ordinary substring. Both are values a viewer could legitimately produce; a
+// viewer who types a quote gets a 400 the runbook documents rather than the
+// dashboard preventing, so that case is deliberately not simulated here.
+var variableValues = map[string][]string{
+	"service": {"api"},
+	"level":   {"error"},
+	"search":  {"", "timeout"},
+}
+
+// interpolate substitutes Grafana template variables the way Grafana does,
+// leaving anything it has no value for in place so the caller can catch it.
+func interpolate(expr string, values map[string]string) string {
+	return variablePattern.ReplaceAllStringFunc(expr, func(m string) string {
+		if v, ok := values[variablePattern.FindStringSubmatch(m)[1]]; ok {
+			return v
+		}
+		return m
+	})
+}
+
+// TestLogsDashboardQueriesStayInsideTheSupportedSubset runs every panel
+// expression through the backend's own LogQL parser, with the template
+// variables interpolated as Grafana would interpolate them.
+//
+// Pattern-matching the expression for known-bad operators only rejects the
+// mistakes the test author thought of: it would wave through `| json`,
+// `| logfmt`, `line_format`, a metric query, or any other unsupported form,
+// each of which returns 400 and leaves the panel showing an error. The real
+// parser is the only thing that agrees with the backend by construction — the
+// same reason examples/sample-app validates its payloads with the real logs
+// validators instead of a hand-written shape check.
 func TestLogsDashboardQueriesStayInsideTheSupportedSubset(t *testing.T) {
 	d := loadDashboard(t)
 
 	declared := map[string]bool{}
 	for _, v := range d.Templating.List {
 		declared[v.Name] = true
+		if len(variableValues[v.Name]) == 0 {
+			t.Errorf("variable %q has no test value in variableValues; add one so panel expressions using it are still parsed", v.Name)
+		}
 	}
 
 	for _, p := range d.Panels {
@@ -362,23 +439,60 @@ func TestLogsDashboardQueriesStayInsideTheSupportedSubset(t *testing.T) {
 				continue
 			}
 
-			selector := selectorPattern.FindString(tg.Expr)
-			if selector == "" {
-				t.Errorf("%s expr %q does not start with a {...} stream selector", label, tg.Expr)
-				continue
-			}
-			for _, op := range []string{"=~", "!~", "!="} {
-				if strings.Contains(selector, op) {
-					t.Errorf("%s selector %q uses %q; label matchers are equality-only and this returns 400", label, selector, op)
-				}
-			}
-
+			// Grafana leaves an unknown variable uninterpolated, so the panel
+			// queries a literal "$sevice" and shows an empty result rather than
+			// an error — the parser cannot catch this, because a literal is a
+			// perfectly valid label value.
 			for _, m := range variablePattern.FindAllStringSubmatch(tg.Expr, -1) {
 				if !declared[m[1]] {
 					t.Errorf("%s expr %q references undeclared variable %q; Grafana leaves it uninterpolated and the panel silently returns nothing",
 						label, tg.Expr, m[1])
 				}
 			}
+
+			for _, values := range variableCombinations(tg.Expr, declared) {
+				expr := interpolate(tg.Expr, values)
+				if strings.Contains(expr, "$") {
+					// Guarded rather than assumed: an expression that still has
+					// a variable in it is not the query the backend receives,
+					// so parsing it would prove nothing.
+					t.Errorf("%s expr %q still contains a variable after interpolation with %v", label, expr, values)
+					continue
+				}
+				if _, err := logs.ParseLogQL(expr); err != nil {
+					t.Errorf("%s expr %q interpolates to %q, which the backend's own parser rejects: %v",
+						label, tg.Expr, expr, err)
+				}
+			}
 		}
 	}
+}
+
+// variableCombinations expands the variables an expression uses into every
+// combination of their test values, so a panel is checked in each state a
+// viewer can put it in — for Search, both the empty default and a filled box.
+func variableCombinations(expr string, declared map[string]bool) []map[string]string {
+	combos := []map[string]string{{}}
+	for _, m := range variablePattern.FindAllStringSubmatch(expr, -1) {
+		name := m[1]
+		if !declared[name] {
+			continue
+		}
+		var next []map[string]string
+		for _, combo := range combos {
+			if _, done := combo[name]; done {
+				next = append(next, combo)
+				continue
+			}
+			for _, v := range variableValues[name] {
+				withValue := map[string]string{name: v}
+				for k, existing := range combo {
+					withValue[k] = existing
+				}
+				next = append(next, withValue)
+			}
+		}
+		combos = next
+	}
+	return combos
 }
