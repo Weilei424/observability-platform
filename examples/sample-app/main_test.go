@@ -201,3 +201,60 @@ func TestTickerInterval_AcceptedRatesNeverPanicNewTicker(t *testing.T) {
 		tk.Stop()
 	}
 }
+
+// TestStartupLine_ExactRendering pins the banner's exact text. The rate field
+// regressed once: %.1f rendered 0.01 as "0.0", the one value tickerInterval
+// refuses to start on, so the banner reported a rate the program would have
+// rejected. Nothing else in the suite would notice a return to %.1f.
+func TestStartupLine_ExactRendering(t *testing.T) {
+	cases := []struct {
+		name     string
+		rate     float64
+		interval time.Duration
+		duration int
+		want     string
+	}{
+		{
+			name: "fractional rate that %.1f would flatten to zero",
+			rate: 0.01, interval: 100 * time.Second, duration: 0,
+			want: "sample-app: addr=http://backend:8080 rate=0.01/s interval=1m40s duration=0s",
+		},
+		{
+			name: "default demo rate",
+			rate: 2, interval: 500 * time.Millisecond, duration: 0,
+			want: "sample-app: addr=http://backend:8080 rate=2/s interval=500ms duration=0s",
+		},
+		{
+			name: "rate near the representable floor",
+			rate: 1e-9, interval: 277777*time.Hour + 46*time.Minute + 40*time.Second, duration: 30,
+			want: "sample-app: addr=http://backend:8080 rate=1e-09/s interval=277777h46m40s duration=30s",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := startupLine("http://backend:8080", tc.rate, tc.interval, tc.duration)
+			if got != tc.want {
+				t.Errorf("startupLine =\n  %q\nwant\n  %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestStartupLine_NoAcceptedRateRendersAsZero is the invariant behind the
+// formatting choice, stated independently of the verb used: every rate
+// tickerInterval accepts must render as something an operator can tell apart
+// from 0, because 0 is exactly what tickerInterval rejects.
+func TestStartupLine_NoAcceptedRateRendersAsZero(t *testing.T) {
+	for _, rate := range []float64{1e-9, 1e-6, 0.001, 0.01, 0.04, 0.25, 0.5, 1, 2, 100} {
+		interval, err := tickerInterval(rate)
+		if err != nil {
+			t.Fatalf("tickerInterval(%v) rejected a rate this test assumes is valid: %v", rate, err)
+		}
+		line := startupLine("http://backend:8080", rate, interval, 0)
+		for _, zero := range []string{"rate=0/s", "rate=0.0/s", "rate=0.00/s"} {
+			if strings.Contains(line, zero) {
+				t.Errorf("rate %v renders as %q in %q — indistinguishable from a rate tickerInterval rejects", rate, zero, line)
+			}
+		}
+	}
+}
