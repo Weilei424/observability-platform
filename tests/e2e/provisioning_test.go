@@ -243,9 +243,66 @@ func TestLogsDashboardIdentity(t *testing.T) {
 	if d.Title != dashboardTitle {
 		t.Errorf("title = %q, want %q (the runbook navigates by this title)", d.Title, dashboardTitle)
 	}
-	if len(d.Panels) == 0 {
-		t.Fatal("dashboard has no panels")
+}
+
+// wantPanels is the exact panel set the phase requires: two queryable logs
+// panels and the text panel documenting the supported subset.
+//
+// The target count is the load-bearing field. A logs panel whose targets went
+// to [] still renders — as an empty panel — so counting targets dashboard-wide
+// cannot notice it, and every per-target check below would simply iterate one
+// fewer time and pass. Pinning the count per panel is what makes "this panel
+// has a query" an assertion rather than a side effect of the file's contents.
+var wantPanels = []struct {
+	id      int
+	kind    string
+	title   string
+	targets int
+}{
+	{1, "logs", "All logs — $service", 1},
+	{2, "logs", "$level logs — $service", 1},
+	{3, "text", "Supported LogQL subset", 0},
+}
+
+// loadPanels returns the dashboard's panels after asserting the set matches
+// wantPanels exactly. Every test that walks panels goes through this, so a panel
+// that lost its target fails in each test that cares instead of being silently
+// skipped by a loop over whatever survived.
+func loadPanels(t *testing.T) []dashboardPanel {
+	t.Helper()
+	panels := loadDashboard(t).Panels
+
+	if len(panels) != len(wantPanels) {
+		var got []string
+		for _, p := range panels {
+			got = append(got, fmt.Sprintf("%d:%s(%q, %d targets)", p.ID, p.Type, p.Title, len(p.Targets)))
+		}
+		t.Fatalf("panels = %v, want exactly %d: %+v", got, len(wantPanels), wantPanels)
 	}
+	for i, want := range wantPanels {
+		p := panels[i]
+		if p.ID != want.id {
+			t.Errorf("panel %d has id %d, want %d", i, p.ID, want.id)
+		}
+		if p.Type != want.kind {
+			t.Errorf("panel %d (%q) type = %q, want %q", p.ID, p.Title, p.Type, want.kind)
+		}
+		if p.Title != want.title {
+			t.Errorf("panel %d title = %q, want %q", p.ID, p.Title, want.title)
+		}
+		if len(p.Targets) != want.targets {
+			t.Errorf("panel %d (%q) has %d targets, want %d; a logs panel without its query renders empty",
+				p.ID, p.Title, len(p.Targets), want.targets)
+		}
+	}
+	return panels
+}
+
+// TestLogsDashboardPanels is loadPanels' assertions standing on their own, so
+// the panel set has a test that names it rather than only being enforced as a
+// precondition of the datasource and LogQL checks.
+func TestLogsDashboardPanels(t *testing.T) {
+	loadPanels(t)
 }
 
 // wantVariables is the exact template variable list: name and kind, in order.
@@ -360,10 +417,8 @@ func checkDatasourceRef(t *testing.T, label string, ref *dsRef, wantType, wantUI
 // the two files cannot drift into independent constants.
 func TestLogsDashboardTargetsUseTheProvisionedDatasource(t *testing.T) {
 	ds := loadDatasource(t).Datasources[0]
-	d := loadDashboard(t)
 
-	targets := 0
-	for _, p := range d.Panels {
+	for _, p := range loadPanels(t) {
 		// A text panel legitimately has no datasource. A panel with targets is
 		// a query panel, and one that lost its datasource falls back to
 		// Grafana's default and renders an error.
@@ -371,12 +426,8 @@ func TestLogsDashboardTargetsUseTheProvisionedDatasource(t *testing.T) {
 			checkDatasourceRef(t, fmt.Sprintf("panel %d (%q)", p.ID, p.Title), p.Datasource, ds.Type, ds.UID)
 		}
 		for _, tg := range p.Targets {
-			targets++
 			checkDatasourceRef(t, fmt.Sprintf("panel %d (%q) target %q", p.ID, p.Title, tg.RefID), tg.Datasource, ds.Type, ds.UID)
 		}
-	}
-	if targets == 0 {
-		t.Fatal("no panel targets found; the dashboard would render nothing")
 	}
 }
 
@@ -431,7 +482,7 @@ func TestLogsDashboardQueriesStayInsideTheSupportedSubset(t *testing.T) {
 		}
 	}
 
-	for _, p := range d.Panels {
+	for _, p := range loadPanels(t) {
 		for _, tg := range p.Targets {
 			label := fmt.Sprintf("panel %d (%q) target %q", p.ID, p.Title, tg.RefID)
 			if strings.TrimSpace(tg.Expr) == "" {
