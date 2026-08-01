@@ -8,6 +8,7 @@ the Loki subset at once.
 
 - Docker and Docker Compose installed
 - Ports 8080 and 3000 free
+- Go (for `make smoke-logs`; the demo stack itself needs only Docker)
 
 ## Start the stack
 
@@ -89,19 +90,28 @@ Each step should narrow the result. Things to notice:
 - The dropdowns are single-select on purpose. An *All* option would make Grafana emit
   `service=~"api|worker"`, and regex label matchers are unsupported (see below).
 
-## Run the API smoke test
+## Run the smoke test
 
 With the stack running:
 
 ```bash
 make smoke-logs
-# or
-BACKEND_ADDR=http://localhost:8080 bash tests/e2e/logs_smoke.sh
 ```
 
-Expected: all checks PASS, exit 0. The script pushes under `service="smoke-test"`, so
-that value appears in the **Service** dropdown afterwards — real data, correctly
-indexed, not a bug.
+Expected: exit 0. This runs two independent halves:
+
+| Half | Command | Needs |
+|---|---|---|
+| Grafana provisioning files parse and are internally consistent | `go test ./tests/e2e/` | Go only — no backend, no Docker |
+| Loki API behaves: push, filters, label discovery, Grafana's datasource health check | `bash tests/e2e/logs_smoke.sh` | a running backend (`BACKEND_ADDR` overrides `localhost:8080`) |
+
+The first half is what catches a datasource pointing at the wrong URL or a variable
+that would emit an unsupported regex label matcher — failures that leave every API
+check green while Grafana itself shows an error. It runs in plain `go test ./...`
+too, so `make test` covers it.
+
+The script half pushes under `service="smoke-test"`, so that value appears in the
+**Service** dropdown afterwards — real data, correctly indexed, not a bug.
 
 ## Known limitations
 
