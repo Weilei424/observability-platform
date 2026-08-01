@@ -3,6 +3,11 @@ name: CI
 on:
   pull_request:
     branches: [main]
+  # All work in this repo lands directly on main, so a pull_request-only trigger
+  # would mean CI — including the Compose stack test below — almost never runs.
+  push:
+    branches: [main]
+  workflow_dispatch:
 
 jobs:
   build-test-lint:
@@ -46,3 +51,20 @@ jobs:
           context: .
           file: deployments/docker/Dockerfile
           push: false
+
+  compose-e2e:
+    name: Compose Stack E2E (through Grafana)
+    runs-on: ubuntu-latest
+    # Starts the real demo stack and drives it through Grafana's HTTP API. The
+    # job above proves the images build; only this one proves the four services
+    # actually talk to each other — provisioning mounts, datasource resolution,
+    # dashboard loading, the sample app producing, and the storage path.
+    needs: build-test-lint
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compose stack test
+        run: bash tests/e2e/compose_smoke.sh
