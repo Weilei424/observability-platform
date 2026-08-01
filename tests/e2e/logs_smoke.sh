@@ -159,14 +159,14 @@ echo "-- Grafana provisioning files --"
 LOKI_YML="$REPO_ROOT/observability/grafana/datasources/loki.yml"
 LOGS_JSON="$REPO_ROOT/observability/grafana/dashboards/logs.json"
 
-while IFS='|' read -r status label detail || [ -n "$status" ]; do
-    [ -z "$status" ] && continue
-    if [ "$status" = "PASS" ]; then
-        log_pass "$label"
-    else
-        log_fail "$label — $detail"
-    fi
-done < <(python3 - "$LOKI_YML" "$LOGS_JSON" <<'PY'
+# The validator's output is captured rather than piped through process
+# substitution, because a process substitution's exit status is invisible to the
+# script: if python3 or PyYAML were missing, the loop would read nothing, emit no
+# results, and the run would still report all-green having silently skipped every
+# provisioning check. A check that cannot fail when its own machinery is absent
+# is not a check.
+PROV_RC=0
+PROV_OUT=$(python3 - "$LOKI_YML" "$LOGS_JSON" <<'PY'
 import json
 import sys
 
@@ -250,7 +250,20 @@ else:
 for status, label, detail in results:
     print("%s|%s|%s" % (status, label, detail))
 PY
-)
+) || PROV_RC=$?
+
+if [ "$PROV_RC" -ne 0 ] || [ -z "$PROV_OUT" ]; then
+    log_fail "Grafana provisioning checks — validator did not run (exit $PROV_RC, $(printf '%s' "$PROV_OUT" | wc -l) lines); is python3 with PyYAML available?"
+else
+    while IFS='|' read -r status label detail; do
+        [ -z "$status" ] && continue
+        if [ "$status" = "PASS" ]; then
+            log_pass "$label"
+        else
+            log_fail "$label — $detail"
+        fi
+    done <<< "$PROV_OUT"
+fi
 
 # ---- Summary --------------------------------------------------------
 echo ""
