@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/rand"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -132,22 +133,32 @@ func TestEncodePush_GroupsByStream(t *testing.T) {
 // rate divides to a sub-nanosecond interval that truncates to zero; both reach
 // time.NewTicker as a non-positive duration and panic.
 func TestTickerInterval_RejectsEveryRateThatWouldPanic(t *testing.T) {
+	// wantMsg is asserted because the direction of the diagnostic is the point:
+	// an overflowing interval wraps negative and would otherwise be reported as
+	// "too large" when the rate is in fact too small.
 	rejected := []struct {
-		name string
-		rate float64
+		name    string
+		rate    float64
+		wantMsg string
 	}{
-		{"zero", 0},
-		{"negative", -1},
-		{"NaN", math.NaN()},
-		{"+Inf", math.Inf(1)},
-		{"-Inf", math.Inf(-1)},
-		{"sub-nanosecond interval", 1e10},
-		{"just past one batch per nanosecond", 2e9},
+		{"zero", 0, "greater than 0"},
+		{"negative", -1, "greater than 0"},
+		{"NaN", math.NaN(), "finite"},
+		{"+Inf", math.Inf(1), "finite"},
+		{"-Inf", math.Inf(-1), "finite"},
+		{"sub-nanosecond interval", 1e10, "too large"},
+		{"just past one batch per nanosecond", 2e9, "too large"},
+		{"interval overflows int64", 1e-10, "too small"},
+		{"far below the representable floor", 1e-300, "too small"},
 	}
 	for _, tc := range rejected {
 		t.Run(tc.name, func(t *testing.T) {
-			if d, err := tickerInterval(tc.rate); err == nil {
+			d, err := tickerInterval(tc.rate)
+			if err == nil {
 				t.Fatalf("tickerInterval(%v) = %v, nil; want an error (time.NewTicker would panic)", tc.rate, d)
+			}
+			if !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Errorf("tickerInterval(%v) error = %q, want it to mention %q", tc.rate, err, tc.wantMsg)
 			}
 		})
 	}
@@ -161,6 +172,9 @@ func TestTickerInterval_RejectsEveryRateThatWouldPanic(t *testing.T) {
 		{"one per second", 1, time.Second},
 		{"fractional", 0.5, 2 * time.Second},
 		{"smallest interval still representable", 1e9, time.Nanosecond},
+		// The lower boundary: 1e9/1.1e-10 is ~9.09e18 ns, just inside int64's
+		// range, so a rate this slow is useless but representable and accepted.
+		{"largest interval still representable", 1.1e-10, time.Duration(float64(time.Second) / 1.1e-10)},
 	}
 	for _, tc := range accepted {
 		t.Run(tc.name, func(t *testing.T) {
