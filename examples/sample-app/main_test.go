@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"math"
 	"math/rand"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/masonwheeler/observability-platform/internal/logs"
 )
@@ -122,5 +124,66 @@ func TestEncodePush_GroupsByStream(t *testing.T) {
 	}
 	if payload.Streams[0].Values[0][0] != "100" {
 		t.Errorf("first timestamp = %q, want \"100\"", payload.Streams[0].Values[0][0])
+	}
+}
+
+// TestTickerInterval_RejectsEveryRateThatWouldPanic covers the inputs a bare
+// `rate <= 0` guard lets through. NaN fails every comparison, and a large enough
+// rate divides to a sub-nanosecond interval that truncates to zero; both reach
+// time.NewTicker as a non-positive duration and panic.
+func TestTickerInterval_RejectsEveryRateThatWouldPanic(t *testing.T) {
+	rejected := []struct {
+		name string
+		rate float64
+	}{
+		{"zero", 0},
+		{"negative", -1},
+		{"NaN", math.NaN()},
+		{"+Inf", math.Inf(1)},
+		{"-Inf", math.Inf(-1)},
+		{"sub-nanosecond interval", 1e10},
+		{"just past one batch per nanosecond", 2e9},
+	}
+	for _, tc := range rejected {
+		t.Run(tc.name, func(t *testing.T) {
+			if d, err := tickerInterval(tc.rate); err == nil {
+				t.Fatalf("tickerInterval(%v) = %v, nil; want an error (time.NewTicker would panic)", tc.rate, d)
+			}
+		})
+	}
+
+	accepted := []struct {
+		name string
+		rate float64
+		want time.Duration
+	}{
+		{"default demo rate", 2, 500 * time.Millisecond},
+		{"one per second", 1, time.Second},
+		{"fractional", 0.5, 2 * time.Second},
+		{"smallest interval still representable", 1e9, time.Nanosecond},
+	}
+	for _, tc := range accepted {
+		t.Run(tc.name, func(t *testing.T) {
+			d, err := tickerInterval(tc.rate)
+			if err != nil {
+				t.Fatalf("tickerInterval(%v) returned error: %v", tc.rate, err)
+			}
+			if d != tc.want {
+				t.Errorf("tickerInterval(%v) = %v, want %v", tc.rate, d, tc.want)
+			}
+		})
+	}
+}
+
+// TestTickerInterval_AcceptedRatesNeverPanicNewTicker closes the loop: every
+// rate the validator accepts must actually be usable by time.NewTicker.
+func TestTickerInterval_AcceptedRatesNeverPanicNewTicker(t *testing.T) {
+	for _, rate := range []float64{0.25, 1, 2, 1000, 1e6, 1e9} {
+		d, err := tickerInterval(rate)
+		if err != nil {
+			t.Fatalf("tickerInterval(%v) rejected a usable rate: %v", rate, err)
+		}
+		tk := time.NewTicker(d) // panics if d <= 0
+		tk.Stop()
 	}
 }
