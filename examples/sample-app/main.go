@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"math/rand"
 	"net/http"
 	"os"
@@ -133,6 +134,28 @@ func postBatch(client *http.Client, addr string, body []byte) (int, string, erro
 	return resp.StatusCode, string(snippet), nil
 }
 
+// tickerInterval converts a batches-per-second rate into a ticker interval,
+// rejecting every input that time.NewTicker would panic on.
+//
+// A bare `rate <= 0` guard is not enough. NaN fails every comparison, so it
+// slips through and divides to NaN, and a large enough rate divides to a
+// sub-nanosecond interval that truncates to zero — both reach NewTicker as a
+// non-positive duration and panic with a stack trace instead of the clean
+// message the flag guard is there to print.
+func tickerInterval(rate float64) (time.Duration, error) {
+	if math.IsNaN(rate) || math.IsInf(rate, 0) {
+		return 0, fmt.Errorf("--rate must be a finite number, got %v", rate)
+	}
+	if rate <= 0 {
+		return 0, fmt.Errorf("--rate must be greater than 0")
+	}
+	d := time.Duration(float64(time.Second) / rate)
+	if d <= 0 {
+		return 0, fmt.Errorf("--rate %v is too large; it yields a sub-nanosecond interval", rate)
+	}
+	return d, nil
+}
+
 func main() {
 	addr := flag.String("addr", defaultAddr(), "backend base URL; OBS_BACKEND_ADDR env var takes precedence if set")
 	rate := flag.Float64("rate", 2, "log batches per second (must be > 0)")
@@ -144,8 +167,9 @@ func main() {
 		*addr = v
 	}
 
-	if *rate <= 0 {
-		fmt.Fprintln(os.Stderr, "error: --rate must be greater than 0")
+	interval, err := tickerInterval(*rate)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: "+err.Error())
 		os.Exit(1)
 	}
 
@@ -158,7 +182,7 @@ func main() {
 		defer dcancel()
 	}
 
-	ticker := time.NewTicker(time.Duration(float64(time.Second) / *rate))
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	client := &http.Client{Timeout: 5 * time.Second}
