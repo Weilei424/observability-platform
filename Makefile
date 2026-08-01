@@ -1,4 +1,4 @@
-.PHONY: build test lint run local-up local-down smoke smoke-logs bench bench-go bench-k6 help
+.PHONY: build test lint run local-up local-down smoke smoke-logs smoke-compose bench bench-go bench-k6 help
 
 ## build: Compile the backend binary
 build:
@@ -40,6 +40,10 @@ smoke:
 smoke-logs:
 	go test ./tests/e2e/ -count=1
 	bash tests/e2e/logs_smoke.sh
+
+## smoke-compose: Bring up the Compose stack and test it through Grafana's API (needs Docker; ports 3000/8080 free)
+smoke-compose:
+	bash tests/e2e/compose_smoke.sh
 
 ## bench-go: Run Go micro-benchmarks (storage/query engine, in-process)
 bench-go:
