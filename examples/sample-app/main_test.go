@@ -2,8 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"math"
 	"math/rand"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
@@ -125,6 +128,99 @@ func TestEncodePush_GroupsByStream(t *testing.T) {
 	}
 	if payload.Streams[0].Values[0][0] != "100" {
 		t.Errorf("first timestamp = %q, want \"100\"", payload.Streams[0].Values[0][0])
+	}
+}
+
+// TestPostBatch_OnlyExactly204CountsAsDelivered pins the Loki push contract.
+// The generator previously accepted any 2xx, so a backend that regressed to 200
+// or 202 — which no longer speaks the Loki push API — would still have every
+// batch counted as delivered and nothing in the demo would report a problem.
+func TestPostBatch_OnlyExactly204CountsAsDelivered(t *testing.T) {
+	cases := []struct {
+		name    string
+		status  int
+		wantErr bool
+	}{
+		{"204 No Content — the contract", http.StatusNoContent, false},
+		{"200 OK", http.StatusOK, true},
+		{"201 Created", http.StatusCreated, true},
+		{"202 Accepted", http.StatusAccepted, true},
+		{"400 Bad Request", http.StatusBadRequest, true},
+		{"500 Internal Server Error", http.StatusInternalServerError, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.status != http.StatusNoContent {
+					http.Error(w, "backend says no", tc.status)
+					return
+				}
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+
+			err := postBatch(srv.Client(), srv.URL, []byte(`{"streams":[]}`))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("postBatch with status %d returned nil; want an error", tc.status)
+				}
+				// Both numbers must be in the message: an operator reading the
+				// demo log needs to see what arrived and what was required.
+				for _, want := range []string{strconv.Itoa(tc.status), "204"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error %q does not mention %q", err, want)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("postBatch with status %d returned error: %v", tc.status, err)
+			}
+		})
+	}
+}
+
+// TestPostBatch_RequestShape pins what the generator actually sends, so the
+// status assertion above is testing the real push request and not an incidental
+// one the backend would reject for unrelated reasons.
+func TestPostBatch_RequestShape(t *testing.T) {
+	var gotPath, gotMethod, gotType, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotMethod, gotType = r.URL.Path, r.Method, r.Header.Get("Content-Type")
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	body := []byte(`{"streams":[{"stream":{"service":"api"},"values":[["1","hello"]]}]}`)
+	if err := postBatch(srv.Client(), srv.URL, body); err != nil {
+		t.Fatalf("postBatch: %v", err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method = %q, want POST", gotMethod)
+	}
+	if gotPath != "/loki/api/v1/push" {
+		t.Errorf("path = %q, want /loki/api/v1/push", gotPath)
+	}
+	if gotType != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", gotType)
+	}
+	if gotBody != string(body) {
+		t.Errorf("body = %q, want %q", gotBody, body)
+	}
+}
+
+// TestPostBatch_TransportErrorIsReported covers the other failure path main()
+// counts: a backend that is not listening at all must return an error rather
+// than a nil that would be read as a delivered batch.
+func TestPostBatch_TransportErrorIsReported(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	addr := srv.URL
+	srv.Close() // nothing is listening on addr now
+
+	if err := postBatch(&http.Client{Timeout: time.Second}, addr, []byte(`{}`)); err == nil {
+		t.Fatal("postBatch against a closed server returned nil; want an error")
 	}
 }
 
