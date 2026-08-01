@@ -37,11 +37,27 @@ KEEP_UP="${OBS_COMPOSE_KEEP_UP:-0}"
 READY_TIMEOUT="${OBS_COMPOSE_READY_TIMEOUT:-180}"
 FLUSH_TIMEOUT="${OBS_COMPOSE_FLUSH_TIMEOUT:-180}"
 
+# Every HTTP request and every docker call is individually bounded. A polling
+# loop's deadline only means something if each attempt is guaranteed to return:
+# a service that accepts the connection and then stalls would otherwise hang
+# inside one curl forever, and the loop would never get to check its own
+# deadline again. Only the job timeout would stop it, with no useful output.
+CURL_TIMEOUTS=(--connect-timeout 3 --max-time 15)
+
 PASS=0
 FAIL=0
 RUN_ID="run$(date +%s%N | tr 0-9 a-j)"
 
-dc() { docker compose -p "$PROJECT" -f "$COMPOSE_FILE" "$@"; }
+# The expected running set. load-generator has no assertion of its own anywhere
+# else in this script, so without this it could exit at startup unnoticed.
+EXPECTED_SERVICES="backend grafana load-generator sample-app"
+
+# dc runs a compose command with a bound generous enough for an image build.
+dc() { timeout "${DC_TIMEOUT:-1800}" docker compose -p "$PROJECT" -f "$COMPOSE_FILE" "$@"; }
+# dcq is for the short compose commands that run inside polling loops, where a
+# hung docker call would blow through the loop's deadline the same way a hung
+# curl would.
+dcq() { timeout 60 docker compose -p "$PROJECT" -f "$COMPOSE_FILE" "$@"; }
 
 log_pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 log_fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
@@ -66,15 +82,31 @@ check_absent() {
     fi
 }
 
-gapi() { curl -s -u "$GRAFANA_AUTH" "$GRAFANA$1"; }
+gapi() { curl -s "${CURL_TIMEOUTS[@]}" -u "$GRAFANA_AUTH" "$GRAFANA$1"; }
 
-# dsquery <logql> — one panel query through Grafana's /api/ds/query, exactly as
-# a dashboard panel issues it. The expression is embedded with jq-free quoting:
-# callers pass LogQL with \" already escaped for JSON.
+# dsquery <logql> [from] [to] — one panel query through Grafana's /api/ds/query,
+# exactly as a dashboard panel issues it. from/to default to the dashboard's own
+# 15-minute window and also accept epoch milliseconds. The expression is embedded
+# with jq-free quoting: callers pass LogQL with \" already escaped for JSON.
 dsquery() {
-    curl -s -u "$GRAFANA_AUTH" -H 'Content-Type: application/json' \
+    local from="${2:-now-15m}" to="${3:-now}"
+    curl -s "${CURL_TIMEOUTS[@]}" -u "$GRAFANA_AUTH" -H 'Content-Type: application/json' \
         -X POST "$GRAFANA/api/ds/query" \
-        -d "{\"queries\":[{\"refId\":\"A\",\"datasource\":{\"type\":\"loki\",\"uid\":\"obs-loki\"},\"expr\":\"$1\",\"queryType\":\"range\",\"maxLines\":100,\"intervalMs\":1000,\"maxDataPoints\":100}],\"from\":\"now-15m\",\"to\":\"now\"}"
+        -d "{\"queries\":[{\"refId\":\"A\",\"datasource\":{\"type\":\"loki\",\"uid\":\"obs-loki\"},\"expr\":\"$1\",\"queryType\":\"range\",\"maxLines\":100,\"intervalMs\":1000,\"maxDataPoints\":100}],\"from\":\"$from\",\"to\":\"$to\"}"
+}
+
+# check_services asserts the exact set of running compose services. Called after
+# startup and again at the end: a container that exits partway through leaves
+# every earlier assertion true and every later one reading stale data.
+check_services() {
+    local label="$1" got
+    got="$(dcq ps --services --filter status=running 2>/dev/null | sort | tr '\n' ' ' | sed 's/ *$//')"
+    if [ "$got" = "$EXPECTED_SERVICES" ]; then
+        log_pass "$label — running: $got"
+    else
+        log_fail "$label — running services are [$got], want [$EXPECTED_SERVICES]"
+        dcq ps -a --format '{{.Service}}: {{.State}} ({{.Status}})' 2>/dev/null | sed 's/^/       /'
+    fi
 }
 
 # chunk_count prints the number of persisted log chunk files. `docker compose cp`
@@ -83,7 +115,7 @@ dsquery() {
 chunk_count() {
     local tmp
     tmp="$(mktemp -d)"
-    if dc cp backend:/data/logs/chunks "$tmp/chunks" >/dev/null 2>&1; then
+    if dcq cp backend:/data/logs/chunks "$tmp/chunks" >/dev/null 2>&1; then
         find "$tmp/chunks" -name '*.chunk' 2>/dev/null | wc -l
     else
         echo 0
@@ -96,11 +128,11 @@ teardown() {
     if [ "$FAIL" -ne 0 ] || [ "$rc" -ne 0 ]; then
         echo ""
         echo "-- Container state (run failed) --"
-        dc ps -a 2>&1 | tail -20
+        dcq ps -a 2>&1 | tail -20
         for svc in backend grafana sample-app; do
             echo ""
             echo "-- Last 40 log lines: $svc --"
-            dc logs --tail 40 "$svc" 2>&1 | tail -40
+            dcq logs --tail 40 "$svc" 2>&1 | tail -40
         done
     fi
     if [ "$KEEP_UP" = "1" ]; then
@@ -134,7 +166,7 @@ wait_for() {
     return 1
 }
 
-grafana_up()     { curl -sf -u "$GRAFANA_AUTH" "$GRAFANA/api/health" | grep -q '"database": *"ok"'; }
+grafana_up()     { curl -sf "${CURL_TIMEOUTS[@]}" -u "$GRAFANA_AUTH" "$GRAFANA/api/health" | grep -q '"database": *"ok"'; }
 datasource_ok()  { gapi /api/datasources/uid/obs-loki/health | grep -q '"status":"OK"'; }
 sample_app_up()  { gapi /api/datasources/uid/obs-loki/resources/label/service/values | grep -q '"worker"'; }
 
@@ -146,7 +178,7 @@ if ! docker compose version >/dev/null 2>&1; then
     exit 2
 fi
 for port in 3000 8080; do
-    if curl -s -o /dev/null --max-time 2 "http://localhost:$port" 2>/dev/null; then
+    if curl -s -o /dev/null --connect-timeout 2 --max-time 5 "http://localhost:$port" 2>/dev/null; then
         echo "FATAL: port $port is already serving. Stop the other stack (make local-down) and retry." >&2
         exit 2
     fi
@@ -167,7 +199,7 @@ if ! dc up -d --build >"$BUILD_LOG" 2>&1; then
     exit 2
 fi
 rm -f "$BUILD_LOG"
-log_pass "compose up --build (4 services)"
+log_pass "compose up --build returned success"
 
 echo ""
 echo "-- Waiting for readiness --"
@@ -179,6 +211,10 @@ wait_for "Loki datasource health check passes (Save & test)" "$READY_TIMEOUT" da
 # Both demo services must actually be producing; a sample-app that crash-looped
 # would otherwise show up only as an empty dashboard.
 wait_for "sample-app is pushing streams" "$READY_TIMEOUT" sample_app_up
+
+# `compose up` returning success only means the containers were created. This is
+# the first point where all four are expected to be up and stable.
+check_services "all four services running after startup"
 
 # ---- Provisioning, as Grafana loaded it -----------------------------
 echo ""
@@ -214,7 +250,7 @@ echo "-- Seeding marker streams --"
 NOW_NS=$(date +%s%N)
 INFO_LINE="GET /api/v1/query 200 in 12ms run_id=$RUN_ID"
 ERR_LINE="GET /api/v1/query 503 in 9ms run_id=$RUN_ID upstream timeout after 30s"
-PUSH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BACKEND/loki/api/v1/push" \
+PUSH_STATUS=$(curl -s "${CURL_TIMEOUTS[@]}" -o /dev/null -w "%{http_code}" -X POST "$BACKEND/loki/api/v1/push" \
     -H "Content-Type: application/json" \
     -d "{\"streams\":[
         {\"stream\":{\"service\":\"compose-e2e\",\"level\":\"info\",\"env\":\"local\"},\"values\":[[\"$NOW_NS\",\"$INFO_LINE\"]]},
@@ -299,6 +335,26 @@ check_contains "marker survives the restart — error line" "$BODY" "503 in 9ms 
 
 BODY=$(gapi /api/datasources/uid/obs-loki/resources/label/service/values)
 check_contains "stream index survives the restart" "$BODY" '"compose-e2e"'
+
+# ---- The demo is still live -----------------------------------------
+echo ""
+echo "-- Still live at the end of the run --"
+
+# Every check so far could pass against a stack whose producers died right after
+# startup: label values and seeded lines persist, so "the sample app ran once"
+# and "the sample app is running" look identical. This window opens now, after
+# the restart, so only lines written from here on can satisfy it — a producer
+# that stopped earlier, or one the restart failed to reconnect, fails here.
+FRESH_FROM_MS=$(( $(date +%s) * 1000 ))
+FRESH_TO_MS=$(( FRESH_FROM_MS + 120000 ))
+sample_app_producing_now() {
+    dsquery '{service=\"api\"}' "$FRESH_FROM_MS" "$FRESH_TO_MS" | grep -q 'request_id='
+}
+wait_for "sample-app timestamps advance (new rows after the restart)" 60 sample_app_producing_now
+
+# The demo's other producer writes metrics, not logs, so nothing above would
+# notice it dying; and any service can exit between startup and here.
+check_services "all four services still running at the end"
 
 # ---- Summary --------------------------------------------------------
 echo ""
