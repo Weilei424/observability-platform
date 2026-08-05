@@ -119,6 +119,58 @@ func TestParseMetricQuery_Rejects(t *testing.T) {
 	}
 }
 
+// TestParseMetricQuery_DropStage covers the drop stage reaching MetricQuery
+// through parseRangeAgg — bare, after a line filter, and wrapped in sum() as
+// Grafana's real Explore log-volume expression is (see task-1-brief.md).
+func TestParseMetricQuery_DropStage(t *testing.T) {
+	cases := []struct {
+		q    string
+		want []string
+	}{
+		{`sum by (level) (count_over_time({service="api"} | drop __error__[5m]))`, []string{"__error__"}},
+		{`count_over_time({a="b"} |= "x" | drop __error__[5m])`, []string{"__error__"}},
+	}
+	for _, tc := range cases {
+		got, err := ParseMetricQuery(tc.q)
+		if err != nil {
+			t.Errorf("ParseMetricQuery(%q) error: %v", tc.q, err)
+			continue
+		}
+		if len(got.Selector.DropLabels) != len(tc.want) {
+			t.Errorf("ParseMetricQuery(%q) DropLabels = %v, want %v", tc.q, got.Selector.DropLabels, tc.want)
+			continue
+		}
+		for i, n := range tc.want {
+			if got.Selector.DropLabels[i] != n {
+				t.Errorf("ParseMetricQuery(%q) DropLabels[%d] = %q, want %q", tc.q, i, got.Selector.DropLabels[i], n)
+			}
+		}
+	}
+}
+
+// TestParseMetricQuery_DropStage_Rejections covers the same "drop must be last,
+// non-empty" rules on the metric-query path, where the drop stage is parsed by
+// the same parseDropStagePrefix helper inside parseRangeAgg.
+func TestParseMetricQuery_DropStage_Rejections(t *testing.T) {
+	cases := []struct {
+		q       string
+		wantMsg string
+	}{
+		{`count_over_time({a="b"} | drop [5m])`, "label name"},
+		{`count_over_time({a="b"} | drop x | json [5m])`, "pipeline"},
+	}
+	for _, tc := range cases {
+		got, err := ParseMetricQuery(tc.q)
+		if err == nil {
+			t.Errorf("ParseMetricQuery(%q) = %+v, want error", tc.q, got)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.wantMsg) {
+			t.Errorf("ParseMetricQuery(%q) error %q does not mention %q", tc.q, err, tc.wantMsg)
+		}
+	}
+}
+
 // TestParseMetricQuery_NotMetricQuery covers the sentinel the handlers' fallbacks
 // depend on: these expressions belong to another parser, not to this one.
 func TestParseMetricQuery_NotMetricQuery(t *testing.T) {
