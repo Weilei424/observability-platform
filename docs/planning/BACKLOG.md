@@ -455,12 +455,12 @@ Design: `docs/superpowers/specs/2026-08-04-phase-4.6-logql-metric-queries-design
 - [x] Explicit errors naming the offending construct: unsupported `_over_time` functions, non-`sum` aggregations, `unwrap`, `offset`, binary operations, nested aggregations, `sum({...})` with no range aggregation, empty `by ()`, trailing grouping `sum(...) by (l)`, missing `[range]`, non-positive range
 
 **`internal/logs` metric evaluator (`metriceval.go`)**
-- [ ] `MetricPoint`, `MetricSeries`, `MetricSample`; `EvalMetricRange(ctx, q, startNs, endNs, stepNs)` and `EvalMetricInstant(ctx, q, tsNs)` (the single-tick case of range)
-- [ ] Time model: ticks `start, start+step, … ≤ end`; window `(t − range, t]`; entries read `[start − range, end)`, with instant `query` inclusive at `time` as 4.4's `QueryInstant` is; `windowStart` clamps at `MinInt64` instead of wrapping; overflow-safe tick advance via the unsigned difference
-- [ ] Values: count / Σ`len(line)` bytes / both scaled by `1/rangeSeconds` — one accumulation path with a per-entry weight and a scale factor; line filters applied before counting
-- [ ] Two-pointer sliding window per stream, `O(entries + ticks)`, emitting on "window non-empty" rather than "value non-zero" so `bytes_over_time` over empty lines is a `0` and an empty window is a gap
-- [ ] Grouping: `AggNone` → stream labels verbatim; `sum` → no labels; `by` → listed labels the stream carries; `without` → labels minus the listed names. Empty value ≡ absent (both render to the same label set, so splitting would emit duplicate series); length-prefixed group key; series sorted by label set, points ascending
-- [ ] Argument validation (`stepNs > 0`, `endNs >= startNs`, `RangeNs > 0`) and per-stream `ctx` checks
+- [x] `MetricPoint`, `MetricSeries`, `MetricSample`; `EvalMetricRange(ctx, q, startNs, endNs, stepNs)` and `EvalMetricInstant(ctx, q, tsNs)` (the single-tick case of range)
+- [x] Time model: ticks `start, start+step, … ≤ end`; window `(t − range, t]`; entries read `[start − range, end)`, with instant `query` inclusive at `time` as 4.4's `QueryInstant` is; `windowStart` clamps at `MinInt64` instead of wrapping; overflow-safe tick advance via the unsigned difference
+- [x] Values: count / Σ`len(line)` bytes / both scaled by `1/rangeSeconds` — one accumulation path with a per-entry weight and a scale factor; line filters applied before counting
+- [x] Two-pointer sliding window per stream, `O(entries + ticks)`, emitting on "window non-empty" rather than "value non-zero" so `bytes_over_time` over empty lines is a `0` and an empty window is a gap
+- [x] Grouping: `AggNone` → stream labels verbatim; `sum` → no labels; `by` → listed labels the stream carries; `without` → labels minus the listed names. Empty value ≡ absent (both render to the same label set, so splitting would emit duplicate series); length-prefixed group key; series sorted by label set, points ascending
+- [x] Argument validation (`stepNs > 0`, `endNs >= startNs`, `RangeNs > 0`) and per-stream `ctx` checks
 
 **`internal/api` routing + envelopes**
 - [ ] `loki_response.go` — `lokiMatrixResponse`/`lokiMatrixData`/`lokiMatrixSeries` + `writeLokiMatrix`; `writeLokiVectorSamples` for labeled vectors, with `writeLokiVector` reimplemented as a thin wrapper so the health-check response stays byte-identical
