@@ -441,16 +441,58 @@ Design: `docs/superpowers/specs/2026-07-30-phase-4.5-grafana-logs-demo-design.md
 - [x] Verify *(requires Docker)*: the demo exercises the persisted chunk path — measured 29 flushes at a **32.0 s** mean interval, 28 of them writing exactly **5 chunks** (one per generated stream) and one writing 7 (the flush that caught the smoke test's two extra `service="smoke-test"` streams), confirming the `OBS_LOGS_FLUSH_THRESHOLD_BYTES=16384` override works as intended
 
 ### Phase 4.6 — LogQL Metric Queries
-- [ ] Parse the metric-query subset: `count_over_time({...}[<range>])` and `sum by (<labels>) (...)`
-- [ ] Evaluate range vectors over stored entries: step bucketing across `[start, end)`, per-step counts per stream
-- [ ] `resultType: "matrix"` response envelope (`values: [[<epoch seconds>, "<value>"]]`)
-- [ ] `query_range` routes metric expressions to the metric path; log expressions unchanged
-- [ ] Keep every still-unsupported feature on an explicit error (`rate`, `bytes_over_time`, `unwrap`, pipelines, regex label matchers)
-- [ ] Unit tests: parser accept/reject, step bucketing boundaries, `sum by` grouping, empty ranges
-- [ ] Integration test: Grafana's log-volume query `sum by (level) (count_over_time({service="api"}[5m]))` returns a matrix
-- [ ] Update `tests/e2e/logs_smoke.sh` — the check that currently asserts 400 for metric LogQL becomes a success assertion
-- [ ] Update `docs/runbooks/grafana-logs-demo.md` and `ARCHITECTURE_NOTES.md` — remove the log-volume gap from the limitations table
-- [ ] Verify *(requires Docker)*: Explore's log-volume histogram renders instead of erroring
+Design: `docs/superpowers/specs/2026-08-04-phase-4.6-logql-metric-queries-design.md` · Plan: `docs/superpowers/plans/2026-08-04-phase-4.6-logql-metric-queries.md`
+
+**`internal/logs` shared-parser refactor (`logql.go`)**
+- [ ] `parseLineFilters` → `parseLineFiltersPrefix(s) ([]LineFilter, int, error)`: consume as many chained filters as possible, stop at the first token that does not begin a filter, return bytes consumed. A malformed operand *after* a matched operator still errors — stopping is only for an unmatched operator
+- [ ] `ParseLogQL` treats a non-empty remainder as an error, reproducing both existing messages verbatim so its rejection tests are untouched. One implementation of selector + filter syntax now serves both parsers
+
+**`internal/logs` metric parser (`metricql.go`)**
+- [ ] `RangeOp` (`count_over_time`, `rate`, `bytes_over_time`, `bytes_rate`) + `String()`; `AggKind` (`AggNone`/`AggSum`); `Grouping{Without, Labels}`; `MetricQuery{Op, Selector, RangeNs, Agg, Grouping}`
+- [ ] `ParseMetricQuery`: `sum [by|without (labels)] ( range_op( log_expr [duration] ) )`, prefix grouping only, reusing the 4.4 selector/filter parser
+- [ ] `[range]` durations on upstream's own order — `metrics.ParsePromDurationNanos` first, Go's `time.ParseDuration` as fallback (so `1d`/`1w` *and* `1.5h`/`150ns` parse); non-positive rejected
+- [ ] `ErrNotMetricQuery` sentinel for constant expressions (`vector(1)`, `1+1`, bare numbers) and for a leading `{`, so handlers can fall through to the scalar shim / log path
+- [ ] Explicit errors naming the offending construct: unsupported `_over_time` functions, non-`sum` aggregations, `unwrap`, `offset`, binary operations, nested aggregations, `sum({...})` with no range aggregation, empty `by ()`, trailing grouping `sum(...) by (l)`, missing `[range]`, non-positive range
+
+**`internal/logs` metric evaluator (`metriceval.go`)**
+- [ ] `MetricPoint`, `MetricSeries`, `MetricSample`; `EvalMetricRange(ctx, q, startNs, endNs, stepNs)` and `EvalMetricInstant(ctx, q, tsNs)` (the single-tick case of range)
+- [ ] Time model: ticks `start, start+step, … ≤ end`; window `(t − range, t]`; entries read `[start − range, end)`; `windowStart` clamps at `MinInt64` instead of wrapping; overflow-safe tick advance via the unsigned difference
+- [ ] Values: count / Σ`len(line)` bytes / both scaled by `1/rangeSeconds` — one accumulation path with a per-entry weight and a scale factor; line filters applied before counting
+- [ ] Two-pointer sliding window per stream, `O(entries + ticks)`, emitting on "window non-empty" rather than "value non-zero" so `bytes_over_time` over empty lines is a `0` and an empty window is a gap
+- [ ] Grouping: `AggNone` → stream labels verbatim; `sum` → no labels; `by` → listed labels the stream carries; `without` → labels minus the listed names. Empty value ≡ absent (both render to the same label set, so splitting would emit duplicate series); length-prefixed group key; series sorted by label set, points ascending
+- [ ] Argument validation (`stepNs > 0`, `endNs >= startNs`, `RangeNs > 0`) and per-stream `ctx` checks
+
+**`internal/api` routing + envelopes**
+- [ ] `loki_response.go` — `lokiMatrixResponse`/`lokiMatrixData`/`lokiMatrixSeries` + `writeLokiMatrix`; `writeLokiVectorSamples` for labeled vectors, with `writeLokiVector` reimplemented as a thin wrapper so the health-check response stays byte-identical
+- [ ] `loki_query.go` — `handleLokiQueryRange` dispatches on the leading `{`; `ErrNotMetricQuery` → 400 naming the instant endpoint; metric path evaluates and writes a matrix
+- [ ] `loki_query.go` — `handleLokiQuery` tries `ParseMetricQuery` first and falls back to `ParseScalarQuery` on the sentinel; a metric query returns a labeled vector at `time`
+- [ ] `loki_query.go` — `validLokiStep` → `resolveLokiStep` returning nanoseconds, defaulting an absent step to upstream's `max(floor(rangeSeconds/250), 1)` seconds; explicit-step validation and the 11,000-point limit unchanged; log queries still discard the value
+- [ ] `interval` keeps its 400 with a message that reads correctly for a matrix; `limit`/`direction` stay parsed by the shared parser and are ignored on the metric path
+
+**Grafana dashboard**
+- [ ] `observability/grafana/dashboards/logs.json` — panel `id: 4`, `timeseries` drawn as stacked bars, `Log volume by level — $service`, expression `sum by (level) (count_over_time({service="$service"} |= "$search" [$__interval]))`; existing panels shift down (panel 1 `y: 0→7`, panels 2/3 `y: 11→18`)
+- [ ] `logs.json` text panel `id: 3` — metric queries move from the "returns 400" list to the supported list; unsupported list gains `unwrap`, the other `_over_time` functions, and binary operations; the stale "Phase 4.6" sentence goes
+- [ ] `tests/e2e/provisioning_test.go` — pin the new panel (id/type/title/target count); add `__interval` to `variableValues`; route the expression check on the leading `{` so metric panels reach `ParseMetricQuery` instead of being skipped
+
+**Tests**
+- [ ] Unit `internal/logs/metricql_test.go` — accept table asserting the full `MetricQuery` (four ops, with/without filters, `sum`/`by`/`without`, whitespace, Prometheus *and* Go durations); reject table covering every rejection above; sentinel cases
+- [ ] Unit `internal/logs/metriceval_test.go` — boundary trio (entry at `t` counts, at `t − range` and at `end` do not); non-step-aligned end; gaps not zeros; `bytes_over_time` zero vs gap; filters before counting; `rate`/`bytes_rate` arithmetic; multibyte byte counting; `by` with an absent label, `without`, bare `sum`, `level=""` grouping with absent; deterministic ordering; underflow clamp; instant = last tick; invalid arguments
+- [ ] Integration `internal/api/loki_metric_query_test.go` — Grafana's exact log-volume query → matrix with expected counts; bare `count_over_time` per-stream series; `rate`/`bytes_over_time`/`bytes_rate`; instant → labeled vector; default step derivation; 11,000-point rejection; unsupported → 400 `text/plain`; `vector(1)+vector(1)` → 400 on `query_range`, unchanged vector on instant
+- [ ] Update `TestLokiQueryRange_UnsupportedAndBadParams` (swap `rate(...)` for a still-unsupported expression) and `TestLokiInstantQuery_UnsupportedMetricQuery` (keep only unsupported cases, add a positive counterpart)
+- [ ] `tests/e2e/logs_smoke.sh` — the metric-LogQL check flips from 400 to success, filtered on `|= "run_id=$RUN_ID"` so repeated runs cannot drift the count; assert matrix envelope, both level groups, value `"1"`; add a `rate` check and keep `avg_over_time` → 400
+- [ ] `tests/e2e/compose_smoke.sh` — assert the volume panel's expression is in the dashboard Grafana serves, then run it through `/api/ds/query` and assert level-labeled numeric frames with no error
+
+**Docs + roadmap**
+- [ ] `docs/planning/IMPLEMENTATION_PLAN.md` §4.6 — scope and DoD rewritten for the wider subset (the current DoD names `rate` as still-unsupported)
+- [ ] `docs/planning/ARCHITECTURE_NOTES.md` — "LogQL metric queries (introduced in 4.6)" subsection (grammar, time model, step defaulting, output-label semantics vs the metrics aggregator, memory note); "Known gaps" loses metric LogQL
+- [ ] `docs/runbooks/grafana-logs-demo.md` — drop the log-volume limitation row; add metric queries to the Explore ladder and the dashboard walkthrough; list what is still unsupported
+- [ ] `README.md` — LogQL supported-syntax table beside the existing PromQL one
+
+**Verify**
+- [ ] Verify: `go build ./...`, `go vet ./...`, `golangci-lint run`, `go test ./...` green
+- [ ] Verify: `make smoke-logs` exits 0 against a locally run backend
+- [ ] Verify *(requires Docker)*: `make smoke-compose` exits 0, including the new volume-panel assertions
+- [ ] Verify *(requires Docker)*: Explore's log-volume histogram renders instead of erroring, and the dashboard's volume panel draws stacked bars
 
 ---
 
