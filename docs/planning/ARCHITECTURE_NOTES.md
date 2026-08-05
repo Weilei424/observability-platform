@@ -294,9 +294,48 @@ cross the default threshold, so every query would be answered from memory and th
 chunk/index read path would never execute.
 
 Known gaps against a real Loki, all returning explicit errors or 404 rather than wrong
-answers: metric LogQL (Explore's log-volume histogram — Phase 4.6), live tail
-(`/loki/api/v1/tail`, needs WebSocket), and `/loki/api/v1/index/stats` (query size
-estimate).
+answers: `unwrap` and the label-extraction range aggregations, vector aggregations
+other than `sum`, binary operations, live tail (`/loki/api/v1/tail`, needs WebSocket),
+and `/loki/api/v1/index/stats` (query size estimate).
+
+### LogQL metric queries (introduced in 4.6)
+
+- `internal/logs/metricql.go` — the metric subset: `count_over_time`, `rate`,
+  `bytes_over_time`, `bytes_rate` over the 4.4 selector and line-filter grammar,
+  optionally wrapped in `sum`, `sum by (...)`, or `sum without (...)`. Range
+  durations follow upstream LogQL's own `parseDuration`: the Prometheus grammar
+  first (so `1d`/`1w` work), then Go's `time.ParseDuration` (so `1.5h`/`150ns`
+  work) — a wider grammar than `since`, which is Prometheus-only, and that
+  asymmetry is upstream's. `ErrNotMetricQuery` distinguishes "belongs to another
+  parser" (a selector, a literal, `vector()`) from "unsupported", which is what
+  lets the instant endpoint keep its constant-expression shim.
+- `internal/logs/metriceval.go` — ticks at `start, start+step, … ≤ end`; window
+  `(t − range, t]`; entries read `[start − range, end)`, so an entry at exactly
+  `end` is never counted, matching upstream's half-open sample reads and the log
+  path's own half-open end. Instant `query` is the single-tick case with an
+  **inclusive** end, mirroring `QueryInstant`: `time` is an evaluation instant,
+  and the alternative is a log query at `T` returning an entry the metric query at
+  `T` does not count. Empty windows emit no point — a gap, as Prometheus and Loki
+  do, not a zero.
+- Evaluation is a two-pointer sliding window per stream, `O(entries + ticks)`,
+  which is the shape of upstream's `batchRangeVectorIterator`. Nothing is
+  allocated in proportion to the tick count except the emitted points; the HTTP
+  layer's 11,000-point limit is what bounds the loop.
+- Output labels: a bare range aggregation keeps the stream's label set verbatim;
+  `sum` drops all labels; `by` keeps the listed labels the stream carries; `without`
+  drops the listed ones. Absent labels are **omitted**, per Prometheus — unlike
+  `internal/metrics`'s aggregator, which emits `label: ""`. An empty label value
+  groups as absent, because both render to the same output label set and splitting
+  them would put two identically-labelled series in one response.
+- `step` finally does something. `resolveLokiStep` returns it in nanoseconds and
+  derives an absent one as upstream's `ParseRangeQuery` does — `max(floor(
+  rangeSeconds/250), 1)` seconds, at most 250 points. Log queries still call it for
+  validation and discard the value. `limit` and `direction` are parsed by the shared
+  parameter parser and then ignored on the metric path, as upstream ignores them.
+- A metric query ignores `limit` and reads every matching entry in its window, so
+  the 4.4 note about the transient per-stream working set applies with more force:
+  `StreamEntries` still materializes a stream's whole in-range slice. The evaluator
+  itself is single-pass; bounding the read needs the same deferred lazy cursor.
 
 ---
 
