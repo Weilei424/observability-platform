@@ -444,8 +444,8 @@ Design: `docs/superpowers/specs/2026-07-30-phase-4.5-grafana-logs-demo-design.md
 Design: `docs/superpowers/specs/2026-08-04-phase-4.6-logql-metric-queries-design.md` · Plan: `docs/superpowers/plans/2026-08-04-phase-4.6-logql-metric-queries.md`
 
 **`internal/logs` shared-parser refactor (`logql.go`)**
-- [ ] `parseLineFilters` → `parseLineFiltersPrefix(s) ([]LineFilter, int, error)`: consume as many chained filters as possible, stop at the first token that does not begin a filter, return bytes consumed. A malformed operand *after* a matched operator still errors — stopping is only for an unmatched operator
-- [ ] `ParseLogQL` treats a non-empty remainder as an error, reproducing both existing messages verbatim so its rejection tests are untouched. One implementation of selector + filter syntax now serves both parsers
+- [x] `parseLineFilters` → `parseLineFiltersPrefix(s) ([]LineFilter, int, error)`: consume as many chained filters as possible, stop at the first token that does not begin a filter, return bytes consumed. A malformed operand *after* a matched operator still errors — stopping is only for an unmatched operator
+- [x] `ParseLogQL` treats a non-empty remainder as an error, reproducing both existing messages verbatim so its rejection tests are untouched. One implementation of selector + filter syntax now serves both parsers
 
 **`internal/logs` metric parser (`metricql.go`)**
 - [ ] `RangeOp` (`count_over_time`, `rate`, `bytes_over_time`, `bytes_rate`) + `String()`; `AggKind` (`AggNone`/`AggSum`); `Grouping{Without, Labels}`; `MetricQuery{Op, Selector, RangeNs, Agg, Grouping}`

@@ -148,6 +148,47 @@ func TestParseLogQL_EscapedLineFilterOperands(t *testing.T) {
 	}
 }
 
+// TestParseLineFiltersPrefix_StopsAtUnknownToken pins the contract the metric
+// parser depends on: consume the filters, stop at whatever follows, and report
+// how many bytes were consumed so the caller can keep parsing from there.
+func TestParseLineFiltersPrefix_StopsAtUnknownToken(t *testing.T) {
+	cases := []struct {
+		in        string
+		wantCount int
+		wantRest  string
+	}{
+		{`[5m])`, 0, `[5m])`},
+		{` |= "x" [5m])`, 1, `[5m])`},
+		{` |= "x" != "y" [5m])`, 2, `[5m])`},
+		{` |~ "5\\d\\d"`, 1, ``},
+		{` | json`, 0, `| json`},
+		{``, 0, ``},
+	}
+	for _, tc := range cases {
+		filters, n, err := parseLineFiltersPrefix(tc.in)
+		if err != nil {
+			t.Fatalf("parseLineFiltersPrefix(%q) error: %v", tc.in, err)
+		}
+		if len(filters) != tc.wantCount {
+			t.Errorf("parseLineFiltersPrefix(%q) = %d filters, want %d", tc.in, len(filters), tc.wantCount)
+		}
+		if got := tc.in[n:]; got != tc.wantRest {
+			t.Errorf("parseLineFiltersPrefix(%q) left %q, want %q", tc.in, got, tc.wantRest)
+		}
+	}
+}
+
+// TestParseLineFiltersPrefix_OperandErrorsStillFail proves stopping is only for an
+// unmatched operator: once an operator matches, a broken operand is an error, not
+// a place to stop.
+func TestParseLineFiltersPrefix_OperandErrorsStillFail(t *testing.T) {
+	for _, in := range []string{` |= error`, ` |= "unterminated`, ` |~ "("`} {
+		if _, _, err := parseLineFiltersPrefix(in); err == nil {
+			t.Errorf("parseLineFiltersPrefix(%q) = nil error, want error", in)
+		}
+	}
+}
+
 // TestParseLogQL_NeverSilentlyMisparses is the counterpart to the accept cases:
 // input that is not a well-formed selector must error rather than quietly become
 // a different, valid-looking query.

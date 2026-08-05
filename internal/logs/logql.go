@@ -83,9 +83,19 @@ func ParseLogQL(q string) (LogSelector, error) {
 	if len(matchers) == 0 {
 		return LogSelector{}, fmt.Errorf("parse error: stream selector must contain at least one label matcher")
 	}
-	filters, err := parseLineFilters(strings.TrimSpace(s[n:]))
+	rest := s[n:]
+	filters, consumed, err := parseLineFiltersPrefix(rest)
 	if err != nil {
 		return LogSelector{}, err
+	}
+	// The metric parser reads the remainder as a [range]; a log query has no
+	// remainder, so anything left is unsupported syntax. Both messages are the
+	// ones the pre-refactor parser produced.
+	if trailing := strings.TrimSpace(rest[consumed:]); trailing != "" {
+		if len(trailing) < 2 {
+			return LogSelector{}, fmt.Errorf("parse error: unsupported LogQL feature near %q", trailing)
+		}
+		return LogSelector{}, fmt.Errorf("parse error: unsupported LogQL feature near %q; only line filters |=, !=, |~, !~ are supported", trailing)
 	}
 	return LogSelector{Matchers: matchers, LineFilters: filters}, nil
 }
@@ -215,16 +225,24 @@ func scanLabelName(s string, i int) (string, int, error) {
 	return name, i, nil
 }
 
-// parseLineFilters parses the chained line filters that follow a selector.
-func parseLineFilters(s string) ([]LineFilter, error) {
+// parseLineFiltersPrefix consumes as many chained line filters as it can from the
+// start of s and returns them with the number of bytes consumed. It stops at the
+// first token that does not begin a line filter, leaving the caller to decide
+// whether the remainder is an error (ParseLogQL) or the [range] that follows a
+// metric query's log expression (ParseMetricQuery).
+//
+// Stopping is only for an operator this parser does not recognize. Once an
+// operator matches, a malformed operand is an error — otherwise `{a="b"} |= error`
+// would silently parse as a bare selector.
+func parseLineFiltersPrefix(s string) ([]LineFilter, int, error) {
 	var filters []LineFilter
-	s = strings.TrimSpace(s)
-	for s != "" {
-		if len(s) < 2 {
-			return nil, fmt.Errorf("parse error: unsupported LogQL feature near %q", s)
+	i := skipSpace(s, 0)
+	for {
+		if len(s)-i < 2 {
+			return filters, i, nil
 		}
 		var op FilterOp
-		switch s[:2] {
+		switch s[i : i+2] {
 		case "|=":
 			op = FilterContains
 		case "!=":
@@ -234,23 +252,22 @@ func parseLineFilters(s string) ([]LineFilter, error) {
 		case "!~":
 			op = FilterNotMatch
 		default:
-			return nil, fmt.Errorf("parse error: unsupported LogQL feature near %q; only line filters |=, !=, |~, !~ are supported", s)
+			return filters, i, nil
 		}
-		rest := strings.TrimSpace(s[2:])
-		value, n, err := scanString(rest)
+		j := skipSpace(s, i+2)
+		value, n, err := scanString(s[j:])
 		if err != nil {
-			return nil, fmt.Errorf("parse error: line filter %s: %w", s[:2], err)
+			return nil, 0, fmt.Errorf("parse error: line filter %s: %w", s[i:i+2], err)
 		}
 		f := LineFilter{Op: op, Value: value}
 		if op == FilterMatch || op == FilterNotMatch {
 			re, err := regexp.Compile(value)
 			if err != nil {
-				return nil, fmt.Errorf("parse error: invalid regular expression %q: %w", value, err)
+				return nil, 0, fmt.Errorf("parse error: invalid regular expression %q: %w", value, err)
 			}
 			f.re = re
 		}
 		filters = append(filters, f)
-		s = strings.TrimSpace(rest[n:])
+		i = skipSpace(s, j+n)
 	}
-	return filters, nil
 }
