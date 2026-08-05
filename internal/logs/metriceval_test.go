@@ -260,6 +260,76 @@ func TestEvalMetricRange_Grouping(t *testing.T) {
 	}
 }
 
+// TestEvalMetricRange_DropLabel_Grouping proves a dropped label is invisible to
+// grouping: `by (level)` on a query that dropped `level` sees it as absent, the
+// same as a stream that never had it — not the value the stream still carries.
+func TestEvalMetricRange_DropLabel_Grouping(t *testing.T) {
+	f := newMetricFake(t, map[string][]LogEntry{
+		"service=api,level=info": {entry(10*sec, "a")},
+	})
+	e := NewQueryEngine(f)
+	q := mustParse(t, `sum by (level) (count_over_time({service="api"} | drop level [10s]))`)
+
+	series, err := e.EvalMetricRange(context.Background(), q, 11*sec, 11*sec, sec)
+	if err != nil {
+		t.Fatalf("EvalMetricRange: %v", err)
+	}
+	if len(series) != 1 || len(series[0].Labels) != 0 {
+		t.Fatalf("series = %+v, want exactly one label-less series", series)
+	}
+	if series[0].Points[0].Value != 1 {
+		t.Errorf("value = %v, want 1", series[0].Points[0].Value)
+	}
+}
+
+// TestEvalMetricRange_DropLabel_Bare proves a bare range aggregation's output
+// labels lose the dropped names too: "verbatim" means "after drop", not before.
+func TestEvalMetricRange_DropLabel_Bare(t *testing.T) {
+	f := newMetricFake(t, map[string][]LogEntry{
+		"service=api,level=info": {entry(10*sec, "a")},
+	})
+	e := NewQueryEngine(f)
+	q := mustParse(t, `count_over_time({service="api"} | drop level [10s])`)
+
+	series, err := e.EvalMetricRange(context.Background(), q, 11*sec, 11*sec, sec)
+	if err != nil {
+		t.Fatalf("EvalMetricRange: %v", err)
+	}
+	if len(series) != 1 {
+		t.Fatalf("got %d series, want 1: %+v", len(series), series)
+	}
+	if _, ok := series[0].Labels["level"]; ok {
+		t.Errorf("labels = %v, want no level", series[0].Labels)
+	}
+	if series[0].Labels["service"] != "api" {
+		t.Errorf("labels = %v, want service=api kept", series[0].Labels)
+	}
+}
+
+// TestEvalMetricRange_DropErrorLabel_NoOp proves dropping __error__ — the only
+// form Grafana emits — changes nothing: no parser stage in this subset ever sets
+// __error__, so there is nothing for the drop to remove.
+func TestEvalMetricRange_DropErrorLabel_NoOp(t *testing.T) {
+	f := newMetricFake(t, map[string][]LogEntry{
+		"service=api,level=info": {entry(10*sec, "a")},
+	})
+	e := NewQueryEngine(f)
+	withDrop := mustParse(t, `count_over_time({service="api"} | drop __error__ [10s])`)
+	without := mustParse(t, `count_over_time({service="api"}[10s])`)
+
+	a, err := e.EvalMetricRange(context.Background(), withDrop, 11*sec, 11*sec, sec)
+	if err != nil {
+		t.Fatalf("with drop: %v", err)
+	}
+	b, err := e.EvalMetricRange(context.Background(), without, 11*sec, 11*sec, sec)
+	if err != nil {
+		t.Fatalf("without: %v", err)
+	}
+	if len(a) != 1 || len(b) != 1 || renderLabels(a[0].Labels) != renderLabels(b[0].Labels) {
+		t.Fatalf("dropping __error__ changed labels: with=%+v without=%+v", a, b)
+	}
+}
+
 // TestEvalMetricRange_Deterministic proves repeated evaluation returns series and
 // points in the same order, so responses do not flap with Go's map iteration.
 func TestEvalMetricRange_Deterministic(t *testing.T) {
