@@ -88,8 +88,12 @@ bytes_over_time({service="api"}[5m])
 
 The first returns one series per level; the others return one per stream. `rate` is
 `count_over_time` per second, and the `bytes_` pair measures volume rather than line
-count. Switching Explore's query type to **Instant** returns the same numbers as a
-single point per series.
+count. Switching Explore's query type to **Instant** returns a single point per series
+rather than a series over time. The numbers match a range query's except at one
+boundary: an entry timestamped exactly at the query instant is counted, while a range
+query excludes an entry timestamped exactly at `end`. That asymmetry is deliberate —
+`time` is an evaluation instant, not a range bound — and is recorded in
+`docs/planning/ARCHITECTURE_NOTES.md`.
 
 ## Dashboard
 
