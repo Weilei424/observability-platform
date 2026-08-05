@@ -245,8 +245,9 @@ func TestLogsDashboardIdentity(t *testing.T) {
 	}
 }
 
-// wantPanels is the exact panel set the phase requires: two queryable logs
-// panels and the text panel documenting the supported subset.
+// wantPanels is the exact panel set the phase requires: the volume panel,
+// two queryable logs panels, and the text panel documenting the supported
+// subset.
 //
 // The target count is the load-bearing field. A logs panel whose targets went
 // to [] still renders — as an empty panel — so counting targets dashboard-wide
@@ -259,6 +260,7 @@ var wantPanels = []struct {
 	title   string
 	targets int
 }{
+	{4, "timeseries", "Log volume by level — $service", 1},
 	{1, "logs", "All logs — $service", 1},
 	{2, "logs", "$level logs — $service", 1},
 	{3, "text", "Supported LogQL subset", 0},
@@ -444,10 +446,17 @@ var variablePattern = regexp.MustCompile(`\$\{?(\w+)\}?`)
 // viewer who types a quote gets a 400 the runbook documents rather than the
 // dashboard preventing, so that case is deliberately not simulated here.
 var variableValues = map[string][]string{
-	"service": {"api"},
-	"level":   {"error"},
-	"search":  {"", "timeout"},
+	"service":    {"api"},
+	"level":      {"error"},
+	"search":     {"", "timeout"},
+	"__interval": {"1m"},
 }
+
+// grafanaBuiltins are variables Grafana provides itself, so a panel may reference
+// one without the dashboard declaring it. They still need a test value: an
+// interval that interpolates to something the range grammar rejects breaks the
+// panel in the browser while every static check here passes.
+var grafanaBuiltins = map[string]bool{"__interval": true}
 
 // interpolate substitutes Grafana template variables the way Grafana does,
 // leaving anything it has no value for in place so the caller can catch it.
@@ -458,6 +467,19 @@ func interpolate(expr string, values map[string]string) string {
 		}
 		return m
 	})
+}
+
+// parsePanelExpr runs a panel expression through whichever production parser the
+// backend would use for it: a log query opens with '{', a metric query with an
+// aggregation name. Routing here rather than skipping non-log expressions keeps
+// the guarantee this test exists for — that every panel expression parses.
+func parsePanelExpr(expr string) error {
+	if trimmed := strings.TrimSpace(expr); trimmed != "" && trimmed[0] != '{' {
+		_, err := logs.ParseMetricQuery(trimmed)
+		return err
+	}
+	_, err := logs.ParseLogQL(expr)
+	return err
 }
 
 // TestLogsDashboardQueriesStayInsideTheSupportedSubset runs every panel
@@ -480,6 +502,9 @@ func TestLogsDashboardQueriesStayInsideTheSupportedSubset(t *testing.T) {
 		if len(variableValues[v.Name]) == 0 {
 			t.Errorf("variable %q has no test value in variableValues; add one so panel expressions using it are still parsed", v.Name)
 		}
+	}
+	for name := range grafanaBuiltins {
+		declared[name] = true
 	}
 
 	for _, p := range loadPanels(t) {
@@ -510,7 +535,7 @@ func TestLogsDashboardQueriesStayInsideTheSupportedSubset(t *testing.T) {
 					t.Errorf("%s expr %q still contains a variable after interpolation with %v", label, expr, values)
 					continue
 				}
-				if _, err := logs.ParseLogQL(expr); err != nil {
+				if err := parsePanelExpr(expr); err != nil {
 					t.Errorf("%s expr %q interpolates to %q, which the backend's own parser rejects: %v",
 						label, tg.Expr, expr, err)
 				}

@@ -8,7 +8,40 @@
   "panels": [
     {
       "datasource": {"type": "loki", "uid": "obs-loki"},
-      "gridPos": {"h": 11, "w": 24, "x": 0, "y": 0},
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 70,
+            "lineWidth": 0,
+            "stacking": {"group": "A", "mode": "normal"}
+          },
+          "min": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 7, "w": 24, "x": 0, "y": 0},
+      "id": 4,
+      "options": {
+        "legend": {"calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "loki", "uid": "obs-loki"},
+          "editorMode": "code",
+          "expr": "sum by (level) (count_over_time({service=\"$service\"} |= \"$search\" [$__interval]))",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Log volume by level — $service",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "loki", "uid": "obs-loki"},
+      "gridPos": {"h": 11, "w": 24, "x": 0, "y": 7},
       "id": 1,
       "options": {
         "dedupStrategy": "none",
@@ -34,7 +67,7 @@
     },
     {
       "datasource": {"type": "loki", "uid": "obs-loki"},
-      "gridPos": {"h": 11, "w": 16, "x": 0, "y": 11},
+      "gridPos": {"h": 11, "w": 16, "x": 0, "y": 18},
       "id": 2,
       "options": {
         "dedupStrategy": "none",
@@ -59,11 +92,11 @@
       "type": "logs"
     },
     {
-      "gridPos": {"h": 11, "w": 8, "x": 16, "y": 11},
+      "gridPos": {"h": 11, "w": 8, "x": 16, "y": 18},
       "id": 3,
       "options": {
         "code": {"language": "plaintext", "showLineNumbers": false, "showMiniMap": false},
-        "content": "### Supported\n\n- Stream selectors, **equality only**:\n  `{service=\"api\", level=\"error\"}`\n- Line filters: `|=` `!=` `|~` `!~`\n- Endpoints: `query`, `query_range`, `labels`,\n  `label/{name}/values`\n\n### Not supported — returns an explicit 400\n\n- Metric queries (`count_over_time`, `rate`,\n  `sum by`) — this is why Explore's log-volume\n  histogram shows an error. Phase 4.6.\n- Pipelines: `| json`, `| logfmt`, `line_format`\n- Regex/negative **label** matchers: `=~` `!=` `!~`\n  (so the variables above are single-select)\n\n### Not implemented — returns 404\n\n- Live tail (`/loki/api/v1/tail`, needs WebSocket)\n- Query size estimate (`/loki/api/v1/index/stats`)\n\nWalkthrough: `docs/runbooks/grafana-logs-demo.md`",
+        "content": "### Supported\n\n- Stream selectors, **equality only**:\n  `{service=\"api\", level=\"error\"}`\n- Line filters: `|=` `!=` `|~` `!~`\n- Metric queries: count_over_time, rate,\n  bytes_over_time, bytes_rate, wrapped in\n  sum / sum by (...) / sum without (...)\n- Endpoints: `query`, `query_range`, `labels`,\n  `label/{name}/values`\n\n### Not supported — returns an explicit 400\n\n- unwrap and the other _over_time functions\n  (avg_over_time, quantile_over_time, ...)\n- Binary operations: sum(...) / sum(...)\n- Pipelines: `| json`, `| logfmt`, `line_format`\n- Regex/negative **label** matchers: `=~` `!=` `!~`\n  (so the variables above are single-select)\n\n### Not implemented — returns 404\n\n- Live tail (`/loki/api/v1/tail`, needs WebSocket)\n- Query size estimate (`/loki/api/v1/index/stats`)\n\nWalkthrough: `docs/runbooks/grafana-logs-demo.md`",
         "mode": "markdown"
       },
       "title": "Supported LogQL subset",

@@ -470,9 +470,9 @@ Design: `docs/superpowers/specs/2026-08-04-phase-4.6-logql-metric-queries-design
 - [x] `interval` keeps its 400 with a message that reads correctly for a matrix; `limit`/`direction` stay parsed by the shared parser and are ignored on the metric path
 
 **Grafana dashboard**
-- [ ] `observability/grafana/dashboards/logs.json` — panel `id: 4`, `timeseries` drawn as stacked bars, `Log volume by level — $service`, expression `sum by (level) (count_over_time({service="$service"} |= "$search" [$__interval]))`; existing panels shift down (panel 1 `y: 0→7`, panels 2/3 `y: 11→18`)
-- [ ] `logs.json` text panel `id: 3` — metric queries move from the "returns 400" list to the supported list; unsupported list gains `unwrap`, the other `_over_time` functions, and binary operations; the stale "Phase 4.6" sentence goes
-- [ ] `tests/e2e/provisioning_test.go` — pin the new panel (id/type/title/target count); add `__interval` to `variableValues`; route the expression check on the leading `{` so metric panels reach `ParseMetricQuery` instead of being skipped
+- [x] `observability/grafana/dashboards/logs.json` — panel `id: 4`, `timeseries` drawn as stacked bars, `Log volume by level — $service`, expression `sum by (level) (count_over_time({service="$service"} |= "$search" [$__interval]))`; existing panels shift down (panel 1 `y: 0→7`, panels 2/3 `y: 11→18`)
+- [x] `logs.json` text panel `id: 3` — metric queries move from the "returns 400" list to the supported list; unsupported list gains `unwrap`, the other `_over_time` functions, and binary operations; the stale "Phase 4.6" sentence goes
+- [x] `tests/e2e/provisioning_test.go` — pin the new panel (id/type/title/target count); add `__interval` to `variableValues`; route the expression check on the leading `{` so metric panels reach `ParseMetricQuery` instead of being skipped
 
 **Tests**
 - [ ] Unit `internal/logs/metricql_test.go` — accept table asserting the full `MetricQuery` (four ops, with/without filters, `sum`/`by`/`without`, whitespace, Prometheus *and* Go durations); reject table covering every rejection above; sentinel cases
