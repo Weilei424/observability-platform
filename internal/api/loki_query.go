@@ -343,8 +343,12 @@ const maxLokiPoints = 11000
 // metric query.
 //
 // An absent step is derived exactly as upstream's ParseRangeQuery does:
-// max(floor(rangeSeconds/250), 1) seconds, which is positive by construction and
-// yields at most 250 points, so it needs no further checking.
+// max(floor(rangeSeconds/250), 1) seconds, which is positive by construction, so
+// it needs no further checking. That formula does not cap the point count at
+// 250: floor division holds the step at the 1-second floor for any span in
+// [250s, 500s), so a 499s range with no explicit step yields 499 points. The
+// point count is bounded only by the same ~500 upstream's defaultQueryRangeStep
+// allows, not by 250.
 func resolveLokiStep(w http.ResponseWriter, raw string, startNs, endNs int64) (int64, bool) {
 	// endNs >= startNs is already established, so a negative difference can only
 	// mean the true span exceeded int64 nanoseconds (~292 years) and wrapped.

@@ -329,13 +329,23 @@ and `/loki/api/v1/index/stats` (query size estimate).
   them would put two identically-labelled series in one response.
 - `step` finally does something. `resolveLokiStep` returns it in nanoseconds and
   derives an absent one as upstream's `ParseRangeQuery` does — `max(floor(
-  rangeSeconds/250), 1)` seconds, at most 250 points. Log queries still call it for
-  validation and discard the value. `limit` and `direction` are parsed by the shared
-  parameter parser and then ignored on the metric path, as upstream ignores them.
+  rangeSeconds/250), 1)` seconds, up to ~500 points (floor division holds the step
+  at 1 second for any span in `[250s, 500s)`, not 250 as the denominator alone
+  would suggest), matching upstream's `defaultQueryRangeStep`. Log queries still
+  call it for validation and discard the value. `limit` and `direction` are parsed
+  by the shared parameter parser and then ignored on the metric path, as upstream
+  ignores them.
 - A metric query ignores `limit` and reads every matching entry in its window, so
   the 4.4 note about the transient per-stream working set applies with more force:
   `StreamEntries` still materializes a stream's whole in-range slice. The evaluator
   itself is single-pass; bounding the read needs the same deferred lazy cursor.
+  The **output** side is unbounded the same way: a metric query fans out over
+  every matching stream (or every distinct group, under `sum by`/`without`) with
+  no cap, so a response can carry one series per stream, each with up to the
+  11,000-point ceiling, fully materialized before serialization. The log path
+  caps its response at `limit`; the metric path has no equivalent — upstream's
+  `max_query_series` (default 500) is not implemented. Only the query's own time
+  bounds and `step` constrain the response size today.
 
 ---
 
