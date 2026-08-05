@@ -456,7 +456,7 @@ Design: `docs/superpowers/specs/2026-08-04-phase-4.6-logql-metric-queries-design
 
 **`internal/logs` metric evaluator (`metriceval.go`)**
 - [ ] `MetricPoint`, `MetricSeries`, `MetricSample`; `EvalMetricRange(ctx, q, startNs, endNs, stepNs)` and `EvalMetricInstant(ctx, q, tsNs)` (the single-tick case of range)
-- [ ] Time model: ticks `start, start+step, … ≤ end`; window `(t − range, t]`; entries read `[start − range, end)`; `windowStart` clamps at `MinInt64` instead of wrapping; overflow-safe tick advance via the unsigned difference
+- [ ] Time model: ticks `start, start+step, … ≤ end`; window `(t − range, t]`; entries read `[start − range, end)`, with instant `query` inclusive at `time` as 4.4's `QueryInstant` is; `windowStart` clamps at `MinInt64` instead of wrapping; overflow-safe tick advance via the unsigned difference
 - [ ] Values: count / Σ`len(line)` bytes / both scaled by `1/rangeSeconds` — one accumulation path with a per-entry weight and a scale factor; line filters applied before counting
 - [ ] Two-pointer sliding window per stream, `O(entries + ticks)`, emitting on "window non-empty" rather than "value non-zero" so `bytes_over_time` over empty lines is a `0` and an empty window is a gap
 - [ ] Grouping: `AggNone` → stream labels verbatim; `sum` → no labels; `by` → listed labels the stream carries; `without` → labels minus the listed names. Empty value ≡ absent (both render to the same label set, so splitting would emit duplicate series); length-prefixed group key; series sorted by label set, points ascending
