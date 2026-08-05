@@ -475,22 +475,22 @@ Design: `docs/superpowers/specs/2026-08-04-phase-4.6-logql-metric-queries-design
 - [x] `tests/e2e/provisioning_test.go` — pin the new panel (id/type/title/target count); add `__interval` to `variableValues`; route the expression check on the leading `{` so metric panels reach `ParseMetricQuery` instead of being skipped
 
 **Tests**
-- [ ] Unit `internal/logs/metricql_test.go` — accept table asserting the full `MetricQuery` (four ops, with/without filters, `sum`/`by`/`without`, whitespace, Prometheus *and* Go durations); reject table covering every rejection above; sentinel cases
-- [ ] Unit `internal/logs/metriceval_test.go` — boundary trio (entry at `t` counts, at `t − range` and at `end` do not); non-step-aligned end; gaps not zeros; `bytes_over_time` zero vs gap; filters before counting; `rate`/`bytes_rate` arithmetic; multibyte byte counting; `by` with an absent label, `without`, bare `sum`, `level=""` grouping with absent; deterministic ordering; underflow clamp; instant = last tick; invalid arguments
-- [ ] Integration `internal/api/loki_metric_query_test.go` — Grafana's exact log-volume query → matrix with expected counts; bare `count_over_time` per-stream series; `rate`/`bytes_over_time`/`bytes_rate`; instant → labeled vector; default step derivation; 11,000-point rejection; unsupported → 400 `text/plain`; `vector(1)+vector(1)` → 400 on `query_range`, unchanged vector on instant
-- [ ] Update `TestLokiQueryRange_UnsupportedAndBadParams` (swap `rate(...)` for a still-unsupported expression) and `TestLokiInstantQuery_UnsupportedMetricQuery` (keep only unsupported cases, add a positive counterpart)
+- [x] Unit `internal/logs/metricql_test.go` — accept table asserting the full `MetricQuery` (four ops, with/without filters, `sum`/`by`/`without`, whitespace, Prometheus *and* Go durations); reject table covering every rejection above; sentinel cases
+- [x] Unit `internal/logs/metriceval_test.go` — boundary trio (entry at `t` counts, at `t − range` and at `end` do not); non-step-aligned end; gaps not zeros; `bytes_over_time` zero vs gap; filters before counting; `rate`/`bytes_rate` arithmetic; multibyte byte counting; `by` with an absent label, `without`, bare `sum`, `level=""` grouping with absent; deterministic ordering; underflow clamp; instant = last tick; invalid arguments
+- [x] Integration `internal/api/loki_metric_query_test.go` — Grafana's exact log-volume query → matrix with expected counts; bare `count_over_time` per-stream series; `rate`/`bytes_over_time`/`bytes_rate`; instant → labeled vector; default step derivation; 11,000-point rejection; unsupported → 400 `text/plain`; `vector(1)+vector(1)` → 400 on `query_range`, unchanged vector on instant
+- [x] Update `TestLokiQueryRange_UnsupportedAndBadParams` (swap `rate(...)` for a still-unsupported expression) and `TestLokiInstantQuery_UnsupportedMetricQuery` (keep only unsupported cases, add a positive counterpart)
 - [x] `tests/e2e/logs_smoke.sh` — the metric-LogQL check flips from 400 to success, filtered on `|= "run_id=$RUN_ID"` so repeated runs cannot drift the count; assert matrix envelope, both level groups, value `"1"`; add a `rate` check and keep `avg_over_time` → 400
 - [x] `tests/e2e/compose_smoke.sh` — assert the volume panel's expression is in the dashboard Grafana serves, then run it through `/api/ds/query` and assert level-labeled numeric frames with no error
 
 **Docs + roadmap**
-- [ ] `docs/planning/IMPLEMENTATION_PLAN.md` §4.6 — scope and DoD rewritten for the wider subset (the current DoD names `rate` as still-unsupported)
-- [ ] `docs/planning/ARCHITECTURE_NOTES.md` — "LogQL metric queries (introduced in 4.6)" subsection (grammar, time model, step defaulting, output-label semantics vs the metrics aggregator, memory note); "Known gaps" loses metric LogQL
-- [ ] `docs/runbooks/grafana-logs-demo.md` — drop the log-volume limitation row; add metric queries to the Explore ladder and the dashboard walkthrough; list what is still unsupported
-- [ ] `README.md` — LogQL supported-syntax table beside the existing PromQL one
+- [x] `docs/planning/IMPLEMENTATION_PLAN.md` §4.6 — scope and DoD rewritten for the wider subset (the current DoD names `rate` as still-unsupported)
+- [x] `docs/planning/ARCHITECTURE_NOTES.md` — "LogQL metric queries (introduced in 4.6)" subsection (grammar, time model, step defaulting, output-label semantics vs the metrics aggregator, memory note); "Known gaps" loses metric LogQL
+- [x] `docs/runbooks/grafana-logs-demo.md` — drop the log-volume limitation row; add metric queries to the Explore ladder and the dashboard walkthrough; list what is still unsupported
+- [x] `README.md` — LogQL supported-syntax table beside the existing PromQL one
 
 **Verify**
-- [ ] Verify: `go build ./...`, `go vet ./...`, `golangci-lint run`, `go test ./...` green
-- [ ] Verify: `make smoke-logs` exits 0 against a locally run backend
+- [x] Verify: `go build ./...`, `go vet ./...`, `golangci-lint run`, `go test ./...` green
+- [x] Verify: `make smoke-logs` exits 0 against a locally run backend
 - [ ] Verify *(requires Docker)*: `make smoke-compose` exits 0, including the new volume-panel assertions
 - [ ] Verify *(requires Docker)*: Explore's log-volume histogram renders instead of erroring, and the dashboard's volume panel draws stacked bars
 
