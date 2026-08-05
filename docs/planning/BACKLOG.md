@@ -463,7 +463,7 @@ Design: `docs/superpowers/specs/2026-08-04-phase-4.6-logql-metric-queries-design
 - [x] Argument validation (`stepNs > 0`, `endNs >= startNs`, `RangeNs > 0`) and per-stream `ctx` checks
 
 **`internal/api` routing + envelopes**
-- [ ] `loki_response.go` — `lokiMatrixResponse`/`lokiMatrixData`/`lokiMatrixSeries` + `writeLokiMatrix`; `writeLokiVectorSamples` for labeled vectors, with `writeLokiVector` reimplemented as a thin wrapper so the health-check response stays byte-identical
+- [x] `loki_response.go` — `lokiMatrixResponse`/`lokiMatrixData`/`lokiMatrixSeries` + `writeLokiMatrix`; `writeLokiVectorSamples` for labeled vectors, with `writeLokiVector` reimplemented as a thin wrapper so the health-check response stays byte-identical
 - [ ] `loki_query.go` — `handleLokiQueryRange` dispatches on the leading `{`; `ErrNotMetricQuery` → 400 naming the instant endpoint; metric path evaluates and writes a matrix
 - [ ] `loki_query.go` — `handleLokiQuery` tries `ParseMetricQuery` first and falls back to `ParseScalarQuery` on the sentinel; a metric query returns a labeled vector at `time`
 - [ ] `loki_query.go` — `validLokiStep` → `resolveLokiStep` returning nanoseconds, defaulting an absent step to upstream's `max(floor(rangeSeconds/250), 1)` seconds; explicit-step validation and the 11,000-point limit unchanged; log queries still discard the value

@@ -59,6 +59,67 @@ type lokiScalarData struct {
 	Stats      map[string]any `json:"stats"`
 }
 
+// lokiMatrixResponse is the `resultType: "matrix"` envelope returned by a metric
+// query on query_range: one entry per output series, each with a label set and a
+// list of [<epoch seconds>, "<value>"] pairs.
+type lokiMatrixResponse struct {
+	Status string         `json:"status"`
+	Data   lokiMatrixData `json:"data"`
+}
+
+type lokiMatrixData struct {
+	ResultType string             `json:"resultType"`
+	Result     []lokiMatrixSeries `json:"result"`
+	Stats      map[string]any     `json:"stats"`
+}
+
+type lokiMatrixSeries struct {
+	Metric map[string]string `json:"metric"`
+	Values [][2]any          `json:"values"` // [<epoch seconds>, "<value>"]
+}
+
+// lokiSampleValue formats one sample the way Loki does: the timestamp as epoch
+// seconds (a JSON number, fractional when sub-second) and the value as a string.
+// Formatting the value ourselves also keeps ±Inf and NaN serializable, which
+// encoding/json would reject as bare floats.
+func lokiSampleValue(tsNs int64, v float64) [2]any {
+	return [2]any{float64(tsNs) / 1e9, strconv.FormatFloat(v, 'f', -1, 64)}
+}
+
+// writeLokiMatrix writes a Loki "matrix" success envelope. A nil result
+// serializes as [] (never null); stats is an empty object placeholder.
+func writeLokiMatrix(w http.ResponseWriter, result []lokiMatrixSeries) {
+	if result == nil {
+		result = []lokiMatrixSeries{}
+	}
+	writeJSON(w, http.StatusOK, lokiMatrixResponse{
+		Status: "success",
+		Data: lokiMatrixData{
+			ResultType: "matrix",
+			Result:     result,
+			Stats:      map[string]any{},
+		},
+	})
+}
+
+// writeLokiVectorSamples writes a Loki "vector" success envelope holding any
+// number of labeled samples. An instant metric query answers with this; the
+// constant-expression shim answers with writeLokiVector below, which is the
+// single label-less case.
+func writeLokiVectorSamples(w http.ResponseWriter, result []lokiVectorSample) {
+	if result == nil {
+		result = []lokiVectorSample{}
+	}
+	writeJSON(w, http.StatusOK, lokiVectorResponse{
+		Status: "success",
+		Data: lokiVectorData{
+			ResultType: "vector",
+			Result:     result,
+			Stats:      map[string]any{},
+		},
+	})
+}
+
 // writeLokiStreams writes a Loki "streams" success envelope. A nil result
 // serializes as [] (never null); stats is an empty object placeholder.
 func writeLokiStreams(w http.ResponseWriter, result []lokiStreamResult) {
@@ -77,20 +138,12 @@ func writeLokiStreams(w http.ResponseWriter, result []lokiStreamResult) {
 
 // writeLokiVector writes a Loki "vector" success envelope holding one label-less
 // sample. Timestamps are epoch seconds and the value is a string, matching the
-// Prometheus-style sample shape Loki uses. Formatting the value ourselves also
-// keeps ±Inf serializable, which encoding/json would reject as a bare float.
+// Prometheus-style sample shape Loki uses.
 func writeLokiVector(w http.ResponseWriter, tsNs int64, value float64) {
-	writeJSON(w, http.StatusOK, lokiVectorResponse{
-		Status: "success",
-		Data: lokiVectorData{
-			ResultType: "vector",
-			Result: []lokiVectorSample{{
-				Metric: map[string]string{},
-				Value:  [2]any{float64(tsNs) / 1e9, strconv.FormatFloat(value, 'f', -1, 64)},
-			}},
-			Stats: map[string]any{},
-		},
-	})
+	writeLokiVectorSamples(w, []lokiVectorSample{{
+		Metric: map[string]string{},
+		Value:  lokiSampleValue(tsNs, value),
+	}})
 }
 
 // writeLokiScalar writes a Loki "scalar" success envelope. Same timestamp and
@@ -100,7 +153,7 @@ func writeLokiScalar(w http.ResponseWriter, tsNs int64, value float64) {
 		Status: "success",
 		Data: lokiScalarData{
 			ResultType: "scalar",
-			Result:     [2]any{float64(tsNs) / 1e9, strconv.FormatFloat(value, 'f', -1, 64)},
+			Result:     lokiSampleValue(tsNs, value),
 			Stats:      map[string]any{},
 		},
 	})

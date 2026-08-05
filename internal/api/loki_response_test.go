@@ -69,3 +69,58 @@ func TestWriteLokiError_PlainText(t *testing.T) {
 		t.Fatalf("body = %q", w.Body.String())
 	}
 }
+
+func TestWriteLokiMatrix(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeLokiMatrix(rec, []lokiMatrixSeries{{
+		Metric: map[string]string{"level": "info"},
+		Values: [][2]any{lokiSampleValue(1_700_000_000_000_000_000, 3), lokiSampleValue(1_700_000_060_500_000_000, 0)},
+	}})
+
+	if rec.Code != 200 {
+		t.Fatalf("code = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`"resultType":"matrix"`,
+		`"metric":{"level":"info"}`,
+		`[1700000000,"3"]`,
+		`[1700000060.5,"0"]`,
+		`"stats":{}`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body %s does not contain %s", body, want)
+		}
+	}
+}
+
+// TestWriteLokiMatrix_EmptyResult pins that no result serializes as [] rather than
+// null: Grafana's Loki datasource iterates the array without a nil check.
+func TestWriteLokiMatrix_EmptyResult(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeLokiMatrix(rec, nil)
+	if !strings.Contains(rec.Body.String(), `"result":[]`) {
+		t.Errorf("body %s, want an empty result array", rec.Body.String())
+	}
+}
+
+// TestWriteLokiVectorSamples_Labeled proves the labeled writer carries per-series
+// labels, while the label-less health-check writer is unchanged.
+func TestWriteLokiVectorSamples_Labeled(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeLokiVectorSamples(rec, []lokiVectorSample{
+		{Metric: map[string]string{"level": "error"}, Value: lokiSampleValue(1_700_000_000_000_000_000, 7)},
+	})
+	body := rec.Body.String()
+	for _, want := range []string{`"resultType":"vector"`, `"metric":{"level":"error"}`, `[1700000000,"7"]`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body %s does not contain %s", body, want)
+		}
+	}
+
+	rec = httptest.NewRecorder()
+	writeLokiVector(rec, 4_000_000_000_000_000_000, 2)
+	if body := rec.Body.String(); !strings.Contains(body, `"metric":{}`) || !strings.Contains(body, `,"2"]`) {
+		t.Errorf("health-check envelope changed: %s", body)
+	}
+}
