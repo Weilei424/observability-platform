@@ -113,6 +113,42 @@ func TestQueryRange_RealStore_FilterAndTimeRange(t *testing.T) {
 	}
 }
 
+// TestQueryRange_DropLabel proves a `| drop` stage removes the named label from
+// the returned StreamResult.Labels, while leaving the entries themselves
+// unchanged — drop is an output-label transform, not a filter.
+func TestQueryRange_DropLabel(t *testing.T) {
+	s := newTestStore(t, t.TempDir(), 8<<20)
+	api := mustLabels(t, map[string]string{"service": "api", "level": "info"})
+	if err := s.Append(api, 100, "line one"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append(api, 200, "line two"); err != nil {
+		t.Fatal(err)
+	}
+	eng := NewQueryEngine(s)
+
+	sel, err := ParseLogQL(`{service="api"} | drop level`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := eng.QueryRange(context.Background(), sel, 0, 1000, 100, Forward)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
+	if len(res) != 1 {
+		t.Fatalf("got %d streams, want 1: %+v", len(res), res)
+	}
+	if _, ok := res[0].Labels["level"]; ok {
+		t.Errorf("labels = %v, want no level", res[0].Labels)
+	}
+	if res[0].Labels["service"] != "api" {
+		t.Errorf("labels = %v, want service=api kept", res[0].Labels)
+	}
+	if len(res[0].Entries) != 2 || res[0].Entries[0].Line != "line one" || res[0].Entries[1].Line != "line two" {
+		t.Fatalf("entries = %+v, want both lines unchanged", res[0].Entries)
+	}
+}
+
 func TestQueryInstant_UpToTime(t *testing.T) {
 	s := newTestStore(t, t.TempDir(), 8<<20)
 	api := mustLabels(t, map[string]string{"service": "api"})
