@@ -101,7 +101,13 @@ func (e *QueryEngine) evalMetric(ctx context.Context, q MetricQuery, startNs, en
 		if err != nil {
 			return nil, err
 		}
-		kept := make([]LogEntry, 0, len(entries))
+		// Filter in place rather than allocating a second slice: StreamEntries
+		// returns a fresh slice on every call (both Store's disk-backed
+		// implementation and the in-memory one build `out` from nil), never one
+		// shared with a cache or another caller, so overwriting its head as we
+		// go is safe. That freshness is the assumption a future StreamEntries
+		// change (e.g. a cached or pooled buffer) could break.
+		kept := entries[:0]
 		for _, en := range entries {
 			if !endInclusive && en.TimestampNs >= endNs {
 				continue // the read is half-open on the right
@@ -123,18 +129,8 @@ func (e *QueryEngine) evalMetric(ctx context.Context, q MetricQuery, startNs, en
 		accumulate(g, kept, q, startNs, endNs, stepNs)
 	}
 
-	// Sort by the encoded group key. The encoding is deterministic, which is what
-	// matters — a response must not reorder between identical requests. It is not
-	// alphabetical by label value, and nothing depends on it being so.
-	keys := make([]string, 0, len(groups))
-	for k := range groups {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	series := make([]MetricSeries, 0, len(keys))
-	for _, k := range keys {
-		g := groups[k]
+	series := make([]MetricSeries, 0, len(groups))
+	for _, g := range groups {
 		if len(g.values) == 0 {
 			continue
 		}
@@ -145,6 +141,16 @@ func (e *QueryEngine) evalMetric(ctx context.Context, q MetricQuery, startNs, en
 		sort.Slice(points, func(i, j int) bool { return points[i].TimestampNs < points[j].TimestampNs })
 		series = append(series, MetricSeries{Labels: g.labels, Points: points})
 	}
+
+	// Sort by the rendered label set, per §5 of the design spec ("series are
+	// sorted by their rendered label set") — not the encoded group key, which
+	// exists only to disambiguate groups internally and carries no ordering
+	// promise of its own. renderLabels is deterministic (sorted names, quoted
+	// values), so the response order is stable across identical requests even
+	// though the loop above walks `groups` in Go's randomized map order.
+	sort.Slice(series, func(i, j int) bool {
+		return renderLabels(series[i].Labels) < renderLabels(series[j].Labels)
+	})
 	return series, nil
 }
 
@@ -259,8 +265,9 @@ func encodeLabelSet(m map[string]string) string {
 	return b.String()
 }
 
-// renderLabels formats a label set the way LogQL writes one, for error messages
-// and test assertions.
+// renderLabels formats a label set the way LogQL writes one: names sorted,
+// values quoted. evalMetric uses it as the output series' sort key (§5 of the
+// design spec); tests use it the same way to assert series order and identity.
 func renderLabels(m map[string]string) string {
 	names := make([]string, 0, len(m))
 	for n := range m {
