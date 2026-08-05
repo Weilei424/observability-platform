@@ -51,11 +51,13 @@ func (f LineFilter) Keep(line string) bool {
 	}
 }
 
-// LogSelector is a parsed LogQL query: an equality stream selector plus zero or
-// more chained line filters applied left to right.
+// LogSelector is a parsed LogQL query: an equality stream selector, zero or more
+// chained line filters applied left to right, and the label names named by a
+// trailing `| drop` stage, if any.
 type LogSelector struct {
 	Matchers    []index.Pair
 	LineFilters []LineFilter
+	DropLabels  []string
 }
 
 // ParseLogQL parses the supported LogQL subset:
@@ -88,16 +90,27 @@ func ParseLogQL(q string) (LogSelector, error) {
 	if err != nil {
 		return LogSelector{}, err
 	}
+	dropLabels, dn, err := parseDropStagePrefix(rest[consumed:])
+	if err != nil {
+		return LogSelector{}, err
+	}
+	consumed += dn
 	// The metric parser reads the remainder as a [range]; a log query has no
-	// remainder, so anything left is unsupported syntax. Both messages are the
-	// ones the pre-refactor parser produced.
+	// remainder, so anything left is unsupported syntax. Line filters and the one
+	// supported pipeline stage (drop) are already consumed above, so a leading '|'
+	// here is always some other pipeline stage — it gets the same
+	// errPipelineUnsupported message a metric query's unsupported stage does,
+	// rather than the generic message below.
 	if trailing := strings.TrimSpace(rest[consumed:]); trailing != "" {
+		if strings.HasPrefix(trailing, "|") {
+			return LogSelector{}, errPipelineUnsupported
+		}
 		if len(trailing) < 2 {
 			return LogSelector{}, fmt.Errorf("parse error: unsupported LogQL feature near %q", trailing)
 		}
 		return LogSelector{}, fmt.Errorf("parse error: unsupported LogQL feature near %q; only line filters |=, !=, |~, !~ are supported", trailing)
 	}
-	return LogSelector{Matchers: matchers, LineFilters: filters}, nil
+	return LogSelector{Matchers: matchers, LineFilters: filters, DropLabels: dropLabels}, nil
 }
 
 // errUnsupportedMetricQuery is returned for real metric/aggregation LogQL. The
@@ -270,4 +283,47 @@ func parseLineFiltersPrefix(s string) ([]LineFilter, int, error) {
 		filters = append(filters, f)
 		i = skipSpace(s, j+n)
 	}
+}
+
+// parseDropStagePrefix consumes a `| drop a, b` stage at the start of s and returns the
+// dropped label names with the bytes consumed. It returns (nil, 0, nil) when s does not
+// begin one, leaving the caller to reject whatever is there.
+//
+// Only this one stage is supported, and only in last position, because it is the only one
+// Grafana emits: its Loki datasource appends `| drop __error__` to every Explore
+// log-volume query. Dropping __error__ is exactly a no-op here — no parser stage runs, so
+// the label is never set — but the stage is implemented rather than ignored so that
+// dropping a real label does what LogQL says it does.
+func parseDropStagePrefix(s string) ([]string, int, error) {
+	i := skipSpace(s, 0)
+	if i >= len(s) || s[i] != '|' {
+		return nil, 0, nil
+	}
+	j := skipSpace(s, i+1)
+	if !hasKeyword(s, j, "drop") {
+		return nil, 0, nil
+	}
+	j = skipSpace(s, j+len("drop"))
+
+	var names []string
+	for {
+		name, next, identErr := scanIdent(s, j)
+		if identErr != nil {
+			return nil, 0, fmt.Errorf("parse error: drop requires a label name, got %q", s[j:])
+		}
+		if !logqlLabelNameRe.MatchString(name) {
+			return nil, 0, fmt.Errorf("parse error: invalid label name %q in drop", name)
+		}
+		j = skipSpace(s, next)
+		if j < len(s) && s[j] == '=' {
+			return nil, 0, fmt.Errorf("parse error: drop takes plain label names, not a matcher; label %q is followed by %q", name, s[j:])
+		}
+		names = append(names, name)
+		if j < len(s) && s[j] == ',' {
+			j = skipSpace(s, j+1)
+			continue
+		}
+		break
+	}
+	return names, j, nil
 }
