@@ -445,11 +445,16 @@ var variablePattern = regexp.MustCompile(`\$\{?(\w+)\}?`)
 // ordinary substring. Both are values a viewer could legitimately produce; a
 // viewer who types a quote gets a 400 the runbook documents rather than the
 // dashboard preventing, so that case is deliberately not simulated here.
+//
+// __interval also carries two: the minute-scale value typical of a wide time
+// range, and "20ms", the form Grafana emits on a short one. Both must survive
+// the range grammar in [$__interval] — a millisecond value is exactly the kind
+// a static check would not think to try.
 var variableValues = map[string][]string{
 	"service":    {"api"},
 	"level":      {"error"},
 	"search":     {"", "timeout"},
-	"__interval": {"1m"},
+	"__interval": {"1m", "20ms"},
 }
 
 // grafanaBuiltins are variables Grafana provides itself, so a panel may reference
