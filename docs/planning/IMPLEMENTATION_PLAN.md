@@ -419,18 +419,27 @@ Development is **single-node first**. Distributed mode only begins after ingesti
 **Goal:** Serve the metric-query subset Grafana needs for log-volume visualization.
 
 **Scope:**
-- Parse `count_over_time({...}[<range>])` and `sum by (<labels>) (...)`.
-- Evaluate range vectors over stored entries with step bucketing.
-- Add the `resultType: "matrix"` response envelope.
-- Route metric expressions on `query_range`; keep every other metric function on an
-  explicit error.
+- Parse the line-based range aggregations — `count_over_time`, `rate`,
+  `bytes_over_time`, `bytes_rate` — over the existing selector and line-filter
+  grammar, optionally wrapped in `sum`, `sum by (...)`, or `sum without (...)`.
+- Evaluate range vectors over stored entries with step bucketing: ticks at
+  `start, start+step, … ≤ end`, window `(t − range, t]`, empty windows omitted.
+- Add the `resultType: "matrix"` envelope on `query_range` and a labeled
+  `resultType: "vector"` on instant `query`.
+- Route metric expressions on both query endpoints; keep every other metric
+  function, `unwrap`, `offset`, and binary operations on an explicit error.
+- Add a log-volume panel to the provisioned logs dashboard.
 
 **DoD:**
-- `sum by (level) (count_over_time({service="api"}[5m]))` returns a matrix.
-- Grafana Explore's log-volume histogram renders instead of showing an error.
-- Still-unsupported LogQL (`rate`, `unwrap`, pipelines, regex label matchers) returns
-  explicit errors.
-- Tests cover parsing, step bucketing boundaries, and grouped counts.
+- `sum by (level) (count_over_time({service="api"}[5m]))` returns a matrix; the
+  same expression on instant `query` returns a labeled vector.
+- Grafana Explore's log-volume histogram renders instead of showing an error, and
+  the logs dashboard's volume panel draws stacked bars per level.
+- Still-unsupported LogQL (`unwrap`, `avg_over_time` and the other label-extraction
+  aggregations, non-`sum` vector aggregations, binary operations, pipelines, regex
+  label matchers) returns explicit errors.
+- Tests cover parsing, step bucketing boundaries, grouped counts, and the byte and
+  rate variants.
 
 **Why this exists:** Grafana Explore issues a log-volume query automatically for every
 Loki query. Phase 4.5 documented the resulting 400 as intended behavior; this phase
