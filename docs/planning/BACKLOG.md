@@ -448,11 +448,11 @@ Design: `docs/superpowers/specs/2026-08-04-phase-4.6-logql-metric-queries-design
 - [x] `ParseLogQL` treats a non-empty remainder as an error, reproducing both existing messages verbatim so its rejection tests are untouched. One implementation of selector + filter syntax now serves both parsers
 
 **`internal/logs` metric parser (`metricql.go`)**
-- [ ] `RangeOp` (`count_over_time`, `rate`, `bytes_over_time`, `bytes_rate`) + `String()`; `AggKind` (`AggNone`/`AggSum`); `Grouping{Without, Labels}`; `MetricQuery{Op, Selector, RangeNs, Agg, Grouping}`
-- [ ] `ParseMetricQuery`: `sum [by|without (labels)] ( range_op( log_expr [duration] ) )`, prefix grouping only, reusing the 4.4 selector/filter parser
-- [ ] `[range]` durations on upstream's own order — `metrics.ParsePromDurationNanos` first, Go's `time.ParseDuration` as fallback (so `1d`/`1w` *and* `1.5h`/`150ns` parse); non-positive rejected
-- [ ] `ErrNotMetricQuery` sentinel for constant expressions (`vector(1)`, `1+1`, bare numbers) and for a leading `{`, so handlers can fall through to the scalar shim / log path
-- [ ] Explicit errors naming the offending construct: unsupported `_over_time` functions, non-`sum` aggregations, `unwrap`, `offset`, binary operations, nested aggregations, `sum({...})` with no range aggregation, empty `by ()`, trailing grouping `sum(...) by (l)`, missing `[range]`, non-positive range
+- [x] `RangeOp` (`count_over_time`, `rate`, `bytes_over_time`, `bytes_rate`) + `String()`; `AggKind` (`AggNone`/`AggSum`); `Grouping{Without, Labels}`; `MetricQuery{Op, Selector, RangeNs, Agg, Grouping}`
+- [x] `ParseMetricQuery`: `sum [by|without (labels)] ( range_op( log_expr [duration] ) )`, prefix grouping only, reusing the 4.4 selector/filter parser
+- [x] `[range]` durations on upstream's own order — `metrics.ParsePromDurationNanos` first, Go's `time.ParseDuration` as fallback (so `1d`/`1w` *and* `1.5h`/`150ns` parse); non-positive rejected
+- [x] `ErrNotMetricQuery` sentinel for constant expressions (`vector(1)`, `1+1`, bare numbers) and for a leading `{`, so handlers can fall through to the scalar shim / log path
+- [x] Explicit errors naming the offending construct: unsupported `_over_time` functions, non-`sum` aggregations, `unwrap`, `offset`, binary operations, nested aggregations, `sum({...})` with no range aggregation, empty `by ()`, trailing grouping `sum(...) by (l)`, missing `[range]`, non-positive range
 
 **`internal/logs` metric evaluator (`metriceval.go`)**
 - [ ] `MetricPoint`, `MetricSeries`, `MetricSample`; `EvalMetricRange(ctx, q, startNs, endNs, stepNs)` and `EvalMetricInstant(ctx, q, tsNs)` (the single-tick case of range)
