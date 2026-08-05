@@ -74,10 +74,31 @@ Each step should narrow the result. Things to notice:
   double-quoted `"5\d\d"` is a parse error; the double-quoted form must be
   `"5\\d\\d"`.
 
+### Metric queries
+
+The histogram above the log lines is Explore's log-volume panel. Grafana builds its
+query from your stream selector and sends it automatically:
+
+```logql
+sum by (level) (count_over_time({service="api"}[5m]))
+count_over_time({service="api"} |= "timeout" [5m])
+rate({service="api"}[5m])
+bytes_over_time({service="api"}[5m])
+```
+
+The first returns one series per level; the others return one per stream. `rate` is
+`count_over_time` per second, and the `bytes_` pair measures volume rather than line
+count. Switching Explore's query type to **Instant** returns the same numbers as a
+single point per series.
+
 ## Dashboard
 
 **Dashboards → Observability Platform Logs**.
 
+- **Log volume by level**, at the top, draws stacked bars from
+  `sum by (level) (count_over_time({service="$service"} |= "$search" [$__interval]))`.
+  It shares the **Service** and **Search** variables with the log panels below it, so
+  narrowing either narrows both.
 - **Service** and **Level** dropdowns are populated live from
   `/loki/api/v1/label/{name}/values`.
 - **Search** is a free-text box feeding `|= "$search"`. Empty means "no filter" —
@@ -156,13 +177,15 @@ answers with a plain `404`. Neither is a stub quietly returning zeros or empty r
 
 | What you'll see | Why |
 |---|---|
-| The **log-volume histogram** above Explore's log lines shows an error | Grafana sends `sum by (level) (count_over_time({...}[$__auto]))`. Metric LogQL is not implemented and returns 400 — Phase 4.6. Log lines are unaffected. |
 | The **Live** button fails | Live tailing needs a WebSocket at `/loki/api/v1/tail`. No route is registered for it, so the request returns 404. Use dashboard auto-refresh. |
 | No **query size estimate** in the query editor | Grafana calls `/loki/api/v1/index/stats`. No route is registered for it, so it returns 404. A stub returning zeros was rejected as a confident lie. |
 | **Label browser** narrowing (choosing a label to see its values in context of other selected labels) fails | Grafana's Loki language provider calls `/loki/api/v1/series` to narrow label values. No route is registered for it, so it returns 404. |
 | `\| json`, `\| logfmt`, `line_format` return 400 | Log-parsing pipelines are out of the supported subset. |
 | `{service=~"api\|web"}` returns 400 | Label matchers are equality-only because they are index-backed. Regex applies to **lines**. |
 | Label dropdowns ignore the dashboard time range | The label endpoints accept and ignore `start`/`end`; the stream index is not time-partitioned for label discovery. |
+| `avg_over_time`, `quantile_over_time`, `\| unwrap` return 400 | Label-extraction range aggregations are out of the supported subset. Line-based ones — `count_over_time`, `rate`, `bytes_over_time`, `bytes_rate` — are supported. |
+| `sum(...) / sum(...)` returns 400 | Binary operations between metric queries are not implemented. |
+| `count(...)`, `topk(...)` return 400 | `sum` is the only supported vector aggregation. |
 
 ## Stop the stack
 
