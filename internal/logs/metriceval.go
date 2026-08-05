@@ -210,14 +210,24 @@ func windowStart(t, rangeNs int64) int64 {
 
 // groupOf returns a stream's group key and its output label set.
 //
+// Selector.DropLabels is removed from the stream's label map first, before any
+// of the rules below run — so a `by (level)` grouping on a query that dropped
+// `level` sees it as absent, exactly as if the stream never carried it, and a
+// bare range aggregation's "verbatim" label set is verbatim-after-drop.
+//
 // An empty label value is treated as absent, because both render to the same
 // output label set — splitting them would put two series with identical labels in
 // one response. Grouping is therefore a function of the output labels: one group,
-// one label set. A bare range aggregation keeps the stream's labels verbatim and
-// cannot collide either, since stream label sets are unique by fingerprint.
+// one label set. A bare range aggregation keeps the stream's (post-drop) labels
+// and cannot collide either, since stream label sets are unique by fingerprint
+// and dropping the same names from two already-distinct sets is the one
+// documented exception (see the log-path known limitation in task-1-report.md).
 func groupOf(l StreamLabels, q MetricQuery) (string, map[string]string) {
+	m := l.Map()
+	for _, n := range q.Selector.DropLabels {
+		delete(m, n)
+	}
 	if q.Agg == AggNone {
-		m := l.Map()
 		return encodeLabelSet(m), m
 	}
 	out := make(map[string]string)
@@ -228,14 +238,14 @@ func groupOf(l StreamLabels, q MetricQuery) (string, map[string]string) {
 		for _, n := range q.Grouping.Labels {
 			drop[n] = true
 		}
-		for n, v := range l.Map() {
+		for n, v := range m {
 			if !drop[n] && v != "" {
 				out[n] = v
 			}
 		}
 	default:
 		for _, n := range q.Grouping.Labels {
-			if v, ok := l.Get(n); ok && v != "" {
+			if v, ok := m[n]; ok && v != "" {
 				out[n] = v
 			}
 		}
