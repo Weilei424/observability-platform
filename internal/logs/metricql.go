@@ -214,6 +214,11 @@ func parseRangeAgg(s string) (rangeAgg, int, error) {
 		return rangeAgg{}, 0, err
 	}
 	i = skipSpace(s, i+n)
+	dropLabels, n, err := parseDropStagePrefix(s[i:])
+	if err != nil {
+		return rangeAgg{}, 0, err
+	}
+	i = skipSpace(s, i+n)
 	if i < len(s) && s[i] == '|' {
 		return rangeAgg{}, 0, errPipelineUnsupported
 	}
@@ -237,7 +242,7 @@ func parseRangeAgg(s string) (rangeAgg, int, error) {
 	}
 	return rangeAgg{
 		Op:       op,
-		Selector: LogSelector{Matchers: matchers, LineFilters: filters},
+		Selector: LogSelector{Matchers: matchers, LineFilters: filters, DropLabels: dropLabels},
 		RangeNs:  rangeNs,
 	}, i + 1, nil
 }
