@@ -237,6 +237,9 @@ PANEL2_EXPR='{service=\"$service\", level=\"$level\"} |= \"$search\"'
 check_contains "dashboard panel 1 expression is the one tested below" "$DASH" "$PANEL1_EXPR"
 check_contains "dashboard panel 2 expression is the one tested below" "$DASH" "$PANEL2_EXPR"
 
+PANEL3_EXPR='sum by (level) (count_over_time({service=\"$service\"} |= \"$search\" [$__interval]))'
+check_contains "dashboard volume panel expression is the one tested below" "$DASH" "$PANEL3_EXPR"
+
 # ---- Seed a marker stream -------------------------------------------
 echo ""
 echo "-- Seeding marker streams --"
@@ -302,6 +305,20 @@ check_absent   "Search box filters — info line excluded" "$BODY" "200 in 12ms 
 # The demo's own data must reach the panels too, not just the seeded marker.
 BODY=$(dsquery '{service=\"api\"} |= \"\"')
 check_contains "panel 1 query returns sample-app rows" "$BODY" "request_id="
+
+# The volume panel with the variables Grafana would interpolate, including the
+# $__interval Grafana resolves from the panel width and time range.
+#
+# The assertions are deliberately shape-agnostic. This response is Grafana's
+# dataframe JSON, not Loki's envelope, and its exact layout could not be observed
+# while writing this (no Docker in the authoring environment) — so they pin values
+# only a working grouped metric query can produce. "info" is one of the seeded
+# marker's level values and appears nowhere in the request, so it cannot arrive by
+# echo. The error check looks for the error *key*, not the bare word: this query
+# groups by level, and one of those levels is literally "error".
+BODY=$(dsquery 'sum by (level) (count_over_time({service=\"compose-e2e\"} |= \"\" [1m]))')
+check_contains "volume panel query returns the info level series" "$BODY" '"info"'
+check_absent   "volume panel query has no datasource error" "$BODY" '"error":"'
 
 # ---- Storage path: chunks and restart readback ----------------------
 echo ""
