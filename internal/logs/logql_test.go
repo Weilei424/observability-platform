@@ -1,6 +1,7 @@
 package logs
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/masonwheeler/observability-platform/internal/storage/index"
@@ -208,6 +209,89 @@ func TestParseLogQL_NeverSilentlyMisparses(t *testing.T) {
 	for _, q := range cases {
 		if sel, err := ParseLogQL(q); err == nil {
 			t.Errorf("ParseLogQL(%s) = %+v, nil error; want error", q, sel)
+		}
+	}
+}
+
+// TestParseLogQL_DropStage covers the one supported pipeline stage: a trailing
+// `| drop a, b`, optionally after line filters, with whitespace variants.
+func TestParseLogQL_DropStage(t *testing.T) {
+	cases := []struct {
+		q    string
+		want []string
+	}{
+		{`{a="b"} | drop __error__`, []string{"__error__"}},
+		{`{a="b"} |= "x" | drop level, service`, []string{"level", "service"}},
+		{`{a="b"}   |   drop   __error__   ,   level   `, []string{"__error__", "level"}},
+		{`{a="b"}|drop __error__`, []string{"__error__"}},
+	}
+	for _, tc := range cases {
+		sel, err := ParseLogQL(tc.q)
+		if err != nil {
+			t.Errorf("ParseLogQL(%q) unexpected error: %v", tc.q, err)
+			continue
+		}
+		if len(sel.DropLabels) != len(tc.want) {
+			t.Errorf("ParseLogQL(%q) DropLabels = %v, want %v", tc.q, sel.DropLabels, tc.want)
+			continue
+		}
+		for i, n := range tc.want {
+			if sel.DropLabels[i] != n {
+				t.Errorf("ParseLogQL(%q) DropLabels[%d] = %q, want %q", tc.q, i, sel.DropLabels[i], n)
+			}
+		}
+	}
+
+	// The line filter ahead of the drop stage must still be parsed, not swallowed.
+	sel, err := ParseLogQL(`{a="b"} |= "x" | drop level, service`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(sel.LineFilters) != 1 || sel.LineFilters[0].Op != FilterContains {
+		t.Fatalf("LineFilters = %+v, want one FilterContains", sel.LineFilters)
+	}
+	if len(sel.Matchers) != 1 || sel.Matchers[0].Value != "b" {
+		t.Fatalf("Matchers = %+v, want a=b", sel.Matchers)
+	}
+}
+
+// TestParseLogQL_DropStage_Rejections covers the grammar's restrictions: at least
+// one label name, plain names only (no matcher), valid names only, and last
+// position only — anything after `drop` is rejected the same as any other
+// unsupported pipeline stage.
+func TestParseLogQL_DropStage_Rejections(t *testing.T) {
+	cases := []string{
+		`{a="b"} | drop`,               // empty list
+		`{a="b"} | drop __error__="x"`, // drop takes plain names, not a matcher
+		`{a="b"} | drop 1bad`,          // invalid label name
+		`{a="b"} | drop x | json`,      // drop must be last
+		`{a="b"} | drop x |= "y"`,      // drop must be last
+	}
+	for _, q := range cases {
+		if sel, err := ParseLogQL(q); err == nil {
+			t.Errorf("ParseLogQL(%q) = %+v, nil error; want error", q, sel)
+		}
+	}
+}
+
+// TestParseLogQL_PipelineStagesStillRejected pins that adding `drop` did not
+// loosen the rejection of every other pipeline stage, and that the message
+// naming them (errPipelineUnsupported) is what callers still get.
+func TestParseLogQL_PipelineStagesStillRejected(t *testing.T) {
+	cases := []string{
+		`{a="b"} | json`,
+		`{a="b"} | logfmt`,
+		`{a="b"} | line_format "{{.msg}}"`,
+		`{a="b"} | unwrap bytes`,
+	}
+	for _, q := range cases {
+		_, err := ParseLogQL(q)
+		if err == nil {
+			t.Errorf("ParseLogQL(%q) = nil error, want error", q)
+			continue
+		}
+		if !errors.Is(err, errPipelineUnsupported) {
+			t.Errorf("ParseLogQL(%q) error = %v, want errPipelineUnsupported", q, err)
 		}
 	}
 }
