@@ -470,12 +470,14 @@ func interpolate(expr string, values map[string]string) string {
 }
 
 // parsePanelExpr runs a panel expression through whichever production parser the
-// backend would use for it: a log query opens with '{', a metric query with an
-// aggregation name. Routing here rather than skipping non-log expressions keeps
+// backend would use for it, routing on logs.IsLogExpression — the same predicate
+// internal/api's query handlers dispatch on, rather than a re-implementation of
+// it — so this test and the backend can never disagree about which parser owns a
+// given expression. Routing here rather than skipping non-log expressions keeps
 // the guarantee this test exists for — that every panel expression parses.
 func parsePanelExpr(expr string) error {
-	if trimmed := strings.TrimSpace(expr); trimmed != "" && trimmed[0] != '{' {
-		_, err := logs.ParseMetricQuery(trimmed)
+	if !logs.IsLogExpression(expr) {
+		_, err := logs.ParseMetricQuery(expr)
 		return err
 	}
 	_, err := logs.ParseLogQL(expr)

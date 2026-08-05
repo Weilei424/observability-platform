@@ -91,6 +91,17 @@ var (
 	errOffsetUnsupported   = errors.New("parse error: unsupported LogQL feature: the offset modifier is not supported")
 )
 
+// IsLogExpression reports whether q is a log query rather than a metric or
+// constant expression — the discriminator both query endpoints dispatch on. A
+// log query opens with a stream selector; everything else opens with a function
+// name, a number, or a sign. An empty expression counts as a log query so the
+// log parser owns the "empty query" error, as it did before metric queries
+// existed.
+func IsLogExpression(q string) bool {
+	trimmed := strings.TrimSpace(q)
+	return trimmed == "" || trimmed[0] == '{'
+}
+
 // ParseMetricQuery parses the supported metric subset. It returns
 // ErrNotMetricQuery — not a parse error — when the expression belongs to another
 // parser, so the caller can fall through to the log or constant-expression path.

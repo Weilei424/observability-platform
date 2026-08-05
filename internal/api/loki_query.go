@@ -240,8 +240,8 @@ func (s *Server) handleLokiQueryRange(w http.ResponseWriter, r *http.Request) {
 		mq       logs.MetricQuery
 		isMetric bool
 	)
-	if trimmed := strings.TrimSpace(queryStr); trimmed != "" && trimmed[0] != '{' {
-		parsed, err := logs.ParseMetricQuery(trimmed)
+	if !logs.IsLogExpression(queryStr) {
+		parsed, err := logs.ParseMetricQuery(queryStr)
 		switch {
 		case errors.Is(err, logs.ErrNotMetricQuery):
 			writeLokiError(w, http.StatusBadRequest,
@@ -413,8 +413,8 @@ func (s *Server) handleLokiQuery(w http.ResponseWriter, r *http.Request) {
 	// constant expression. ParseMetricQuery owns the former and reports
 	// ErrNotMetricQuery for the latter, which falls through to the constant
 	// subset — the path Grafana's datasource health check takes.
-	if trimmed := strings.TrimSpace(queryStr); trimmed != "" && trimmed[0] != '{' {
-		mq, err := logs.ParseMetricQuery(trimmed)
+	if !logs.IsLogExpression(queryStr) {
+		mq, err := logs.ParseMetricQuery(queryStr)
 		switch {
 		case err == nil:
 			samples, evalErr := s.logQuery.EvalMetricInstant(r.Context(), mq, timeNs)
@@ -431,7 +431,7 @@ func (s *Server) handleLokiQuery(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		res, err := logs.ParseScalarQuery(trimmed)
+		res, err := logs.ParseScalarQuery(queryStr)
 		if err != nil {
 			writeLokiError(w, http.StatusBadRequest, err.Error())
 			return
