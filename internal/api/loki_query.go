@@ -380,13 +380,16 @@ func resolveLokiStep(w http.ResponseWriter, raw string, startNs, endNs int64) (i
 	return stepNs, true
 }
 
-// handleLokiQuery serves the instant query endpoint. It accepts two expression
+// handleLokiQuery serves the instant query endpoint. It accepts three expression
 // kinds:
 //
 //   - a stream selector, evaluated as a log query over [0, time]. Upstream Loki
 //     rejects log queries here with a 400 and directs them to query_range; we
 //     accept them as a deliberate superset. Grafana never sends a log query to
 //     this endpoint, so nothing depends on the stricter behavior.
+//   - a real metric query from the ParseMetricQuery subset (count_over_time,
+//     rate, bytes_over_time, bytes_rate, optionally wrapped in sum), evaluated
+//     as the single tick at time and returning a labeled "vector" envelope.
 //   - a constant metric expression such as vector(1)+vector(1), returning a
 //     "vector" envelope. This is the Grafana Loki datasource health check.
 func (s *Server) handleLokiQuery(w http.ResponseWriter, r *http.Request) {
