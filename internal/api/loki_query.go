@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -229,10 +230,32 @@ func (s *Server) handleLokiQueryRange(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	sel, ok := parseLokiLogSelector(w, queryStr)
-	if !ok {
+
+	// Dispatch on the expression kind before reading any time parameter, so a
+	// malformed query reports the query error rather than a time error. An
+	// expression opening with '{' is a log query; anything else is a metric query
+	// or a constant expression, which belongs on the instant endpoint.
+	var (
+		sel      logs.LogSelector
+		mq       logs.MetricQuery
+		isMetric bool
+	)
+	if trimmed := strings.TrimSpace(queryStr); trimmed != "" && trimmed[0] != '{' {
+		parsed, err := logs.ParseMetricQuery(trimmed)
+		switch {
+		case errors.Is(err, logs.ErrNotMetricQuery):
+			writeLokiError(w, http.StatusBadRequest,
+				"constant expressions such as vector(1) are only supported on the instant query endpoint /loki/api/v1/query")
+			return
+		case err != nil:
+			writeLokiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		mq, isMetric = parsed, true
+	} else if sel, ok = parseLokiLogSelector(w, queryStr); !ok {
 		return
 	}
+
 	q := r.Form
 
 	// `interval` thins a stream response, returning the entry at start and then
@@ -242,7 +265,7 @@ func (s *Server) handleLokiQueryRange(w http.ResponseWriter, r *http.Request) {
 	// error explicitly.
 	if q.Get("interval") != "" {
 		writeLokiError(w, http.StatusBadRequest,
-			"unsupported parameter 'interval': log entry sampling is not implemented; omit it to receive every matching entry")
+			"unsupported parameter 'interval': log entry sampling is not implemented; omit it to receive every matching entry (metric queries use 'step' instead)")
 		return
 	}
 
@@ -287,7 +310,21 @@ func (s *Server) handleLokiQueryRange(w http.ResponseWriter, r *http.Request) {
 		writeLokiError(w, http.StatusBadRequest, "invalid time range: 'end' must be >= 'start'")
 		return
 	}
-	if !validLokiStep(w, q.Get("step"), startNs, endNs) {
+
+	stepNs, ok := resolveLokiStep(w, q.Get("step"), startNs, endNs)
+	if !ok {
+		return
+	}
+
+	if isMetric {
+		series, err := s.logQuery.EvalMetricRange(r.Context(), mq, startNs, endNs, stepNs)
+		if err != nil {
+			s.log.Error("loki metric query_range failed", "component", "logs_query",
+				"request_id", chimiddleware.GetReqID(r.Context()), "err", err)
+			writeLokiError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		writeLokiMatrix(w, toLokiMatrixSeries(series))
 		return
 	}
 
@@ -300,45 +337,47 @@ func (s *Server) handleLokiQueryRange(w http.ResponseWriter, r *http.Request) {
 // resolution over a week, or 1h resolution over a year.
 const maxLokiPoints = 11000
 
-// validLokiStep validates the `step` parameter, writing the plain-text 400 itself
-// on failure. `step` does not shape a *stream* response, and this deliberately
-// does not use it for sampling — but upstream still parses and checks it, because
-// query_range shares one parser across log and metric queries. So a bogus, zero,
-// or negative step is a 400 rather than a silent success, and the points limit
-// applies to log queries too.
+// resolveLokiStep returns the step in nanoseconds, writing the plain-text 400
+// itself on failure. `step` does not shape a stream response — the log path calls
+// this for validation and discards the result — but it is the tick spacing of a
+// metric query.
 //
-// An absent `step` needs no check: upstream then derives it from the range
-// itself (`max(floor(rangeSeconds/250), 1)` seconds), which is positive by
-// construction and yields at most 250 points.
-func validLokiStep(w http.ResponseWriter, raw string, startNs, endNs int64) bool {
-	if raw == "" {
-		return true
-	}
-	stepNs, err := parseLokiStep(raw)
-	if err != nil {
-		writeLokiError(w, http.StatusBadRequest, "invalid 'step' parameter: "+raw)
-		return false
-	}
-	if stepNs <= 0 {
-		writeLokiError(w, http.StatusBadRequest, "invalid 'step' parameter: must be greater than 0")
-		return false
-	}
+// An absent step is derived exactly as upstream's ParseRangeQuery does:
+// max(floor(rangeSeconds/250), 1) seconds, which is positive by construction and
+// yields at most 250 points, so it needs no further checking.
+func resolveLokiStep(w http.ResponseWriter, raw string, startNs, endNs int64) (int64, bool) {
 	// endNs >= startNs is already established, so a negative difference can only
 	// mean the true span exceeded int64 nanoseconds (~292 years) and wrapped.
 	// Saturate instead of rejecting: upstream computes the span with
-	// time.Time.Sub, which clamps to the maximum Duration, and a span that wide
-	// paired with a coarse enough step is still only a point or two — well inside
-	// the limit. The division below is then upstream's `end.Sub(start) / step`.
+	// time.Time.Sub, which clamps to the maximum Duration.
 	rangeNs := endNs - startNs
 	if rangeNs < 0 {
 		rangeNs = math.MaxInt64
 	}
+
+	if raw == "" {
+		seconds := rangeNs / int64(time.Second) / 250
+		if seconds < 1 {
+			seconds = 1
+		}
+		return seconds * int64(time.Second), true
+	}
+
+	stepNs, err := parseLokiStep(raw)
+	if err != nil {
+		writeLokiError(w, http.StatusBadRequest, "invalid 'step' parameter: "+raw)
+		return 0, false
+	}
+	if stepNs <= 0 {
+		writeLokiError(w, http.StatusBadRequest, "invalid 'step' parameter: must be greater than 0")
+		return 0, false
+	}
 	if rangeNs/stepNs > maxLokiPoints {
 		writeLokiError(w, http.StatusBadRequest,
 			fmt.Sprintf("exceeded maximum resolution of %d points per timeseries; try decreasing the query resolution ('step')", maxLokiPoints))
-		return false
+		return 0, false
 	}
-	return true
+	return stepNs, true
 }
 
 // handleLokiQuery serves the instant query endpoint. It accepts two expression
@@ -367,11 +406,28 @@ func (s *Server) handleLokiQuery(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// A query that does not open with a stream selector is a metric query; only
-	// the constant subset is supported and everything else errors explicitly.
-	// The result type follows the expression's shape, as upstream's does: a
-	// literal-only expression is a scalar, anything mentioning vector() a vector.
+	// A query that does not open with a stream selector is a metric query or a
+	// constant expression. ParseMetricQuery owns the former and reports
+	// ErrNotMetricQuery for the latter, which falls through to the constant
+	// subset — the path Grafana's datasource health check takes.
 	if trimmed := strings.TrimSpace(queryStr); trimmed != "" && trimmed[0] != '{' {
+		mq, err := logs.ParseMetricQuery(trimmed)
+		switch {
+		case err == nil:
+			samples, evalErr := s.logQuery.EvalMetricInstant(r.Context(), mq, timeNs)
+			if evalErr != nil {
+				s.log.Error("loki metric query failed", "component", "logs_query",
+					"request_id", chimiddleware.GetReqID(r.Context()), "err", evalErr)
+				writeLokiError(w, http.StatusInternalServerError, "internal error")
+				return
+			}
+			writeLokiVectorSamples(w, toLokiVectorSamples(samples))
+			return
+		case !errors.Is(err, logs.ErrNotMetricQuery):
+			writeLokiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
 		res, err := logs.ParseScalarQuery(trimmed)
 		if err != nil {
 			writeLokiError(w, http.StatusBadRequest, err.Error())
@@ -420,6 +476,26 @@ func toLokiStreamResults(results []logs.StreamResult) []lokiStreamResult {
 			values = append(values, [2]string{strconv.FormatInt(e.TimestampNs, 10), e.Line})
 		}
 		out = append(out, lokiStreamResult{Stream: rs.Labels, Values: values})
+	}
+	return out
+}
+
+func toLokiMatrixSeries(series []logs.MetricSeries) []lokiMatrixSeries {
+	out := make([]lokiMatrixSeries, 0, len(series))
+	for _, s := range series {
+		values := make([][2]any, 0, len(s.Points))
+		for _, p := range s.Points {
+			values = append(values, lokiSampleValue(p.TimestampNs, p.Value))
+		}
+		out = append(out, lokiMatrixSeries{Metric: s.Labels, Values: values})
+	}
+	return out
+}
+
+func toLokiVectorSamples(samples []logs.MetricSample) []lokiVectorSample {
+	out := make([]lokiVectorSample, 0, len(samples))
+	for _, s := range samples {
+		out = append(out, lokiVectorSample{Metric: s.Labels, Value: lokiSampleValue(s.TimestampNs, s.Value)})
 	}
 	return out
 }

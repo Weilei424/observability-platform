@@ -464,10 +464,10 @@ Design: `docs/superpowers/specs/2026-08-04-phase-4.6-logql-metric-queries-design
 
 **`internal/api` routing + envelopes**
 - [x] `loki_response.go` — `lokiMatrixResponse`/`lokiMatrixData`/`lokiMatrixSeries` + `writeLokiMatrix`; `writeLokiVectorSamples` for labeled vectors, with `writeLokiVector` reimplemented as a thin wrapper so the health-check response stays byte-identical
-- [ ] `loki_query.go` — `handleLokiQueryRange` dispatches on the leading `{`; `ErrNotMetricQuery` → 400 naming the instant endpoint; metric path evaluates and writes a matrix
-- [ ] `loki_query.go` — `handleLokiQuery` tries `ParseMetricQuery` first and falls back to `ParseScalarQuery` on the sentinel; a metric query returns a labeled vector at `time`
-- [ ] `loki_query.go` — `validLokiStep` → `resolveLokiStep` returning nanoseconds, defaulting an absent step to upstream's `max(floor(rangeSeconds/250), 1)` seconds; explicit-step validation and the 11,000-point limit unchanged; log queries still discard the value
-- [ ] `interval` keeps its 400 with a message that reads correctly for a matrix; `limit`/`direction` stay parsed by the shared parser and are ignored on the metric path
+- [x] `loki_query.go` — `handleLokiQueryRange` dispatches on the leading `{`; `ErrNotMetricQuery` → 400 naming the instant endpoint; metric path evaluates and writes a matrix
+- [x] `loki_query.go` — `handleLokiQuery` tries `ParseMetricQuery` first and falls back to `ParseScalarQuery` on the sentinel; a metric query returns a labeled vector at `time`
+- [x] `loki_query.go` — `validLokiStep` → `resolveLokiStep` returning nanoseconds, defaulting an absent step to upstream's `max(floor(rangeSeconds/250), 1)` seconds; explicit-step validation and the 11,000-point limit unchanged; log queries still discard the value
+- [x] `interval` keeps its 400 with a message that reads correctly for a matrix; `limit`/`direction` stay parsed by the shared parser and are ignored on the metric path
 
 **Grafana dashboard**
 - [ ] `observability/grafana/dashboards/logs.json` — panel `id: 4`, `timeseries` drawn as stacked bars, `Log volume by level — $service`, expression `sum by (level) (count_over_time({service="$service"} |= "$search" [$__interval]))`; existing panels shift down (panel 1 `y: 0→7`, panels 2/3 `y: 11→18`)

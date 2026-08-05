@@ -231,7 +231,7 @@ func TestLokiQueryRange_UnsupportedAndBadParams(t *testing.T) {
 
 	// Unsupported metric query → 400 plain text.
 	q := url.Values{}
-	q.Set("query", `rate({service="api"}[5m])`)
+	q.Set("query", `avg_over_time({service="api"} | unwrap duration [5m])`)
 	q.Set("start", ns(0))
 	q.Set("end", ns(1000))
 	w := getLoki(t, srv, "/loki/api/v1/query_range", q)
@@ -667,13 +667,14 @@ func TestLokiInstantQuery_LiteralIsScalar(t *testing.T) {
 	}
 }
 
-// TestLokiInstantQuery_UnsupportedMetricQuery guards the shim's boundary: a
-// query that would have to read stored samples still fails explicitly.
+// TestLokiInstantQuery_UnsupportedMetricQuery keeps only expressions outside the
+// supported subset. Supported metric queries on this endpoint are covered by
+// TestLokiInstantQuery_Metric in loki_metric_query_test.go.
 func TestLokiInstantQuery_UnsupportedMetricQuery(t *testing.T) {
 	srv := newLokiServer(t)
 	for _, query := range []string{
-		`rate({service="api"}[5m])`,
-		`sum by (level) (count_over_time({service="api"}[1m]))`,
+		`avg_over_time({service="api"} | unwrap duration [5m])`,
+		`topk(5, count_over_time({service="api"}[1m]))`,
 	} {
 		q := url.Values{}
 		q.Set("query", query)
@@ -685,7 +686,7 @@ func TestLokiInstantQuery_UnsupportedMetricQuery(t *testing.T) {
 			t.Fatalf("query %q body = %q, want an explicit unsupported error", query, w.Body.String())
 		}
 	}
-	// query_range stays log-only: the constant subset is an instant-query shim.
+	// query_range takes metric queries but not the constant-expression shim.
 	q := url.Values{}
 	q.Set("query", "vector(1)+vector(1)")
 	q.Set("start", ns(0))
