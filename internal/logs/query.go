@@ -151,8 +151,12 @@ func (e *QueryEngine) query(ctx context.Context, sel LogSelector, startNs, endNs
 	}
 	results := make([]StreamResult, 0, len(order))
 	for _, id := range order {
+		labels := labelsByID[id].Map()
+		for _, n := range sel.DropLabels {
+			delete(labels, n)
+		}
 		results = append(results, StreamResult{
-			Labels:  labelsByID[id].Map(),
+			Labels:  labels,
 			Entries: grouped[id],
 		})
 	}
