@@ -99,6 +99,27 @@ The query API accepts a PromQL subset. Unsupported forms return `400 bad_data`.
 
 Duration units accepted: `ms`, `s`, `m`, `h`, `d`, `w`, `y`.
 
+### LogQL subset
+
+| Form | Example | Status |
+|---|---|---|
+| Stream selector (equality only) | `{service="api", level="error"}` | Supported |
+| Line filters | `{service="api"} \|= "timeout" != "healthz"` | Supported |
+| Regex line filters | `{service="api"} \|~ "5\\d\\d"` | Supported |
+| `count_over_time` | `count_over_time({service="api"}[5m])` | Supported |
+| `rate` | `rate({service="api"}[5m])` | Supported |
+| `bytes_over_time`, `bytes_rate` | `bytes_over_time({service="api"}[5m])` | Supported |
+| `sum`, `sum by`, `sum without` | `sum by (level) (count_over_time({service="api"}[5m]))` | Supported |
+| Regex label matchers | `{service=~"api\|web"}` | Returns 400 |
+| Pipelines and formatters | `\| json`, `\| logfmt`, `line_format` | Returns 400 |
+| `unwrap` and its aggregations | `avg_over_time({a="b"} \| unwrap d [5m])` | Returns 400 |
+| Other vector aggregations | `count(...)`, `topk(...)` | Returns 400 |
+| Binary operations | `sum(...) / sum(...)` | Returns 400 |
+
+Metric queries answer `resultType: "matrix"` on `query_range` and `"vector"` on the
+instant endpoint. Range durations accept both the Prometheus grammar (`5m`, `1d`,
+`1w`) and Go's (`1.5h`, `150ns`), as upstream LogQL does.
+
 ## Performance
 
 Benchmark methodology and measured results (ingestion throughput, query latency
