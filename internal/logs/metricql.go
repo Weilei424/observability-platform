@@ -229,7 +229,7 @@ func parseRangeAgg(s string) (rangeAgg, int, error) {
 		return rangeAgg{}, 0, err
 	}
 	i = skipSpace(s, i+end+1)
-	if strings.HasPrefix(s[i:], "offset") {
+	if hasKeyword(s, i, "offset") {
 		return rangeAgg{}, 0, errOffsetUnsupported
 	}
 	if i >= len(s) || s[i] != ')' {

@@ -91,6 +91,7 @@ func TestParseMetricQuery_Rejects(t *testing.T) {
 		{`count_over_time({a="b"}[-5m])`, "greater than 0"}, // Go's parser accepts the sign; the positivity check rejects it
 		{`count_over_time({a="b"}[bogus])`, "invalid range"},
 		{`count_over_time({a="b"}[5m] offset 10m)`, "offset"},
+		{`count_over_time({a="b"}[5m] offsetting)`, "')'"}, // word-boundary: "offsetting" is not the offset keyword
 		{`count_over_time({a="b"} | json [5m])`, "pipeline"},
 		{`count_over_time({a="b"} | unwrap dur [5m])`, "pipeline"},
 		{`count_over_time({a=~"b"}[5m])`, "only '=' is supported"},
