@@ -219,9 +219,9 @@ func windowStart(t, rangeNs int64) int64 {
 // output label set — splitting them would put two series with identical labels in
 // one response. Grouping is therefore a function of the output labels: one group,
 // one label set. A bare range aggregation keeps the stream's (post-drop) labels
-// and cannot collide either, since stream label sets are unique by fingerprint
-// and dropping the same names from two already-distinct sets is the one
-// documented exception (see the log-path known limitation in task-1-report.md).
+// and cannot collide either: two streams whose label sets become identical after
+// a drop encode to the same key and therefore land in the same group, exactly as
+// the log path merges them.
 func groupOf(l StreamLabels, q MetricQuery) (string, map[string]string) {
 	m := l.Map()
 	for _, n := range q.Selector.DropLabels {
