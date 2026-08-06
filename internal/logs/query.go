@@ -148,24 +148,28 @@ func (e *QueryEngine) query(ctx context.Context, sel LogSelector, startNs, endNs
 	// dropped label are one stream in the result, as they are in Loki. Without a
 	// drop stage this is exactly the old per-stream grouping, since stream label
 	// sets are unique by fingerprint and so map one-to-one onto keys.
-	keyOf := make(map[StreamID]string, len(labelsByID))
-	labelsOf := make(map[string]map[string]string, len(labelsByID))
-	for id, l := range labelsByID {
-		m := l.Map()
-		for _, n := range sel.DropLabels {
-			delete(m, n)
-		}
-		key := encodeLabelSet(m)
-		keyOf[id] = key
-		if _, seen := labelsOf[key]; !seen {
-			labelsOf[key] = m
-		}
-	}
-
+	// Keys are built lazily, memoized per stream, so the work stays proportional to
+	// the streams that actually contributed an entry to the limited result — not to
+	// every stream the selector matched. A broad selector with a small limit matches
+	// far more streams than it returns, and materializing a label map for each of
+	// them would be work thrown away.
 	var order []string
+	keyOf := make(map[StreamID]string)
 	grouped := make(map[string][]LogEntry)
+	labelsOf := make(map[string]map[string]string)
 	for _, t := range all {
-		key := keyOf[t.id]
+		key, memoized := keyOf[t.id]
+		if !memoized {
+			m := labelsByID[t.id].Map()
+			for _, n := range sel.DropLabels {
+				delete(m, n)
+			}
+			key = encodeLabelSet(m)
+			keyOf[t.id] = key
+			if _, seen := labelsOf[key]; !seen {
+				labelsOf[key] = m
+			}
+		}
 		if _, seen := grouped[key]; !seen {
 			order = append(order, key)
 		}
