@@ -36,12 +36,18 @@ type lokiMatrixResp struct {
 
 // TestLokiQueryRange_LogVolumeQuery runs the exact expression Grafana Explore
 // issues for its log-volume histogram. This is the phase's reason to exist.
+//
+// The `| drop __error__` stage is not decoration: Grafana 11.1.0 appends it to
+// every volume query before wrapping it (datasource.ts:200-206, getSupplementaryQuery),
+// and there is no space before the `[`. An earlier version of this test omitted
+// the stage, claimed to be "the exact expression" anyway, and passed while
+// Explore's histogram still returned 400.
 func TestLokiQueryRange_LogVolumeQuery(t *testing.T) {
 	srv := newLokiServer(t)
 	pushLogs(t, srv, levelStreams)
 
 	q := url.Values{}
-	q.Set("query", `sum by (level) (count_over_time({service="api"}[5m]))`)
+	q.Set("query", `sum by (level) (count_over_time({service="api"} | drop __error__[5m]))`)
 	q.Set("start", ns(0))
 	q.Set("end", metricEnd())
 	q.Set("step", "1") // seconds — ticks land at start, +1s, +2s
