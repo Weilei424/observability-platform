@@ -493,7 +493,9 @@ Design: `docs/superpowers/specs/2026-08-04-phase-4.6-logql-metric-queries-design
 - [x] `internal/logs/metricql.go` — same stage inside a range aggregation, parsed before the pipeline rejection so every other stage still errors
 - [x] `internal/logs/metriceval.go` + `query.go` — dropped names removed from output labels before grouping (metric path) and from `StreamResult.Labels` (log path); matching is unaffected
 - [x] Correct the three places that documented Grafana's volume query without the stage: `internal/api/loki_metric_query_test.go`, `tests/e2e/logs_smoke.sh`, `tests/e2e/compose_smoke.sh`
-- [x] `README.md`, `docs/runbooks/grafana-logs-demo.md`, `logs.json` text panel, `ARCHITECTURE_NOTES.md` — record the one supported stage and the log-path merge limitation
+- [x] `README.md`, `docs/runbooks/grafana-logs-demo.md`, `logs.json` text panel, `ARCHITECTURE_NOTES.md` — record the one supported stage
+- [x] `internal/logs/query.go` — group log results by the post-drop label set, so two streams differing only by a dropped label merge (a stream *is* its label set); keys built lazily per contributing stream
+- [x] `docs/planning/IMPLEMENTATION_PLAN.md` §4.6 — name final-position, bare-label `| drop` as the sole pipeline exception in both scope and DoD
 
 **Verify**
 - [x] Verify: `go build ./...`, `go vet ./...`, `golangci-lint run`, `go test ./...` green
