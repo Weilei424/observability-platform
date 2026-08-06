@@ -38,7 +38,7 @@ type lokiMatrixResp struct {
 // issues for its log-volume histogram. This is the phase's reason to exist.
 //
 // The `| drop __error__` stage is not decoration: Grafana 11.1.0 appends it to
-// every volume query before wrapping it (datasource.ts:200-206, getSupplementaryQuery),
+// every volume query before wrapping it (getSupplementaryQuery in datasource.ts),
 // and there is no space before the `[`. An earlier version of this test omitted
 // the stage, claimed to be "the exact expression" anyway, and passed while
 // Explore's histogram still returned 400.
