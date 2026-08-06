@@ -134,7 +134,7 @@ check_contains "datasource health check — vector envelope" "$BODY" '"resultTyp
 check_contains "datasource health check — value 2" "$BODY" ',"2"]'
 
 # Explore's log-volume histogram sends this shape — including the `| drop __error__`
-# stage Grafana 11.1.0 appends to every volume query (datasource.ts:200-206), with no
+# stage Grafana 11.1.0 appends to every volume query (getSupplementaryQuery), with no
 # space before the `[`. Asserting the shape without that stage is how a green test
 # once coexisted with a histogram that still returned 400.
 #
