@@ -212,8 +212,12 @@ checksummed, so a v1 rebuild must fully decode rather than peek).
   input errors instead of silently becoming a different query.
 - `internal/logs/scalar.go` — constant metric queries (`vector(N)` with `+ - * /`),
   accepted **only** on instant `/query`. This exists solely so Grafana's Loki datasource
-  health check (`vector(1)+vector(1)` must equal 2) passes; it reads no stored data, and
-  `rate`/`sum`/`count_over_time` still return the explicit unsupported error. The
+  health check (`vector(1)+vector(1)` must equal 2) passes; it reads no stored data.
+  *(As of 4.4 that made it the only metric-shaped query accepted anywhere;
+  `rate`/`sum`/`count_over_time` returned the explicit unsupported error. Phase 4.6
+  added those as real, data-reading queries — `ParseMetricQuery` now runs first on the
+  instant path and falls back to this shim on `ErrNotMetricQuery`, so the health-check
+  behavior described here is unchanged.)* The
   envelope's **result type follows the expression shape**, as upstream derives it from the
   AST: a literal-only expression (`1+1`) is a LogQL LiteralExpr and answers
   `resultType: "scalar"` with a bare `[ts, "value"]` pair, while anything mentioning
@@ -441,15 +445,24 @@ Required:
 Line filters take all four operators (`|=`, `!=`, `|~`, `!~`) and chain, so **regex
 applies to log *lines***. Label matchers inside `{...}` remain equality-only.
 
-Explicitly unsupported in v1:
+Metric queries over logs arrived in Phase 4.6 — `count_over_time`, `rate`,
+`bytes_over_time`, and `bytes_rate`, optionally wrapped in `sum` / `sum by` /
+`sum without`, on both query endpoints. See "LogQL metric queries (introduced in 4.6)"
+above for the semantics.
+
+Explicitly unsupported:
 
 ```text
 regex label matchers — {service=~"api|web"} and {service!~"..."}
 non-equality label matchers — {service!="api"}
 line formatting
-JSON parsing pipeline
-metric queries from logs (except the constant vector() datasource health check)
-complex LogQL aggregations
+JSON parsing pipeline — and every other pipeline stage except final-position
+  | drop <labels>, which Grafana appends to every log-volume query
+unwrap and the label-extraction range aggregations — avg_over_time,
+  quantile_over_time, max_over_time, ...
+vector aggregations other than sum — count, avg, min, max, topk, ...
+binary operations — sum(...) / sum(...), count_over_time(...) * 2
+the offset modifier
 ```
 
 ---
