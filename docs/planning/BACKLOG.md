@@ -483,7 +483,7 @@ Design: `docs/superpowers/specs/2026-08-04-phase-4.6-logql-metric-queries-design
 - [x] `tests/e2e/compose_smoke.sh` — assert the volume panel's expression is in the dashboard Grafana serves, then run it through `/api/ds/query` and assert level-labeled numeric frames with no error
 
 **Docs + roadmap**
-- [x] `docs/planning/IMPLEMENTATION_PLAN.md` §4.6 — scope and DoD rewritten for the wider subset (the current DoD names `rate` as still-unsupported)
+- [x] `docs/planning/IMPLEMENTATION_PLAN.md` §4.6 — scope and DoD rewritten for the wider subset (they had named `rate` as still-unsupported, from when the phase was scoped to `count_over_time` and `sum by` alone)
 - [x] `docs/planning/ARCHITECTURE_NOTES.md` — "LogQL metric queries (introduced in 4.6)" subsection (grammar, time model, step defaulting, output-label semantics vs the metrics aggregator, memory note); "Known gaps" loses metric LogQL
 - [x] `docs/runbooks/grafana-logs-demo.md` — drop the log-volume limitation row; add metric queries to the Explore ladder and the dashboard walkthrough; list what is still unsupported
 - [x] `README.md` — LogQL supported-syntax table beside the existing PromQL one
