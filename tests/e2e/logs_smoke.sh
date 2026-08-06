@@ -133,14 +133,16 @@ BODY=$(curl -s -G "$BACKEND/loki/api/v1/query" \
 check_contains "datasource health check — vector envelope" "$BODY" '"resultType":"vector"'
 check_contains "datasource health check — value 2" "$BODY" ',"2"]'
 
-# Explore's log-volume histogram sends this shape. Phase 4.6 answers it, so the
-# check that used to assert a 400 now asserts the matrix.
+# Explore's log-volume histogram sends this shape — including the `| drop __error__`
+# stage Grafana 11.1.0 appends to every volume query (datasource.ts:200-206), with no
+# space before the `[`. Asserting the shape without that stage is how a green test
+# once coexisted with a histogram that still returned 400.
 #
 # The line filter on the run token is load-bearing: repeated smoke runs push into
 # the same service="smoke-test" streams, so an unfiltered count would grow between
 # runs and could not assert a value. It also exercises a line filter inside a
 # metric query.
-BODY=$(lokq 'sum by (level) (count_over_time({service="smoke-test"} |= "run_id='"$RUN_ID"'" [5m]))')
+BODY=$(lokq 'sum by (level) (count_over_time({service="smoke-test"} |= "run_id='"$RUN_ID"'" | drop __error__[5m]))')
 check_contains "log-volume query — matrix envelope" "$BODY" '"resultType":"matrix"'
 check_contains "log-volume query — info group" "$BODY" '"level":"info"'
 check_contains "log-volume query — error group" "$BODY" '"level":"error"'
