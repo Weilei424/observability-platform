@@ -309,6 +309,23 @@ and `/loki/api/v1/index/stats` (query size estimate).
   asymmetry is upstream's. `ErrNotMetricQuery` distinguishes "belongs to another
   parser" (a selector, a literal, `vector()`) from "unsupported", which is what
   lets the instant endpoint keep its constant-expression shim.
+- **`| drop <labels>` is the one supported pipeline stage**, accepted only in last
+  position and only with bare label names. It exists because Grafana 11.1.0 appends
+  `| drop __error__` to every Explore log-volume query before wrapping it
+  (`public/app/plugins/datasource/loki/datasource.ts:200-206`, `getSupplementaryQuery`)
+  — so without it the histogram this phase exists to serve still returned 400. The
+  stage is *implemented*, not waved through: dropped names are removed from the output
+  label set in both the metric path (`groupOf`, before grouping, so `sum by (level)` on
+  a query that dropped `level` sees it as absent) and the log path
+  (`StreamResult.Labels`). For `__error__` that is exactly a no-op, since no parser
+  stage runs and the label is never set. Dropping never affects stream *matching*,
+  which happens on stored labels before the pipeline. Every other stage — `| json`,
+  `| logfmt`, `line_format`, `| unwrap` — still returns the explicit pipeline error.
+- **Known limitation of `drop` on the log path:** two distinct streams that become
+  identical after dropping labels are returned as separate `StreamResult` entries with
+  equal label maps, where real Loki would merge them. Unreachable via `| drop __error__`,
+  the only form Grafana sends. The metric path is unaffected — it groups by output
+  labels, so such streams merge naturally.
 - `internal/logs/metriceval.go` — ticks at `start, start+step, … ≤ end`; window
   `(t − range, t]`; entries read `[start − range, end)`, so an entry at exactly
   `end` is never counted, matching upstream's half-open sample reads and the log
