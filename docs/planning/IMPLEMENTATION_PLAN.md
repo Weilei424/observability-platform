@@ -428,6 +428,10 @@ Development is **single-node first**. Distributed mode only begins after ingesti
   `resultType: "vector"` on instant `query`.
 - Route metric expressions on both query endpoints; keep every other metric
   function, `unwrap`, `offset`, and binary operations on an explicit error.
+- Support `| drop <labels>` in final position as the sole pipeline exception —
+  Grafana appends `| drop __error__` to every log-volume query, so the histogram
+  cannot render without it. Dropped names leave the output label set, and the log
+  path regroups by the post-drop label set.
 - Add a log-volume panel to the provisioned logs dashboard.
 
 **DoD:**
@@ -436,8 +440,9 @@ Development is **single-node first**. Distributed mode only begins after ingesti
 - Grafana Explore's log-volume histogram renders instead of showing an error, and
   the logs dashboard's volume panel draws stacked bars per level.
 - Still-unsupported LogQL (`unwrap`, `avg_over_time` and the other label-extraction
-  aggregations, non-`sum` vector aggregations, binary operations, pipelines, regex
-  label matchers) returns explicit errors.
+  aggregations, non-`sum` vector aggregations, binary operations, every pipeline stage
+  except final-position `| drop <labels>` with bare label names, regex label matchers)
+  returns explicit errors.
 - Tests cover parsing, step bucketing boundaries, grouped counts, and the byte and
   rate variants.
 
