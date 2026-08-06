@@ -111,7 +111,8 @@ Duration units accepted: `ms`, `s`, `m`, `h`, `d`, `w`, `y`.
 | `bytes_over_time`, `bytes_rate` | `bytes_over_time({service="api"}[5m])` | Supported |
 | `sum`, `sum by`, `sum without` | `sum by (level) (count_over_time({service="api"}[5m]))` | Supported |
 | Regex label matchers | `{service=~"api\|web"}` | Returns 400 |
-| Pipelines and formatters | `\| json`, `\| logfmt`, `line_format` | Returns 400 |
+| `\| drop <labels>` | `{service="api"} \| drop __error__` | Supported (last stage only) |
+| Other pipelines and formatters | `\| json`, `\| logfmt`, `line_format`, `\| unwrap` | Returns 400 |
 | `unwrap` and its aggregations | `avg_over_time({a="b"} \| unwrap d [5m])` | Returns 400 |
 | Other vector aggregations | `count(...)`, `topk(...)` | Returns 400 |
 | Binary operations | `sum(...) / sum(...)` | Returns 400 |
