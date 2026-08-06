@@ -41,8 +41,10 @@ func NewQueryEngine(r Reader) *QueryEngine { return &QueryEngine{r: r} }
 // QueryRange evaluates sel over the half-open range [startNs, endNs), matching
 // Loki: results have a timestamp >= start and < end. Entries are line-filtered,
 // ordered by dir, capped at limit (limit <= 0 means no cap), then regrouped by
-// stream preserving global order. The stream containing the first ordered entry
-// leads. Empty streams are omitted.
+// their post-drop label set preserving global order. The stream containing the
+// first ordered entry leads. Empty streams are omitted. Grouping is by label set
+// rather than stream ID because `| drop` mutates the labels that define a
+// stream; absent that stage the two are equivalent.
 func (e *QueryEngine) QueryRange(ctx context.Context, sel LogSelector, startNs, endNs int64, limit int, dir Direction) ([]StreamResult, error) {
 	return e.query(ctx, sel, startNs, endNs, false, limit, dir)
 }
@@ -141,23 +143,39 @@ func (e *QueryEngine) query(ctx context.Context, sel LogSelector, startNs, endNs
 		all = all[:limit]
 	}
 
-	var order []StreamID
-	grouped := make(map[StreamID][]LogEntry)
-	for _, t := range all {
-		if _, seen := grouped[t.id]; !seen {
-			order = append(order, t.id)
+	// Group by the post-drop label set rather than by stream ID. A stream *is* its
+	// label set, and `| drop` mutates that set — so two streams differing only by a
+	// dropped label are one stream in the result, as they are in Loki. Without a
+	// drop stage this is exactly the old per-stream grouping, since stream label
+	// sets are unique by fingerprint and so map one-to-one onto keys.
+	keyOf := make(map[StreamID]string, len(labelsByID))
+	labelsOf := make(map[string]map[string]string, len(labelsByID))
+	for id, l := range labelsByID {
+		m := l.Map()
+		for _, n := range sel.DropLabels {
+			delete(m, n)
 		}
-		grouped[t.id] = append(grouped[t.id], t.entry)
+		key := encodeLabelSet(m)
+		keyOf[id] = key
+		if _, seen := labelsOf[key]; !seen {
+			labelsOf[key] = m
+		}
+	}
+
+	var order []string
+	grouped := make(map[string][]LogEntry)
+	for _, t := range all {
+		key := keyOf[t.id]
+		if _, seen := grouped[key]; !seen {
+			order = append(order, key)
+		}
+		grouped[key] = append(grouped[key], t.entry)
 	}
 	results := make([]StreamResult, 0, len(order))
-	for _, id := range order {
-		labels := labelsByID[id].Map()
-		for _, n := range sel.DropLabels {
-			delete(labels, n)
-		}
+	for _, key := range order {
 		results = append(results, StreamResult{
-			Labels:  labels,
-			Entries: grouped[id],
+			Labels:  labelsOf[key],
+			Entries: grouped[key],
 		})
 	}
 	return results, nil
