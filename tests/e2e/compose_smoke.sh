@@ -316,7 +316,7 @@ check_contains "panel 1 query returns sample-app rows" "$BODY" "request_id="
 # marker's level values and appears nowhere in the request, so it cannot arrive by
 # echo. The error check looks for the error *key*, not the bare word: this query
 # groups by level, and one of those levels is literally "error".
-BODY=$(dsquery 'sum by (level) (count_over_time({service=\"compose-e2e\"} |= \"\" [1m]))')
+BODY=$(dsquery 'sum by (level) (count_over_time({service=\"compose-e2e\"} |= \"\" | drop __error__[1m]))')
 check_contains "volume panel query returns the info level series" "$BODY" '"info"'
 check_absent   "volume panel query has no datasource error" "$BODY" '"error":"'
 
