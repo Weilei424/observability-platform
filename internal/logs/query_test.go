@@ -149,6 +149,73 @@ func TestQueryRange_DropLabel(t *testing.T) {
 	}
 }
 
+// TestQueryRange_DropLabelMergesStreams covers the case the single-stream test
+// above cannot see: two streams that differ ONLY by the dropped label are the
+// same stream once it is gone, so they must come back merged. A stream is its
+// label set — returning two results with identical labels would be a response no
+// real Loki can produce, and a client keying on the label set would silently
+// lose one of them.
+//
+// The merged entries must also stay in global timestamp order, interleaved
+// across the original streams rather than concatenated stream by stream.
+func TestQueryRange_DropLabelMergesStreams(t *testing.T) {
+	s := newTestStore(t, t.TempDir(), 8<<20)
+	info := mustLabels(t, map[string]string{"service": "api", "level": "info"})
+	errs := mustLabels(t, map[string]string{"service": "api", "level": "error"})
+	if err := s.Append(info, 100, "info first"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append(errs, 200, "error second"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append(info, 300, "info third"); err != nil {
+		t.Fatal(err)
+	}
+	eng := NewQueryEngine(s)
+
+	sel, err := ParseLogQL(`{service="api"} | drop level`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := eng.QueryRange(context.Background(), sel, 0, 1000, 100, Forward)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
+	if len(res) != 1 {
+		t.Fatalf("got %d streams, want them merged into 1: %+v", len(res), res)
+	}
+	if len(res[0].Labels) != 1 || res[0].Labels["service"] != "api" {
+		t.Errorf("labels = %v, want exactly {service:api}", res[0].Labels)
+	}
+	var lines []string
+	for _, e := range res[0].Entries {
+		lines = append(lines, e.Line)
+	}
+	want := []string{"info first", "error second", "info third"}
+	if len(lines) != len(want) {
+		t.Fatalf("entries = %v, want %v", lines, want)
+	}
+	for i := range want {
+		if lines[i] != want[i] {
+			t.Fatalf("entries = %v, want %v (merged entries must stay in global time order)", lines, want)
+		}
+	}
+
+	// Without the drop stage the same two streams stay separate — proof the merge
+	// is driven by the dropped label, not by collapsing everything.
+	plain, err := ParseLogQL(`{service="api"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err = eng.QueryRange(context.Background(), plain, 0, 1000, 100, Forward)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
+	if len(res) != 2 {
+		t.Fatalf("got %d streams without drop, want 2: %+v", len(res), res)
+	}
+}
+
 func TestQueryInstant_UpToTime(t *testing.T) {
 	s := newTestStore(t, t.TempDir(), 8<<20)
 	api := mustLabels(t, map[string]string{"service": "api"})
