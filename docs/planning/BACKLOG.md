@@ -488,6 +488,13 @@ Design: `docs/superpowers/specs/2026-08-04-phase-4.6-logql-metric-queries-design
 - [x] `docs/runbooks/grafana-logs-demo.md` — drop the log-volume limitation row; add metric queries to the Explore ladder and the dashboard walkthrough; list what is still unsupported
 - [x] `README.md` — LogQL supported-syntax table beside the existing PromQL one
 
+**`| drop` pipeline stage** *(added after review — the phase's DoD was not actually met without it)*
+- [x] `internal/logs/logql.go` — `LogSelector.DropLabels`; `parseDropStagePrefix` consuming `| drop a, b` after the line filters; accepted in last position only, bare label names only
+- [x] `internal/logs/metricql.go` — same stage inside a range aggregation, parsed before the pipeline rejection so every other stage still errors
+- [x] `internal/logs/metriceval.go` + `query.go` — dropped names removed from output labels before grouping (metric path) and from `StreamResult.Labels` (log path); matching is unaffected
+- [x] Correct the three places that documented Grafana's volume query without the stage: `internal/api/loki_metric_query_test.go`, `tests/e2e/logs_smoke.sh`, `tests/e2e/compose_smoke.sh`
+- [x] `README.md`, `docs/runbooks/grafana-logs-demo.md`, `logs.json` text panel, `ARCHITECTURE_NOTES.md` — record the one supported stage and the log-path merge limitation
+
 **Verify**
 - [x] Verify: `go build ./...`, `go vet ./...`, `golangci-lint run`, `go test ./...` green
 - [x] Verify: `make smoke-logs` exits 0 against a locally run backend
