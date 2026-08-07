@@ -494,6 +494,8 @@ Design: `docs/superpowers/specs/2026-08-04-phase-4.6-logql-metric-queries-design
 - [x] `internal/logs/metriceval.go` + `query.go` — dropped names removed from output labels before grouping (metric path) and from `StreamResult.Labels` (log path); matching is unaffected
 - [x] Correct the three places that documented Grafana's volume query without the stage: `internal/api/loki_metric_query_test.go`, `tests/e2e/logs_smoke.sh`, `tests/e2e/compose_smoke.sh`
 - [x] `README.md`, `docs/runbooks/grafana-logs-demo.md`, `logs.json` text panel, `ARCHITECTURE_NOTES.md` — record the one supported stage
+- [x] `tests/e2e/provisioning_test.go` — assert the volume panel's `drawStyle`/`stacking`; a config regression renders lines instead of stacked bars while every expression check stays green
+- [x] `tests/e2e/compose_smoke.sh` — query each seeded level on its own, so a missing series fails instead of hiding behind the other in the combined result
 - [x] `internal/logs/query.go` — group log results by the post-drop label set, so two streams differing only by a dropped label merge (a stream *is* its label set); keys built lazily per contributing stream
 - [x] `docs/planning/IMPLEMENTATION_PLAN.md` §4.6 — name final-position, bare-label `| drop` as the sole pipeline exception in both scope and DoD
 - [x] `internal/logs/metriceval.go` — count entries landing exactly on a tick, including the final one at `end`. 4.6 originally excluded them, reasoning from upstream's half-open sample reads without accounting for the leap nanosecond it adds *"to include lines exactly at endTs"*; the effect was a final tick narrower than every other tick. `endInclusive` is gone — range and instant now share one bound
@@ -501,8 +503,8 @@ Design: `docs/superpowers/specs/2026-08-04-phase-4.6-logql-metric-queries-design
 **Verify**
 - [x] Verify: `go build ./...`, `go vet ./...`, `golangci-lint run`, `go test ./...` green
 - [x] Verify: `make smoke-logs` exits 0 against a locally run backend
-- [ ] Verify *(requires Docker)*: `make smoke-compose` exits 0, including the new volume-panel assertions
-- [ ] Verify *(requires Docker)*: Explore's log-volume histogram renders instead of erroring, and the dashboard's volume panel draws stacked bars
+- [x] Verify *(requires Docker)*: `make smoke-compose` exits 0, including the volume-panel assertions — run in CI, not locally: the `Compose Stack E2E (through Grafana)` job succeeded at `263ea22` ([run 31135082241](https://github.com/Weilei424/observability-platform/actions/runs/31135082241)), which is what exercises the panel expression, Explore's `| drop __error__` form, and both through a real Grafana against the real stack
+- [ ] Verify *(requires Docker + a browser)*: Explore's log-volume histogram renders instead of erroring, and the dashboard's volume panel draws stacked bars. **Still open — the one DoD item nothing automated can close.** What is covered without it: the compose job proves both expressions return data through Grafana's own `/api/ds/query` (so the histogram has something to draw), and `TestLogsVolumePanelRendersStackedBars` pins `drawStyle: bars` + `stacking.mode: normal` (so a regression to unstacked lines fails a test). What remains unproven is only that Grafana renders that config as expected — Grafana's behavior, not this backend's
 
 ---
 
