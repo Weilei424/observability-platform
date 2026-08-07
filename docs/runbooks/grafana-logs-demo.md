@@ -9,6 +9,7 @@ the Loki subset at once.
 - Docker and Docker Compose installed
 - Ports 8080 and 3000 free
 - Go (for `make smoke-logs`; the demo stack itself needs only Docker)
+- `jq` (for `make smoke-compose`, which parses Grafana's dataframe responses)
 
 ## Start the stack
 
