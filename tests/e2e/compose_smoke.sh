@@ -330,6 +330,18 @@ check_contains "volume panel query — info level series" "$BODY" '"info"'
 check_contains "volume panel query — numeric frame data" "$BODY" '"values":[['
 check_absent   "volume panel query — no datasource error" "$BODY" '"error":"'
 
+# Then each seeded level on its own. The combined query above cannot tell "both
+# series came back" from "one did": whichever level is missing, the other still
+# supplies the "info"/values matches. Scoping the selector to one level makes a
+# missing series show up as an empty frame set, which no assertion above catches.
+# Checking for the literal word "error" instead would be unreliable — it is both a
+# level value here and the key of a Grafana error envelope.
+for level in info error; do
+    BODY=$(dsquery "sum by (level) (count_over_time({service=\\\"compose-e2e\\\", level=\\\"$level\\\"} [1m]))")
+    check_contains "volume query, level=$level — series returned with data" "$BODY" '"values":[['
+    check_absent   "volume query, level=$level — no datasource error" "$BODY" '"error":"'
+done
+
 # Explore's own form. Same data, one extra stage: if this 400s, the histogram
 # above Explore's log lines is broken even while the dashboard panel renders.
 BODY=$(dsquery 'sum by (level) (count_over_time({service=\"compose-e2e\"} |= \"\" | drop __error__[1m]))')
