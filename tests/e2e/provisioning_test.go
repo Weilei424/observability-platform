@@ -68,11 +68,21 @@ type dashboardTarget struct {
 }
 
 type dashboardPanel struct {
-	ID         int               `json:"id"`
-	Title      string            `json:"title"`
-	Type       string            `json:"type"`
-	Datasource *dsRef            `json:"datasource"`
-	Targets    []dashboardTarget `json:"targets"`
+	ID          int               `json:"id"`
+	Title       string            `json:"title"`
+	Type        string            `json:"type"`
+	Datasource  *dsRef            `json:"datasource"`
+	Targets     []dashboardTarget `json:"targets"`
+	FieldConfig struct {
+		Defaults struct {
+			Custom struct {
+				DrawStyle string `json:"drawStyle"`
+				Stacking  struct {
+					Mode string `json:"mode"`
+				} `json:"stacking"`
+			} `json:"custom"`
+		} `json:"defaults"`
+	} `json:"fieldConfig"`
 }
 
 // dashboardVariable covers both variable kinds in this dashboard. Query is a
@@ -254,13 +264,16 @@ func TestLogsDashboardIdentity(t *testing.T) {
 // cannot notice it, and every per-target check below would simply iterate one
 // fewer time and pass. Pinning the count per panel is what makes "this panel
 // has a query" an assertion rather than a side effect of the file's contents.
+// volumePanelID is the log-volume panel added in Phase 4.6.
+const volumePanelID = 4
+
 var wantPanels = []struct {
 	id      int
 	kind    string
 	title   string
 	targets int
 }{
-	{4, "timeseries", "Log volume by level — $service", 1},
+	{volumePanelID, "timeseries", "Log volume by level — $service", 1},
 	{1, "logs", "All logs — $service", 1},
 	{2, "logs", "$level logs — $service", 1},
 	{3, "text", "Supported LogQL subset", 0},
@@ -298,6 +311,29 @@ func loadPanels(t *testing.T) []dashboardPanel {
 		}
 	}
 	return panels
+}
+
+// TestLogsVolumePanelRendersStackedBars pins the volume panel's rendering config.
+// A timeseries panel with the right query still renders — as unstacked lines —
+// if drawStyle or stacking regress, and every other check in this file would stay
+// green: the expression parses, the datasource resolves, the targets are present.
+// The only thing that would notice is a human looking at it, and the browser check
+// is the one DoD item this suite cannot perform. So pin the two fields that decide
+// whether "log volume by level" reads as a volume histogram or as line spaghetti.
+func TestLogsVolumePanelRendersStackedBars(t *testing.T) {
+	for _, p := range loadPanels(t) {
+		if p.ID != volumePanelID {
+			continue
+		}
+		if got := p.FieldConfig.Defaults.Custom.DrawStyle; got != "bars" {
+			t.Errorf("volume panel drawStyle = %q, want \"bars\" — it would render as lines", got)
+		}
+		if got := p.FieldConfig.Defaults.Custom.Stacking.Mode; got != "normal" {
+			t.Errorf("volume panel stacking mode = %q, want \"normal\" — per-level bars would overlap instead of stacking", got)
+		}
+		return
+	}
+	t.Fatalf("volume panel id %d not found", volumePanelID)
 }
 
 // TestLogsDashboardPanels is loadPanels' assertions standing on their own, so
