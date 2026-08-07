@@ -326,14 +326,8 @@ check_contains "panel 1 query returns sample-app rows" "$BODY" "request_id="
 # earlier version of this script ran (2) in (1)'s place, which left the panel's
 # real expression untested while reading as though it were covered.
 #
-# On the assertions: this response is Grafana's dataframe JSON, not Loki's
-# envelope, and its exact layout could not be observed while writing this (no
-# Docker in the authoring environment). They pin things only a working grouped
-# metric query produces — "info" is a seeded level value that appears nowhere in
-# the request, so it cannot arrive by echo, and a numeric frame must carry a
-# values array. The error check looks for the error *key*, not the bare word:
-# this query groups by level, and one of those levels is literally "error".
-# Tighten these against the real frame shape on the first Docker run.
+# The error check below looks for the error *key*, not the bare word: this query
+# groups by level, and one of those levels is literally "error".
 BODY=$(dsquery 'sum by (level) (count_over_time({service=\"compose-e2e\"} |= \"\" [1m]))')
 check_absent "volume panel query — no datasource error" "$BODY" '"error":"'
 
@@ -341,9 +335,9 @@ check_absent "volume panel query — no datasource error" "$BODY" '"error":"'
 # cannot make the two distinctions that matter here: whether BOTH series came
 # back (whichever one is missing, the other still supplies every match), and
 # whether their samples are actually there ('"values":[[' matches an empty
-# array just as happily as a full one). The single-level queries further down
-# do not cover this either — Grafana could drop or merge a frame only while
-# handling a genuinely multi-series result.
+# array just as happily as a full one). Querying each level separately does not
+# cover it either — Grafana could drop or merge a frame only while handling a
+# genuinely multi-series result, which is the case the panel actually issues.
 #
 # The filters use recursive descent instead of a fixed path, so they assert what
 # must hold of Grafana's dataframe JSON without pinning its exact nesting. If a
@@ -366,18 +360,6 @@ if [ "${NUMCOLS:-0}" -ge 4 ]; then
 else
     log_fail "volume panel query — ${NUMCOLS:-0} non-empty numeric columns, want >= 4 (two series x time+value); body: $BODY"
 fi
-
-# Then each seeded level on its own. The combined query above cannot tell "both
-# series came back" from "one did": whichever level is missing, the other still
-# supplies the "info"/values matches. Scoping the selector to one level makes a
-# missing series show up as an empty frame set, which no assertion above catches.
-# Checking for the literal word "error" instead would be unreliable — it is both a
-# level value here and the key of a Grafana error envelope.
-for level in info error; do
-    BODY=$(dsquery "sum by (level) (count_over_time({service=\\\"compose-e2e\\\", level=\\\"$level\\\"} [1m]))")
-    check_contains "volume query, level=$level — series returned with data" "$BODY" '"values":[['
-    check_absent   "volume query, level=$level — no datasource error" "$BODY" '"error":"'
-done
 
 # Explore's own form. Same data, one extra stage: if this 400s, the histogram
 # above Explore's log lines is broken even while the dashboard panel renders.
