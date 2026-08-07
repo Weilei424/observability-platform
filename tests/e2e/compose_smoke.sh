@@ -306,19 +306,35 @@ check_absent   "Search box filters — info line excluded" "$BODY" "200 in 12ms 
 BODY=$(dsquery '{service=\"api\"} |= \"\"')
 check_contains "panel 1 query returns sample-app rows" "$BODY" "request_id="
 
-# The volume panel with the variables Grafana would interpolate, including the
-# $__interval Grafana resolves from the panel width and time range.
+# Two different expressions produce this histogram, and both have to work:
 #
-# The assertions are deliberately shape-agnostic. This response is Grafana's
-# dataframe JSON, not Loki's envelope, and its exact layout could not be observed
-# while writing this (no Docker in the authoring environment) — so they pin values
-# only a working grouped metric query can produce. "info" is one of the seeded
-# marker's level values and appears nowhere in the request, so it cannot arrive by
-# echo. The error check looks for the error *key*, not the bare word: this query
-# groups by level, and one of those levels is literally "error".
+#   1. the dashboard panel's own expression, interpolated as Grafana would
+#      ($__interval resolves from panel width and time range)
+#   2. the expression Explore generates for its log-volume histogram, which
+#      appends `| drop __error__`
+#
+# Only (1) is pinned against the dashboard Grafana actually serves, above. An
+# earlier version of this script ran (2) in (1)'s place, which left the panel's
+# real expression untested while reading as though it were covered.
+#
+# On the assertions: this response is Grafana's dataframe JSON, not Loki's
+# envelope, and its exact layout could not be observed while writing this (no
+# Docker in the authoring environment). They pin things only a working grouped
+# metric query produces — "info" is a seeded level value that appears nowhere in
+# the request, so it cannot arrive by echo, and a numeric frame must carry a
+# values array. The error check looks for the error *key*, not the bare word:
+# this query groups by level, and one of those levels is literally "error".
+# Tighten these against the real frame shape on the first Docker run.
+BODY=$(dsquery 'sum by (level) (count_over_time({service=\"compose-e2e\"} |= \"\" [1m]))')
+check_contains "volume panel query — info level series" "$BODY" '"info"'
+check_contains "volume panel query — numeric frame data" "$BODY" '"values":[['
+check_absent   "volume panel query — no datasource error" "$BODY" '"error":"'
+
+# Explore's own form. Same data, one extra stage: if this 400s, the histogram
+# above Explore's log lines is broken even while the dashboard panel renders.
 BODY=$(dsquery 'sum by (level) (count_over_time({service=\"compose-e2e\"} |= \"\" | drop __error__[1m]))')
-check_contains "volume panel query returns the info level series" "$BODY" '"info"'
-check_absent   "volume panel query has no datasource error" "$BODY" '"error":"'
+check_contains "Explore volume query (with drop) — info level series" "$BODY" '"info"'
+check_absent   "Explore volume query (with drop) — no datasource error" "$BODY" '"error":"'
 
 # ---- Storage path: chunks and restart readback ----------------------
 echo ""
