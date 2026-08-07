@@ -34,28 +34,35 @@ type MetricSample struct {
 // EvalMetricRange evaluates q at every step tick in [startNs, endNs].
 //
 // Ticks run start, start+step, ... up to and including endNs when aligned. Each
-// tick's window is (t-range, t], and entries are read over [start-range, end) —
-// half-open on the right, as upstream's sample reads are, so an entry at exactly
-// endNs is never counted. A window with no entries produces no point, matching
-// Prometheus and Loki, which emit a gap rather than a zero.
+// tick's window is (t-range, t] — start-exclusive, end-inclusive — and entries are
+// read over [start-range, end], so an entry landing exactly on a tick counts at
+// that tick, including the final one at endNs. Upstream reaches the same place by
+// a different route: its sample reads are half-open, so it adds a leap nanosecond
+// to the selected end ("add leap nanosecond to endTs to include lines exactly at
+// endTs. range iterators work on start exclusive, end inclusive ranges",
+// pkg/logql/evaluator.go). Reading inclusively is the same thing without the
+// off-by-one dance.
+//
+// Note this differs from the LOG path's QueryRange, which is half-open [start, end)
+// — that asymmetry is upstream's too, and deliberate: a log query returns entries
+// in a range, while a metric query evaluates windows that close on their tick.
+//
+// A window with no entries produces no point, matching Prometheus and Loki, which
+// emit a gap rather than a zero.
 //
 // The caller bounds the tick count: the HTTP layer enforces Loki's 11,000-points
 // -per-timeseries limit before calling. Nothing here allocates in proportion to
 // the tick count except the points actually emitted.
 func (e *QueryEngine) EvalMetricRange(ctx context.Context, q MetricQuery, startNs, endNs, stepNs int64) ([]MetricSeries, error) {
-	return e.evalMetric(ctx, q, startNs, endNs, stepNs, false)
+	return e.evalMetric(ctx, q, startNs, endNs, stepNs)
 }
 
 // EvalMetricInstant evaluates q at a single instant, returning one sample per
-// output series. start == end yields exactly one tick regardless of step.
-//
-// The end is inclusive here, so an entry at exactly tsNs is counted. That mirrors
-// QueryInstant: `time` is an evaluation instant, not a range bound. It is a
-// superset of upstream, whose reads are half-open everywhere — but leaving it
-// exclusive would mean a log query at T returns an entry that a metric query at T
-// does not count.
+// output series. start == end yields exactly one tick regardless of step, so this
+// is the single-tick case of EvalMetricRange with identical bounds — an entry at
+// exactly tsNs is counted, because every tick's window closes on its own timestamp.
 func (e *QueryEngine) EvalMetricInstant(ctx context.Context, q MetricQuery, tsNs int64) ([]MetricSample, error) {
-	series, err := e.evalMetric(ctx, q, tsNs, tsNs, 1, true)
+	series, err := e.evalMetric(ctx, q, tsNs, tsNs, 1)
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +82,7 @@ type metricGroup struct {
 	values map[int64]float64
 }
 
-func (e *QueryEngine) evalMetric(ctx context.Context, q MetricQuery, startNs, endNs, stepNs int64, endInclusive bool) ([]MetricSeries, error) {
+func (e *QueryEngine) evalMetric(ctx context.Context, q MetricQuery, startNs, endNs, stepNs int64) ([]MetricSeries, error) {
 	if stepNs <= 0 {
 		return nil, fmt.Errorf("step must be greater than 0")
 	}
@@ -109,9 +116,6 @@ func (e *QueryEngine) evalMetric(ctx context.Context, q MetricQuery, startNs, en
 		// change (e.g. a cached or pooled buffer) could break.
 		kept := entries[:0]
 		for _, en := range entries {
-			if !endInclusive && en.TimestampNs >= endNs {
-				continue // the read is half-open on the right
-			}
 			if !passesFilters(en.Line, q.Selector.LineFilters) {
 				continue
 			}
