@@ -44,6 +44,15 @@ FLUSH_TIMEOUT="${OBS_COMPOSE_FLUSH_TIMEOUT:-180}"
 # deadline again. Only the job timeout would stop it, with no useful output.
 CURL_TIMEOUTS=(--connect-timeout 3 --max-time 15)
 
+# jq parses Grafana's dataframe responses below. Substring matching cannot tell
+# "two series came back" from "one did", nor an empty samples array from a full
+# one, and both distinctions are the point of the volume-panel checks.
+if ! command -v jq >/dev/null 2>&1; then
+    echo "FATAL: jq is required (parses Grafana's /api/ds/query responses)." >&2
+    echo "       Install it, or run the rest of the suite with: make smoke-logs" >&2
+    exit 1
+fi
+
 PASS=0
 FAIL=0
 RUN_ID="run$(date +%s%N | tr 0-9 a-j)"
@@ -326,9 +335,37 @@ check_contains "panel 1 query returns sample-app rows" "$BODY" "request_id="
 # this query groups by level, and one of those levels is literally "error".
 # Tighten these against the real frame shape on the first Docker run.
 BODY=$(dsquery 'sum by (level) (count_over_time({service=\"compose-e2e\"} |= \"\" [1m]))')
-check_contains "volume panel query — info level series" "$BODY" '"info"'
-check_contains "volume panel query — numeric frame data" "$BODY" '"values":[['
-check_absent   "volume panel query — no datasource error" "$BODY" '"error":"'
+check_absent "volume panel query — no datasource error" "$BODY" '"error":"'
+
+# Parse the multi-series response rather than substring-matching it. Substrings
+# cannot make the two distinctions that matter here: whether BOTH series came
+# back (whichever one is missing, the other still supplies every match), and
+# whether their samples are actually there ('"values":[[' matches an empty
+# array just as happily as a full one). The single-level queries further down
+# do not cover this either — Grafana could drop or merge a frame only while
+# handling a genuinely multi-series result.
+#
+# The filters use recursive descent instead of a fixed path, so they assert what
+# must hold of Grafana's dataframe JSON without pinning its exact nesting. If a
+# filter ever mismatches the real shape it fails loudly and prints the body, so
+# the log shows what to correct — the one failure direction worth having.
+LEVELS=$(printf '%s' "$BODY" | jq -c '[.. | objects | select(has("level")) | .level] | unique' 2>/dev/null || echo 'jq-error')
+if [ "$LEVELS" = '["error","info"]' ]; then
+    log_pass "volume panel query — exactly the info and error series returned"
+else
+    log_fail "volume panel query — level series are $LEVELS, want [\"error\",\"info\"]; body: $BODY"
+fi
+
+# Every frame contributes a timestamp column and a values column, both numeric
+# and both non-empty when the series has samples. Two series therefore mean at
+# least four non-empty numeric columns; a frame whose samples are empty drops
+# the count below that.
+NUMCOLS=$(printf '%s' "$BODY" | jq '[.. | arrays | select(length > 0) | select(all(.[]; type == "number"))] | length' 2>/dev/null || echo 0)
+if [ "${NUMCOLS:-0}" -ge 4 ]; then
+    log_pass "volume panel query — both series carry non-empty numeric samples"
+else
+    log_fail "volume panel query — ${NUMCOLS:-0} non-empty numeric columns, want >= 4 (two series x time+value); body: $BODY"
+fi
 
 # Then each seeded level on its own. The combined query above cannot tell "both
 # series came back" from "one did": whichever level is missing, the other still
