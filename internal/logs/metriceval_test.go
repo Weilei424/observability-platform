@@ -89,9 +89,17 @@ func mustParse(t *testing.T, q string) MetricQuery {
 
 const sec = int64(time.Second)
 
-// TestEvalMetricRange_WindowBoundaries pins the three boundary rules the design
-// takes from upstream: the window is (t-range, t], and the read is half-open on
-// the right so an entry at exactly `end` is never counted.
+// TestEvalMetricRange_WindowBoundaries pins the boundary rule the design takes
+// from upstream: every tick's window is (t-range, t] — start-exclusive,
+// end-inclusive — including the final tick, so an entry landing exactly on `end`
+// is counted there.
+//
+// This test previously asserted the opposite, on the mistaken reasoning that
+// upstream's sample reads are half-open on the right. They are, but upstream then
+// adds a leap nanosecond to the selected end for exactly this reason: "add leap
+// nanosecond to endTs to include lines exactly at endTs. range iterators work on
+// start exclusive, end inclusive ranges" (pkg/logql/evaluator.go). Dropping the
+// entry at `end` made the last tick silently narrower than every other tick.
 func TestEvalMetricRange_WindowBoundaries(t *testing.T) {
 	f := newMetricFake(t, map[string][]LogEntry{
 		"service=api": {
@@ -112,9 +120,9 @@ func TestEvalMetricRange_WindowBoundaries(t *testing.T) {
 	}
 	// Tick 160s: window (100s, 160s] holds only "at t" — the entry at exactly
 	// 100s is excluded by the open lower bound.
-	// Tick 200s: window (140s, 200s] would hold "at t" and "at end", but the read
-	// is [start-range, end) so "at end" is never read; only "at t" counts.
-	want := []MetricPoint{{160 * sec, 1}, {200 * sec, 1}}
+	// Tick 200s: window (140s, 200s] holds "at t" and "at end" — the entry at
+	// exactly 200s counts, because the window closes on its tick.
+	want := []MetricPoint{{160 * sec, 1}, {200 * sec, 2}}
 	assertPoints(t, series[0].Points, want)
 }
 
@@ -408,9 +416,10 @@ func TestEvalMetricRange_InvalidArguments(t *testing.T) {
 	}
 }
 
-// TestEvalMetricInstant_InclusiveEnd pins the one deliberate divergence from
-// upstream: `time` is an evaluation instant, so an entry at exactly `time` counts,
-// matching QueryInstant's treatment of the same boundary in Phase 4.4.
+// TestEvalMetricInstant_InclusiveEnd pins that an entry at exactly `time` counts.
+// This is not a special case: every tick's window is (t-range, t], so the single
+// tick of an instant query closes on its own timestamp like any other. It matches
+// upstream, and it matches QueryInstant's treatment of the same boundary in 4.4.
 func TestEvalMetricInstant_InclusiveEnd(t *testing.T) {
 	f := newMetricFake(t, map[string][]LogEntry{
 		"service=api,level=info": {entry(90*sec, "before"), entry(100*sec, "at time")},
