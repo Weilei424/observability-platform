@@ -121,7 +121,8 @@ func TestParseMetricQuery_Rejects(t *testing.T) {
 
 // TestParseMetricQuery_DropStage covers the drop stage reaching MetricQuery
 // through parseRangeAgg — bare, after a line filter, and wrapped in sum() as
-// Grafana's real Explore log-volume expression is (see task-1-brief.md).
+// Grafana's real Explore log-volume expression is: sum by (level)
+// (count_over_time({...} | drop __error__[$__auto])).
 func TestParseMetricQuery_DropStage(t *testing.T) {
 	cases := []struct {
 		q    string
