@@ -456,7 +456,7 @@ Design: `docs/superpowers/specs/2026-08-04-phase-4.6-logql-metric-queries-design
 
 **`internal/logs` metric evaluator (`metriceval.go`)**
 - [x] `MetricPoint`, `MetricSeries`, `MetricSample`; `EvalMetricRange(ctx, q, startNs, endNs, stepNs)` and `EvalMetricInstant(ctx, q, tsNs)` (the single-tick case of range)
-- [x] Time model: ticks `start, start+step, … ≤ end`; window `(t − range, t]`; entries read `[start − range, end)`, with instant `query` inclusive at `time` as 4.4's `QueryInstant` is; `windowStart` clamps at `MinInt64` instead of wrapping; overflow-safe tick advance via the unsigned difference
+- [x] Time model: ticks `start, start+step, … ≤ end`; window `(t − range, t]` — start-exclusive, end-inclusive at every tick including the last — so entries read `[start − range, end]` and instant `query` needs no special rule, being the single-tick case; `windowStart` clamps at `MinInt64` instead of wrapping; overflow-safe tick advance via the unsigned difference
 - [x] Values: count / Σ`len(line)` bytes / both scaled by `1/rangeSeconds` — one accumulation path with a per-entry weight and a scale factor; line filters applied before counting
 - [x] Two-pointer sliding window per stream, `O(entries + ticks)`, emitting on "window non-empty" rather than "value non-zero" so `bytes_over_time` over empty lines is a `0` and an empty window is a gap
 - [x] Grouping: `AggNone` → stream labels verbatim; `sum` → no labels; `by` → listed labels the stream carries; `without` → labels minus the listed names. Empty value ≡ absent (both render to the same label set, so splitting would emit duplicate series); length-prefixed group key; series sorted by label set, points ascending
@@ -476,7 +476,7 @@ Design: `docs/superpowers/specs/2026-08-04-phase-4.6-logql-metric-queries-design
 
 **Tests**
 - [x] Unit `internal/logs/metricql_test.go` — accept table asserting the full `MetricQuery` (four ops, with/without filters, `sum`/`by`/`without`, whitespace, Prometheus *and* Go durations); reject table covering every rejection above; sentinel cases
-- [x] Unit `internal/logs/metriceval_test.go` — boundary trio (entry at `t` counts, at `t − range` and at `end` do not); non-step-aligned end; gaps not zeros; `bytes_over_time` zero vs gap; filters before counting; `rate`/`bytes_rate` arithmetic; multibyte byte counting; `by` with an absent label, `without`, bare `sum`, `level=""` grouping with absent; deterministic ordering; underflow clamp; instant = last tick; invalid arguments
+- [x] Unit `internal/logs/metriceval_test.go` — boundary rules (an entry at `t` counts, including at the final tick `end`; one at `t − range` does not); non-step-aligned end; gaps not zeros; `bytes_over_time` zero vs gap; filters before counting; `rate`/`bytes_rate` arithmetic; multibyte byte counting; `by` with an absent label, `without`, bare `sum`, `level=""` grouping with absent; deterministic ordering; underflow clamp; instant = last tick; invalid arguments
 - [x] Integration `internal/api/loki_metric_query_test.go` — Grafana's exact log-volume query → matrix with expected counts; bare `count_over_time` per-stream series; `rate`/`bytes_over_time`/`bytes_rate`; instant → labeled vector; default step derivation; 11,000-point rejection; unsupported → 400 `text/plain`; `vector(1)+vector(1)` → 400 on `query_range`, unchanged vector on instant
 - [x] Update `TestLokiQueryRange_UnsupportedAndBadParams` (swap `rate(...)` for a still-unsupported expression) and `TestLokiInstantQuery_UnsupportedMetricQuery` (keep only unsupported cases, add a positive counterpart)
 - [x] `tests/e2e/logs_smoke.sh` — the metric-LogQL check flips from 400 to success, filtered on `|= "run_id=$RUN_ID"` so repeated runs cannot drift the count; assert matrix envelope, both level groups, value `"1"`; add a `rate` check and keep `avg_over_time` → 400
@@ -496,6 +496,7 @@ Design: `docs/superpowers/specs/2026-08-04-phase-4.6-logql-metric-queries-design
 - [x] `README.md`, `docs/runbooks/grafana-logs-demo.md`, `logs.json` text panel, `ARCHITECTURE_NOTES.md` — record the one supported stage
 - [x] `internal/logs/query.go` — group log results by the post-drop label set, so two streams differing only by a dropped label merge (a stream *is* its label set); keys built lazily per contributing stream
 - [x] `docs/planning/IMPLEMENTATION_PLAN.md` §4.6 — name final-position, bare-label `| drop` as the sole pipeline exception in both scope and DoD
+- [x] `internal/logs/metriceval.go` — count entries landing exactly on a tick, including the final one at `end`. 4.6 originally excluded them, reasoning from upstream's half-open sample reads without accounting for the leap nanosecond it adds *"to include lines exactly at endTs"*; the effect was a final tick narrower than every other tick. `endInclusive` is gone — range and instant now share one bound
 
 **Verify**
 - [x] Verify: `go build ./...`, `go vet ./...`, `golangci-lint run`, `go test ./...` green
