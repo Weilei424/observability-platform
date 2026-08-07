@@ -332,13 +332,20 @@ and `/loki/api/v1/index/stats` (query size estimate).
   stream label sets are unique by fingerprint. The metric path needed no change — it
   already groups by output labels.
 - `internal/logs/metriceval.go` — ticks at `start, start+step, … ≤ end`; window
-  `(t − range, t]`; entries read `[start − range, end)`, so an entry at exactly
-  `end` is never counted, matching upstream's half-open sample reads and the log
-  path's own half-open end. Instant `query` is the single-tick case with an
-  **inclusive** end, mirroring `QueryInstant`: `time` is an evaluation instant,
-  and the alternative is a log query at `T` returning an entry the metric query at
-  `T` does not count. Empty windows emit no point — a gap, as Prometheus and Loki
-  do, not a zero.
+  `(t − range, t]`, start-exclusive and **end-inclusive at every tick including the
+  last**, so entries read `[start − range, end]`. Upstream lands in the same place
+  from the other direction: its sample reads are half-open, so it adds a leap
+  nanosecond to the selected end — *"add leap nanosecond to endTs to include lines
+  exactly at endTs. range iterators work on start exclusive, end inclusive ranges"*
+  (`pkg/logql/evaluator.go`). Reading inclusively is that without the off-by-one.
+  This deliberately differs from the **log** path's `QueryRange`, which is half-open
+  `[start, end)` — also upstream's behavior, because a log query returns entries in
+  a range while a metric query evaluates windows that close on their tick. Instant
+  `query` is simply the single-tick case; it needs no special boundary rule. Empty
+  windows emit no point — a gap, as Prometheus and Loki do, not a zero.
+  *(4.6 originally excluded entries at exactly `end`, reasoning from upstream's
+  half-open reads without accounting for the leap nanosecond. That made the final
+  tick narrower than every other tick; corrected after review.)*
 - Evaluation is a two-pointer sliding window per stream, `O(entries + ticks)`,
   which is the shape of upstream's `batchRangeVectorIterator`. Nothing is
   allocated in proportion to the tick count except the emitted points; the HTTP
