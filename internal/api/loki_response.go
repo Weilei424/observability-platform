@@ -26,9 +26,12 @@ type lokiLabelResponse struct {
 	Data   []string `json:"data"`
 }
 
-// lokiVectorResponse is the `resultType: "vector"` envelope. It exists only for
-// the constant metric-query subset (see logs.ParseScalarQuery); log queries
-// always produce the "streams" envelope above.
+// lokiVectorResponse is the `resultType: "vector"` envelope, used by the instant
+// query endpoint for both kinds of metric expression it accepts: a real metric
+// query evaluated over stored logs (one labeled sample per output series) and the
+// constant subset behind Grafana's datasource health check (one label-less
+// sample; see logs.ParseScalarQuery). Log queries always produce the "streams"
+// envelope above, and range metric queries produce the "matrix" envelope below.
 type lokiVectorResponse struct {
 	Status string         `json:"status"`
 	Data   lokiVectorData `json:"data"`
