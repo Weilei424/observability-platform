@@ -187,11 +187,7 @@ func TestEvalMetricRange_Ops(t *testing.T) {
 	}
 	for _, tc := range cases {
 		eng := NewQueryEngine(tc.fake)
-		// Evaluated at 11s, not 10s: the read is half-open on the right, so an
-		// entry at exactly endNs is excluded — the rule
-		// TestEvalMetricRange_WindowBoundaries pins. The [10s] window at t=11s is
-		// (1s, 11s], which holds the entries at 10s.
-		series, err := eng.EvalMetricRange(context.Background(), mustParse(t, tc.q), 11*sec, 11*sec, sec)
+		series, err := eng.EvalMetricRange(context.Background(), mustParse(t, tc.q), 10*sec, 10*sec, sec)
 		if err != nil {
 			t.Fatalf("%s: %v", tc.q, err)
 		}
@@ -207,8 +203,6 @@ func TestEvalMetricRange_Ops(t *testing.T) {
 // TestEvalMetricRange_Grouping covers every output-label rule at once, including
 // the one that is forced rather than stylistic: a stream carrying level="" groups
 // with a stream that has no level, because both render to the same label set.
-// Evaluated at 11s while the entries sit at 10s: the read is half-open on the
-// right, so evaluating at exactly the entries' timestamp would exclude them.
 func TestEvalMetricRange_Grouping(t *testing.T) {
 	f := newMetricFake(t, map[string][]LogEntry{
 		"service=api,level=info":  {entry(10*sec, "a")},
@@ -221,7 +215,7 @@ func TestEvalMetricRange_Grouping(t *testing.T) {
 	// sum by (level): info=1, error=1, and one label-less group holding the
 	// empty-level stream plus the stream with no level at all.
 	series, err := e.EvalMetricRange(context.Background(), mustParse(t,
-		`sum by (level) (count_over_time({service="api"}[10s]))`), 11*sec, 11*sec, sec)
+		`sum by (level) (count_over_time({service="api"}[10s]))`), 10*sec, 10*sec, sec)
 	if err != nil {
 		t.Fatalf("sum by: %v", err)
 	}
@@ -234,7 +228,7 @@ func TestEvalMetricRange_Grouping(t *testing.T) {
 
 	// Bare sum: one label-less series holding everything.
 	series, err = e.EvalMetricRange(context.Background(), mustParse(t,
-		`sum(count_over_time({service="api"}[10s]))`), 11*sec, 11*sec, sec)
+		`sum(count_over_time({service="api"}[10s]))`), 10*sec, 10*sec, sec)
 	if err != nil {
 		t.Fatalf("sum: %v", err)
 	}
@@ -245,7 +239,7 @@ func TestEvalMetricRange_Grouping(t *testing.T) {
 	// sum without (level): everything keeps service, one group loses its level,
 	// and the region stream stays separate.
 	series, err = e.EvalMetricRange(context.Background(), mustParse(t,
-		`sum without (level) (count_over_time({service="api"}[10s]))`), 11*sec, 11*sec, sec)
+		`sum without (level) (count_over_time({service="api"}[10s]))`), 10*sec, 10*sec, sec)
 	if err != nil {
 		t.Fatalf("sum without: %v", err)
 	}
@@ -259,7 +253,7 @@ func TestEvalMetricRange_Grouping(t *testing.T) {
 	// No aggregation: one series per stream, labels verbatim (the empty level is
 	// kept here, since nothing is being grouped).
 	series, err = e.EvalMetricRange(context.Background(), mustParse(t,
-		`count_over_time({service="api"}[10s])`), 11*sec, 11*sec, sec)
+		`count_over_time({service="api"}[10s])`), 10*sec, 10*sec, sec)
 	if err != nil {
 		t.Fatalf("bare: %v", err)
 	}
@@ -278,7 +272,7 @@ func TestEvalMetricRange_DropLabel_Grouping(t *testing.T) {
 	e := NewQueryEngine(f)
 	q := mustParse(t, `sum by (level) (count_over_time({service="api"} | drop level [10s]))`)
 
-	series, err := e.EvalMetricRange(context.Background(), q, 11*sec, 11*sec, sec)
+	series, err := e.EvalMetricRange(context.Background(), q, 10*sec, 10*sec, sec)
 	if err != nil {
 		t.Fatalf("EvalMetricRange: %v", err)
 	}
@@ -299,7 +293,7 @@ func TestEvalMetricRange_DropLabel_Bare(t *testing.T) {
 	e := NewQueryEngine(f)
 	q := mustParse(t, `count_over_time({service="api"} | drop level [10s])`)
 
-	series, err := e.EvalMetricRange(context.Background(), q, 11*sec, 11*sec, sec)
+	series, err := e.EvalMetricRange(context.Background(), q, 10*sec, 10*sec, sec)
 	if err != nil {
 		t.Fatalf("EvalMetricRange: %v", err)
 	}
@@ -325,11 +319,11 @@ func TestEvalMetricRange_DropErrorLabel_NoOp(t *testing.T) {
 	withDrop := mustParse(t, `count_over_time({service="api"} | drop __error__ [10s])`)
 	without := mustParse(t, `count_over_time({service="api"}[10s])`)
 
-	a, err := e.EvalMetricRange(context.Background(), withDrop, 11*sec, 11*sec, sec)
+	a, err := e.EvalMetricRange(context.Background(), withDrop, 10*sec, 10*sec, sec)
 	if err != nil {
 		t.Fatalf("with drop: %v", err)
 	}
-	b, err := e.EvalMetricRange(context.Background(), without, 11*sec, 11*sec, sec)
+	b, err := e.EvalMetricRange(context.Background(), without, 10*sec, 10*sec, sec)
 	if err != nil {
 		t.Fatalf("without: %v", err)
 	}
