@@ -171,8 +171,14 @@ func main() {
 	if err := w.Close(); err != nil {
 		log.Error("wal close error", slog.String("error", err.Error()))
 	}
+	// Close joins the flush error and the WAL-close error, so this line can carry
+	// either or both. Both are durability failures worth naming as such: a failed
+	// flush leaves the head only in the WAL, and a failed WAL close means its tail
+	// was never fsynced. Shutdown still completes — there is nothing left to retry
+	// at this point — but the next start replays from whatever did reach disk.
 	if err := logStore.Close(); err != nil {
-		log.Error("logs store close error", slog.String("error", err.Error()))
+		log.Error("logs store close error: buffered logs may not have reached disk",
+			slog.String("error", err.Error()))
 	}
 	if err := blockStore.Close(); err != nil {
 		log.Error("block store close error", slog.String("error", err.Error()))
