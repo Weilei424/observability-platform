@@ -3,7 +3,9 @@ package logs
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -69,7 +71,15 @@ func NewStore(walDir, chunksDir, indexDir string, segMaxBytes int64, syncEveryN 
 		}
 		sl, err := NewStreamLabels(m)
 		if err != nil {
-			return // skip a record with invalid labels; consistent with 4.2 replay
+			// Skip the record, but say so. Log WAL records carry no checksum, so a
+			// structurally valid record can still hold semantically corrupt labels
+			// and reach this path; dropping it silently makes real data loss
+			// invisible to whoever is reading the startup logs. Warning here matches
+			// the metrics replay path in cmd/server/main.go, and reaches the
+			// application logger because main.go calls slog.SetDefault.
+			slog.Warn("logs WAL replay: skipping record with invalid stream labels",
+				"component", "logs", "error", err.Error())
+			return
 		}
 		id := StreamIDOf(sl)
 		hs := head[id]
@@ -187,15 +197,21 @@ func splitIntoChunks(entries []LogEntry, maxUncompressed int) []*logchunk.Chunk 
 	return out
 }
 
-// Close flushes the head (draining it durably) and closes the WAL.
+// Close flushes the head (draining it durably) and closes the WAL, returning both
+// errors if both fail.
+//
+// The WAL is closed even when the flush fails, and that ordering is the point: a
+// failed flush is exactly when the WAL matters most. It is then the only durable
+// copy of the head, the one the next start replays from — and LogWAL.Close is
+// what fsyncs its tail, which with batched syncing (WALSyncEveryN) may hold
+// records already acknowledged to clients. Returning early on a flush error left
+// those unsynced and lost them, inverting the guarantee the flush failure was
+// supposed to preserve.
 func (s *Store) Close() error {
 	s.mu.Lock()
-	if err := s.flushLocked(); err != nil {
-		s.mu.Unlock()
-		return err
-	}
+	flushErr := s.flushLocked()
 	s.mu.Unlock()
-	return s.wal.Close()
+	return errors.Join(flushErr, s.wal.Close())
 }
 
 // MatchingStreamIDs returns the sorted stream IDs matching all matchers, across
