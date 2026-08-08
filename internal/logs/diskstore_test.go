@@ -1,9 +1,11 @@
 package logs
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -632,5 +634,88 @@ func TestStreamEntries_CancelledBetweenChunkReads(t *testing.T) {
 	// One check passed, the next cancelled: the loop really did run per chunk.
 	if ctx.seen() != 2 {
 		t.Errorf("ctx.Err() consulted %d times, want 2 (once per chunk until cancelled)", ctx.seen())
+	}
+}
+
+// walCloseSpy records whether Close reached the underlying WAL. Embedding the
+// interface passes WriteRecord and Checkpoint straight through.
+type walCloseSpy struct {
+	logWAL
+	closed bool
+}
+
+func (w *walCloseSpy) Close() error {
+	w.closed = true
+	return w.logWAL.Close()
+}
+
+// TestStore_CloseClosesWALEvenWhenFlushFails pins the durability contract for the
+// one case that matters most. LogWAL.Close is what fsyncs the WAL tail, and with
+// batched syncing that tail can hold records already acknowledged to a client. If
+// Close returns as soon as the flush fails, those records are never synced — so a
+// failed flush, which is supposed to leave the WAL as the durable recovery copy,
+// would instead be the thing that destroys it.
+func TestStore_CloseClosesWALEvenWhenFlushFails(t *testing.T) {
+	dir := t.TempDir()
+	chunksDir := filepath.Join(dir, "chunks")
+	s := newTestStore(t, dir, 0) // 0 = never auto-flush, so the head survives to Close
+
+	lbls := mustLabels(t, map[string]string{"service": "api"})
+	if err := s.Append(lbls, 100, "acknowledged, not yet synced"); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	// Make the flush fail: replace the chunks directory with a regular file, so
+	// writing a chunk into it cannot succeed.
+	if err := os.RemoveAll(chunksDir); err != nil {
+		t.Fatalf("RemoveAll: %v", err)
+	}
+	if err := os.WriteFile(chunksDir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	spy := &walCloseSpy{logWAL: s.wal}
+	s.wal = spy
+
+	err := s.Close()
+	if err == nil {
+		t.Fatal("Close() = nil, want the flush error surfaced")
+	}
+	if !spy.closed {
+		t.Error("Close() skipped the WAL after a failed flush: the tail is left unsynced, losing acknowledged records")
+	}
+}
+
+// TestNewStore_ReplayWarnsOnInvalidLabels covers the recovery warning the 4.2
+// design requires. Log WAL records carry no checksum, so a structurally valid
+// record can hold semantically corrupt labels and land here; skipping it silently
+// makes real data loss invisible in the startup logs.
+func TestNewStore_ReplayWarnsOnInvalidLabels(t *testing.T) {
+	dir := t.TempDir()
+	walDir := filepath.Join(dir, "wal")
+
+	w, err := logwal.Open(walDir, 1<<20, 1)
+	if err != nil {
+		t.Fatalf("logwal.Open: %v", err)
+	}
+	// No label pairs at all: structurally fine as a record, but NewStreamLabels
+	// rejects it, which is the branch under test.
+	if err := w.WriteRecord(nil, 100, "orphaned line"); err != nil {
+		t.Fatalf("WriteRecord: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	var logged bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+
+	s := newTestStore(t, dir, 0)
+	defer func() { _ = s.Close() }()
+
+	if got := logged.String(); !strings.Contains(got, "invalid stream labels") {
+		t.Errorf("replay logged %q, want a warning naming the skipped record", got)
 	}
 }
