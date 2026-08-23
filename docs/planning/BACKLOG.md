@@ -511,13 +511,51 @@ Design: `docs/superpowers/specs/2026-08-04-phase-4.6-logql-metric-queries-design
 ## Phase 5 Execution Checklist — Packaging, Kubernetes, and Operational Demo
 
 ### Phase 5.1 — Docker Compose Demo
-- [ ] Backend container runs from local image
-- [ ] Grafana container starts with provisioned datasources
-- [ ] Sample app container emits metrics and logs
-- [ ] Load generator container produces repeatable traffic
-- [ ] `make local-up` starts complete demo
-- [ ] `make local-down` cleans up demo containers
-- [ ] Verify: dashboards populate after startup
+Design: `docs/superpowers/specs/2026-08-23-phase-5.1-docker-compose-demo-design.md` · Plan: `docs/superpowers/plans/2026-08-23-phase-5.1-docker-compose-demo.md`
+
+**Already delivered by earlier phases** *(verify, do not rebuild)*
+- [x] Backend container runs from local image — Phase 0.3, `deployments/docker/Dockerfile` (four distroless targets, nonroot uid 65532)
+- [x] Grafana container starts with provisioned datasources — Phase 0.3 wiring; `prometheus.yml` (2.5) and `loki.yml` (4.5) on one backend port
+- [x] Load generator container produces repeatable traffic — Phase 0.3 + 2.5, `examples/load-generator`. **Not modified in 5.1**: it keeps sole ownership of `http_requests_total` / `http_errors_total` / `http_request_duration_seconds` / `active_connections`
+- [x] `make local-up` starts complete demo / `make local-down` cleans up — Phase 0.3
+- [x] Dashboards populate after startup, logs half — Phase 4.5, `tests/e2e/compose_smoke.sh` in the CI `compose-e2e` job
+
+**Sample app metrics** *(closes the deferral recorded at Phase 4.5 above)*
+- [ ] `examples/sample-app/logs.go` — move the log generator out of `main.go` verbatim (`entry`, `apiEntry`, `workerEntry`, `buildBatch`, `encodePush`, `postBatch`, `requestID`, and the `methods`/`paths`/`jobs`/`serverErrs` tables); same package, so `main_test.go` is untouched
+- [ ] `examples/sample-app/metrics.go` — seven `sample_app_*` series pushed to `POST /api/v1/ingest/metrics`: `sample_app_requests_total{method,status}` ×2, `sample_app_errors_total{method,status}` ×2, `sample_app_request_duration_seconds{method}` ×2, `sample_app_active_workers`, all carrying `service="sample-app"`. **Metric names, not label values, separate the producers** — the existing dashboard aggregates `sum by (method)(rate(http_requests_total[1m]))` with no service filter, so a same-named series from a second writer would silently fold into it. Values are an independent random walk, not derived from the log lines. **Every series is emitted on every tick, error counters included at 0** — a counter that first appears on its own increment cannot satisfy `rate()`'s two-sample requirement, so the panel would read empty exactly when the demo is healthiest. Only `204` counts as delivered, matching `postBatch` rather than load-generator's any-2xx check
+- [ ] `examples/sample-app/main.go` — `-metrics-rate` flag (default 1/s, validated by the existing `tickerInterval`); the **existing `select` loop gains a third case** rather than a second goroutine, keeping the counters and the single `*rand.Rand` race-free; `startupLine` and the stop line carry the metrics rate and push count; header comment replaced (its "deliberately emits no metrics … move here in Phase 5.1" paragraph is what this item closes)
+- [ ] `examples/sample-app/metrics_test.go` — payload through the real `metrics.NewLabels` + `metrics.ValidateSample`; exactly the seven series per tick; counter monotonicity and error counters present at 0 from tick one; gauge bounds; only-204-is-delivered
+
+**Health-gated startup**
+- [ ] `cmd/server/healthcheck.go` — `healthcheckRequested` / `probeURL` / `runHealthcheck`. The distroless image has no shell, `curl`, or `wget`, so the only thing a Compose healthcheck can exec is `/server` itself. `probeURL` maps wildcard hosts (`""`, `0.0.0.0`, `[::]`) to `127.0.0.1`, keeps IPv6 literals bracketed, and rejects port `0` as unprobeable
+- [ ] `cmd/server/main.go` — branch into probe mode right after `config.Load()` and before the logger, data directory, and every store: a probe must not create files or replay a WAL. Loading config first makes the probe follow `OBS_HTTP_ADDR`
+- [ ] `cmd/server/healthcheck_test.go` — `probeURL` address table including both error cases; `healthcheckRequested` arg forms; `runHealthcheck` exit codes against `httptest` (200→0, 503→1 with status on stderr, connection refused→1)
+- [ ] `deployments/docker/docker-compose.yml` — `healthcheck: ["CMD","/server","-healthcheck"]` on `backend`; both producers move to `depends_on: {backend: {condition: service_healthy}}`. Grafana stays ungated — its datasources are `access: proxy` and resolved lazily on first query
+
+**Packaging hygiene**
+- [ ] `deployments/docker/docker-compose.yml` — `name: observability-platform` (it currently defaults to `docker`, the compose file's directory basename); `restart: unless-stopped` on `backend` and `grafana`. `compose_smoke.sh`'s explicit `-p obs-compose-e2e` outranks the file's `name:`, so its isolation is unchanged
+- [ ] `Makefile` — `local-logs` (`logs -f`) and `local-reset` (`down -v`). `local-down` keeps volumes on purpose: data surviving a stack restart is the durability story the demo tells, so discarding it must be explicit
+
+**Grafana**
+- [ ] `observability/grafana/dashboards/sample-app.json` — `obs-sample-app-v1`, "Observability Platform Sample App", four panels (request rate by method, error rate, request duration, active workers), no variables, `refresh: 5s`, `now-5m`. Every target on `obs-prometheus`; every expression inside the supported PromQL subset. The directory provider already provisions it, so `dashboards.yml` is untouched
+
+**Tests**
+- [ ] `tests/e2e/provisioning_test.go` — `loadDatasource`/`loadDashboard` gain a `path` parameter (8 call sites, mechanical) so the metrics-side tests can reuse them; `loadPanels` keeps its zero-arg signature since it asserts the Loki-specific `wantPanels`
+- [ ] `tests/e2e/provisioning_metrics_test.go` — the metrics-side counterpart to the 4.5 Loki checks, which left the entire metrics half of the stack with no assertion at any level: Prometheus datasource name/type/uid/`access: proxy`/`isDefault`; its URL cross-referenced against the `backend` service and container port in `docker-compose.yml`; both dashboards' identity and panel sets; every target on `obs-prometheus`; every expression run through the backend's own `metrics.ParseExpr`; and the compose gating (backend declares a healthcheck, both producers wait on `service_healthy`)
+- [ ] `tests/e2e/compose_smoke.sh` — grow a metrics half in the existing style: Prometheus datasource health (*Save & test*), both metric dashboards provisioned, panel expressions read out of the dashboards Grafana serves and then run through `/api/ds/query`. Assertions use **bare selectors** (`sample_app_active_workers`, `http_requests_total`), not `rate()`, so they do not depend on two samples landing inside a window on a short run; one `rate()` expression is checked only for the absence of a datasource error. This finally gives `load-generator` a data-level assertion — the script's own comment at line 60 records that it has none
+
+**Docs**
+- [ ] `README.md` — three provisioned dashboards, not two; `make local-logs` / `make local-reset` in the Quickstart
+- [ ] `docs/runbooks/grafana-demo.md` — sample-app now emits metrics **and** logs; add the sample-app dashboard walkthrough and a reset note
+- [ ] `docs/runbooks/grafana-logs-demo.md` — same services-list correction
+- [ ] `docs/planning/ARCHITECTURE_NOTES.md` — demo-stack subsection: the producer split and why it is by metric name, the two namespaces, and probe-mode health gating
+
+**Verify**
+- [ ] Verify: `go build ./...`, `go vet ./...`, `golangci-lint run`, `go test ./...` green
+- [ ] Verify: `make smoke` and `make smoke-logs` exit 0 against a locally run backend
+- [ ] Verify: `docker compose -f deployments/docker/docker-compose.yml config` parses with the new `name:`, healthcheck, and dependency conditions
+- [ ] Verify *(requires Docker)*: `make smoke-compose` exits 0 — locally or via the CI `compose-e2e` job
+- [ ] Verify *(requires Docker + a browser)*: `make local-up`, then all three dashboards populate without manual setup
 
 ### Phase 5.2 — Kubernetes Manifests and Helm Chart
 - [ ] Add Helm chart for backend
