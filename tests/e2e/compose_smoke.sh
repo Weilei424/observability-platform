@@ -199,9 +199,18 @@ grafana_up()     { curl -sf "${CURL_TIMEOUTS[@]}" -u "$GRAFANA_AUTH" "$GRAFANA/a
 datasource_ok()  { gapi /api/datasources/uid/obs-loki/health | grep -q '"status":"OK"'; }
 sample_app_up()  { gapi /api/datasources/uid/obs-loki/resources/label/service/values | grep -q '"worker"'; }
 prom_datasource_ok()   { gapi /api/datasources/uid/obs-prometheus/health | grep -q '"status":"OK"'; }
-sample_app_metrics_up() { promquery 'sample_app_active_workers' | grep -q '"values"'; }
 
-echo "=== Phase 4.5 Compose stack test: project=$PROJECT (run_id=$RUN_ID) ==="
+# A present-but-empty dataframe would satisfy a substring check on "values" —
+# exactly what the numeric_columns comment above calls out — so this waits for
+# at least 2 non-empty numeric columns (time+value) instead, the same bar the
+# stricter checks later in this script hold metrics queries to.
+sample_app_metrics_up() {
+    local cols
+    cols="$(numeric_columns "$(promquery 'sample_app_active_workers')")"
+    [ "${cols:-0}" -ge 2 ]
+}
+
+echo "=== Compose stack test: project=$PROJECT (run_id=$RUN_ID) ==="
 
 # ---- Preflight ------------------------------------------------------
 if ! docker compose version >/dev/null 2>&1; then
