@@ -174,9 +174,9 @@ func TestMetricDashboardTargetsUseTheProvisionedDatasource(t *testing.T) {
 
 	for _, path := range metricDashboardPaths {
 		for _, p := range loadDashboard(t, path).Panels {
-			checkDatasourceRef(t, path+" panel "+p.Title, p.Datasource, ds.Type, ds.UID)
+			checkDatasourceRef(t, path+" panel "+p.Title, p.Datasource, ds.Type, ds.UID, filepath.Base(promDatasourcePath))
 			for _, tgt := range p.Targets {
-				checkDatasourceRef(t, path+" panel "+p.Title+" target "+tgt.RefID, tgt.Datasource, ds.Type, ds.UID)
+				checkDatasourceRef(t, path+" panel "+p.Title+" target "+tgt.RefID, tgt.Datasource, ds.Type, ds.UID, filepath.Base(promDatasourcePath))
 			}
 		}
 	}
