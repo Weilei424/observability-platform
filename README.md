@@ -33,6 +33,8 @@ make run
 # Start backend + Grafana + load generator in Docker
 make local-up   # backend: http://localhost:8080  grafana: http://localhost:3000
 make local-down
+make local-logs # follow the stack's logs
+make local-reset # stop the demo and delete its data volumes
 make smoke      # API-level smoke test (requires backend running)
 
 # Development
@@ -48,6 +50,11 @@ make local-up
 ```
 
 Opens `http://localhost:3000` (admin / admin). The provisioned **Observability Platform Metrics** dashboard shows live data from the load generator within ~15 seconds of startup. See [`docs/runbooks/grafana-demo.md`](docs/runbooks/grafana-demo.md) for the full walkthrough.
+
+The provisioned **Observability Platform Sample App** dashboard shows the sample app's
+own `sample_app_*` series — request rate, error rate, latency, and worker count. Its
+metric names are deliberately disjoint from the load generator's `http_*` series, so the
+two simulated workloads never mix in one panel.
 
 The provisioned **Observability Platform Logs** dashboard and Grafana Explore show live log streams from the sample app; see [`docs/runbooks/grafana-logs-demo.md`](docs/runbooks/grafana-logs-demo.md).
 
@@ -66,7 +73,7 @@ go run examples/load-generator/main.go --rate 2 --duration 30
 **3. Query ingested metrics:**
 ```bash
 # Instant query — request rate by method
-curl 'http://localhost:8080/api/v1/query?query=sum+by+(method)(rate(http_requests_total[1m]))'
+curl -g 'http://localhost:8080/api/v1/query?query=sum+by+(method)(rate(http_requests_total[1m]))'
 
 # Range query — request duration over the last 60 seconds (Linux)
 curl "http://localhost:8080/api/v1/query_range?query=http_request_duration_seconds&start=$(date -d '60 seconds ago' +%s)&end=$(date +%s)&step=15"
