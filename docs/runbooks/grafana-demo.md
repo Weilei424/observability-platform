@@ -68,6 +68,11 @@ make local-up      # start again from empty storage
 `make local-down` stops the stack but keeps the volumes, so data survives a restart —
 that persistence is the WAL and block storage doing their job.
 
+If you ran `make local-up` before this phase, that stack used Compose's default project
+name `docker` and is untouched by the commands above (which now target
+`observability-platform`), so it can still hold ports 8080/3000 and its own volumes.
+Clean it up with `docker compose -p docker -f deployments/docker/docker-compose.yml down -v`.
+
 ## Run the API smoke test
 
 With the stack still running:
