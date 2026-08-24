@@ -545,14 +545,14 @@ Design: `docs/superpowers/specs/2026-08-23-phase-5.1-docker-compose-demo-design.
 - [x] `tests/e2e/compose_smoke.sh` — grow a metrics half in the existing style: Prometheus datasource health (*Save & test*), both metric dashboards provisioned, panel expressions read out of the dashboards Grafana serves and then run through `/api/ds/query`. Assertions use **bare selectors** (`sample_app_active_workers`, `http_requests_total`), not `rate()`, so they do not depend on two samples landing inside a window on a short run; one `rate()` expression is checked only for the absence of a datasource error. This finally gives `load-generator` a data-level assertion — the script's own comment at line 60 records that it has none
 
 **Docs**
-- [ ] `README.md` — three provisioned dashboards, not two; `make local-logs` / `make local-reset` in the Quickstart
-- [ ] `docs/runbooks/grafana-demo.md` — sample-app now emits metrics **and** logs; add the sample-app dashboard walkthrough and a reset note
-- [ ] `docs/runbooks/grafana-logs-demo.md` — same services-list correction
-- [ ] `docs/planning/ARCHITECTURE_NOTES.md` — demo-stack subsection: the producer split and why it is by metric name, the two namespaces, and probe-mode health gating
+- [x] `README.md` — three provisioned dashboards, not two; `make local-logs` / `make local-reset` in the Quickstart
+- [x] `docs/runbooks/grafana-demo.md` — sample-app now emits metrics **and** logs; add the sample-app dashboard walkthrough and a reset note
+- [x] `docs/runbooks/grafana-logs-demo.md` — same services-list correction
+- [x] `docs/planning/ARCHITECTURE_NOTES.md` — demo-stack subsection: the producer split and why it is by metric name, the two namespaces, and probe-mode health gating
 
 **Verify**
-- [ ] Verify: `go build ./...`, `go vet ./...`, `golangci-lint run`, `go test ./...` green
-- [ ] Verify: `make smoke` and `make smoke-logs` exit 0 against a locally run backend
+- [x] Verify: `go build ./...`, `go vet ./...`, `golangci-lint run`, `go test ./...` green
+- [x] Verify: `make smoke` and `make smoke-logs` exit 0 against a locally run backend
 - [ ] Verify: `docker compose -f deployments/docker/docker-compose.yml config` parses with the new `name:`, healthcheck, and dependency conditions
 - [ ] Verify *(requires Docker)*: `make smoke-compose` exits 0 — locally or via the CI `compose-e2e` job
 - [ ] Verify *(requires Docker + a browser)*: `make local-up`, then all three dashboards populate without manual setup
