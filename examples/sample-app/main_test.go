@@ -304,31 +304,36 @@ func TestTickerInterval_AcceptedRatesNeverPanicNewTicker(t *testing.T) {
 // rejected. Nothing else in the suite would notice a return to %.1f.
 func TestStartupLine_ExactRendering(t *testing.T) {
 	cases := []struct {
-		name     string
-		rate     float64
-		interval time.Duration
-		duration int
-		want     string
+		name            string
+		rate            float64
+		interval        time.Duration
+		metricsRate     float64
+		metricsInterval time.Duration
+		duration        int
+		want            string
 	}{
 		{
 			name: "fractional rate that %.1f would flatten to zero",
-			rate: 0.01, interval: 100 * time.Second, duration: 0,
-			want: "sample-app: addr=http://backend:8080 rate=0.01/s interval=1m40s duration=0s",
+			rate: 0.01, interval: 100 * time.Second,
+			metricsRate: 0.01, metricsInterval: 100 * time.Second, duration: 0,
+			want: "sample-app: addr=http://backend:8080 rate=0.01/s interval=1m40s metrics_rate=0.01/s metrics_interval=1m40s duration=0s",
 		},
 		{
-			name: "default demo rate",
-			rate: 2, interval: 500 * time.Millisecond, duration: 0,
-			want: "sample-app: addr=http://backend:8080 rate=2/s interval=500ms duration=0s",
+			name: "default demo rates",
+			rate: 2, interval: 500 * time.Millisecond,
+			metricsRate: 1, metricsInterval: time.Second, duration: 0,
+			want: "sample-app: addr=http://backend:8080 rate=2/s interval=500ms metrics_rate=1/s metrics_interval=1s duration=0s",
 		},
 		{
 			name: "rate near the representable floor",
-			rate: 1e-9, interval: 277777*time.Hour + 46*time.Minute + 40*time.Second, duration: 30,
-			want: "sample-app: addr=http://backend:8080 rate=1e-09/s interval=277777h46m40s duration=30s",
+			rate: 1e-9, interval: 277777*time.Hour + 46*time.Minute + 40*time.Second,
+			metricsRate: 1, metricsInterval: time.Second, duration: 30,
+			want: "sample-app: addr=http://backend:8080 rate=1e-09/s interval=277777h46m40s metrics_rate=1/s metrics_interval=1s duration=30s",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := startupLine("http://backend:8080", tc.rate, tc.interval, tc.duration)
+			got := startupLine("http://backend:8080", tc.rate, tc.interval, tc.metricsRate, tc.metricsInterval, tc.duration)
 			if got != tc.want {
 				t.Errorf("startupLine =\n  %q\nwant\n  %q", got, tc.want)
 			}
@@ -339,17 +344,22 @@ func TestStartupLine_ExactRendering(t *testing.T) {
 // TestStartupLine_NoAcceptedRateRendersAsZero is the invariant behind the
 // formatting choice, stated independently of the verb used: every rate
 // tickerInterval accepts must render as something an operator can tell apart
-// from 0, because 0 is exactly what tickerInterval rejects.
+// from 0, because 0 is exactly what tickerInterval rejects. Both rate fields
+// are varied, since both go through the same formatting.
 func TestStartupLine_NoAcceptedRateRendersAsZero(t *testing.T) {
 	for _, rate := range []float64{1e-9, 1e-6, 0.001, 0.01, 0.04, 0.25, 0.5, 1, 2, 100} {
 		interval, err := tickerInterval(rate)
 		if err != nil {
 			t.Fatalf("tickerInterval(%v) rejected a rate this test assumes is valid: %v", rate, err)
 		}
-		line := startupLine("http://backend:8080", rate, interval, 0)
-		for _, zero := range []string{"rate=0/s", "rate=0.0/s", "rate=0.00/s"} {
-			if strings.Contains(line, zero) {
-				t.Errorf("rate %v renders as %q in %q — indistinguishable from a rate tickerInterval rejects", rate, zero, line)
+		for _, line := range []string{
+			startupLine("http://backend:8080", rate, interval, 1, time.Second, 0),
+			startupLine("http://backend:8080", 2, 500*time.Millisecond, rate, interval, 0),
+		} {
+			for _, zero := range []string{"rate=0/s", "rate=0.0/s", "rate=0.00/s"} {
+				if strings.Contains(line, zero) {
+					t.Errorf("rate %v renders as %q in %q — indistinguishable from a rate tickerInterval rejects", rate, zero, line)
+				}
 			}
 		}
 	}

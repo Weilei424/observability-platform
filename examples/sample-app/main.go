@@ -1,8 +1,11 @@
-// Command sample-app emits Loki-style log streams to the observability-platform
-// backend so the Grafana logs demo has live data. It is the logs counterpart to
-// examples/load-generator (metrics) and deliberately emits no metrics of its own:
-// two processes writing independent counters to one series would make rate()
-// meaningless. Application metrics move here in Phase 5.1.
+// Command sample-app emits Loki-style log streams and its own metrics to the
+// observability-platform backend, so both Grafana demos have live data.
+//
+// Its metric names are disjoint from examples/load-generator's http_* series.
+// The separation is by metric NAME rather than by a service label because the
+// provisioned metrics dashboard aggregates http_requests_total with no service
+// filter — a second writer under that name would silently fold into panels it
+// has nothing to do with. See metrics.go.
 package main
 
 import (
@@ -63,18 +66,20 @@ func tickerInterval(rate float64) (time.Duration, error) {
 // startupLine renders the one-line startup banner. It is a separate function so
 // the formatting can be pinned by a test.
 //
-// The rate uses %g rather than %.1f: one decimal place flattens 0.01 — and every
+// The rates use %g rather than %.1f: one decimal place flattens 0.01 — and every
 // smaller accepted rate — to "0.0", which is the one value tickerInterval refuses
 // to start on, so the banner would report a rate the program would have rejected.
-// The resolved interval is printed beside it because that is what the process
+// The resolved intervals are printed beside them because that is what the process
 // will actually do; a rate near either representable bound makes that obvious.
-func startupLine(addr string, rate float64, interval time.Duration, duration int) string {
-	return fmt.Sprintf("sample-app: addr=%s rate=%g/s interval=%v duration=%ds", addr, rate, interval, duration)
+func startupLine(addr string, rate float64, interval time.Duration, metricsRate float64, metricsInterval time.Duration, duration int) string {
+	return fmt.Sprintf("sample-app: addr=%s rate=%g/s interval=%v metrics_rate=%g/s metrics_interval=%v duration=%ds",
+		addr, rate, interval, metricsRate, metricsInterval, duration)
 }
 
 func main() {
 	addr := flag.String("addr", defaultAddr(), "backend base URL; OBS_BACKEND_ADDR env var takes precedence if set")
 	rate := flag.Float64("rate", 2, "log batches per second (must be > 0)")
+	metricsRate := flag.Float64("metrics-rate", 1, "metric pushes per second (must be > 0)")
 	duration := flag.Int("duration", 0, "run duration in seconds; 0 = run until interrupted")
 	flag.Parse()
 
@@ -86,6 +91,12 @@ func main() {
 	interval, err := tickerInterval(*rate)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error: "+err.Error())
+		os.Exit(1)
+	}
+
+	metricsInterval, err := tickerInterval(*metricsRate)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: --metrics-rate: "+err.Error())
 		os.Exit(1)
 	}
 
@@ -101,16 +112,21 @@ func main() {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	metricsTicker := time.NewTicker(metricsInterval)
+	defer metricsTicker.Stop()
+
+	wl := newWorkload()
+
 	client := &http.Client{Timeout: 5 * time.Second}
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	var batches, lines, errs int
+	var batches, lines, pushes, errs int
 
-	log.Print(startupLine(*addr, *rate, interval, *duration))
+	log.Print(startupLine(*addr, *rate, interval, *metricsRate, metricsInterval, *duration))
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("sample-app stopped: batches=%d lines=%d errors=%d", batches, lines, errs)
+			log.Printf("sample-app stopped: batches=%d lines=%d metric_pushes=%d errors=%d", batches, lines, pushes, errs)
 			return
 		case <-ticker.C:
 			batch := buildBatch(r, time.Now().UnixNano())
@@ -129,6 +145,23 @@ func main() {
 			}
 			batches++
 			lines += len(batch)
+		case <-metricsTicker.C:
+			// Same goroutine as the log case above on purpose: the workload
+			// counters and the *rand.Rand both stay single-owner, and rand.Rand
+			// is not safe for concurrent use.
+			wl.tick(r)
+			body, err := encodeMetrics(wl.samples(time.Now().UnixMilli()))
+			if err != nil {
+				log.Printf("metrics marshal error: %v", err)
+				errs++
+				continue
+			}
+			if err := postMetrics(client, *addr, body); err != nil {
+				log.Printf("metrics push failed: %v", err)
+				errs++
+				continue
+			}
+			pushes++
 		}
 	}
 }
