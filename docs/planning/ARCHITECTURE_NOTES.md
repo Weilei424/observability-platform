@@ -302,6 +302,34 @@ answers: `unwrap` and the label-extraction range aggregations, vector aggregatio
 other than `sum`, binary operations, live tail (`/loki/api/v1/tail`, needs WebSocket),
 and `/loki/api/v1/index/stats` (query size estimate).
 
+### Demo stack (introduced in 5.1)
+
+Two producers, split by signal ownership rather than by container convenience:
+
+| Producer | Metric names | Logs |
+|---|---|---|
+| `examples/load-generator` | `http_requests_total`, `http_errors_total`, `http_request_duration_seconds`, `active_connections` | none |
+| `examples/sample-app` | `sample_app_requests_total`, `sample_app_errors_total`, `sample_app_request_duration_seconds`, `sample_app_active_workers` | five streams over `service` × `level`, all `env=local` |
+
+**The namespaces are separated by metric name, not by a `service` label.** The metrics
+dashboard aggregates `sum by (method)(rate(http_requests_total[1m]))` with no service
+filter, so a second writer under that name would fold into panels it has nothing to do
+with, whatever labels it carried. The sample app's values are an independent simulation:
+they are not derived from the log lines it pushes, and no panel or runbook claims the two
+signals correlate.
+
+Three provisioned dashboards: `obs-metrics-v1` (load generator), `obs-logs-v1` (sample
+app logs), `obs-sample-app-v1` (sample app metrics). Phase 5.3 adds a fourth for backend
+internals.
+
+**Health-gated startup.** The backend runtime image is distroless — no shell, curl, or
+wget — so its Compose healthcheck execs the server binary itself: `/server -healthcheck`
+probes `/readyz` over loopback and exits 0 or 1. `/readyz` creates and removes a temp
+file in the data directory, so a passing probe means the process is serving *and* its
+storage is writable. Both producers wait on `condition: service_healthy`; Grafana does
+not, because its datasources are `access: proxy` and resolved on first query. Phase 5.2
+reuses the same command as a Kubernetes exec probe.
+
 ### LogQL metric queries (introduced in 4.6)
 
 - `internal/logs/metricql.go` — the metric subset: `count_over_time`, `rate`,
