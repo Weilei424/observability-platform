@@ -117,8 +117,20 @@ func TestTick_CountersAreMonotonicAndBounded(t *testing.T) {
 					t.Fatalf("tick %d: %s = %v, want within [1, 8]", i, key, s.Value)
 				}
 			case "sample_app_request_duration_seconds":
-				if s.Value <= 0 || s.Value > 0.5 {
-					t.Fatalf("tick %d: %s = %v, want a plausible latency in (0, 0.5]", i, key, s.Value)
+				// Per-method bounds, not a joint (0, 0.5] range: GET and POST draw
+				// from disjoint intervals (metrics.go's tick), and a joint bound
+				// would let a GET latency drift as high as 0.5 without failing.
+				switch s.Labels["method"] {
+				case "GET":
+					if s.Value < 0.001 || s.Value > 0.200 {
+						t.Fatalf("tick %d: %s = %v, want within [0.001, 0.200] (GET bound)", i, key, s.Value)
+					}
+				case "POST":
+					if s.Value < 0.005 || s.Value > 0.500 {
+						t.Fatalf("tick %d: %s = %v, want within [0.005, 0.500] (POST bound)", i, key, s.Value)
+					}
+				default:
+					t.Fatalf("tick %d: %s has unexpected method %q", i, key, s.Labels["method"])
 				}
 			}
 			prev[key] = s.Value
