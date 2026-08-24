@@ -408,7 +408,7 @@ Design: `docs/superpowers/specs/2026-07-25-phase-4.4-loki-query-api-design.md` �
 Design: `docs/superpowers/specs/2026-07-30-phase-4.5-grafana-logs-demo-design.md` · Plan: `docs/superpowers/plans/2026-07-30-phase-4.5-grafana-logs-demo.md`
 
 **Sample app log generator** *(no backend code changes this phase)*
-- [x] `examples/sample-app/main.go` — logs-only generator pushing five streams (`service` ∈ {api, worker} × `level` ∈ {info, warn, error}, constant `env=local`) to `POST /loki/api/v1/push`; plain-text lines (never JSON/logfmt, which are unsupported pipelines); `-addr`/`OBS_BACKEND_ADDR`, `-rate` (default 2 batches/s), `-duration`; log-and-continue on push failure. Emits **no metrics** — a second writer on `http_requests_total{service="api"}` would corrupt `rate()`; app metrics move here in Phase 5.1
+- [x] `examples/sample-app/main.go` — logs-only generator pushing five streams (`service` ∈ {api, worker} × `level` ∈ {info, warn, error}, constant `env=local`) to `POST /loki/api/v1/push`; plain-text lines (never JSON/logfmt, which are unsupported pipelines); `-addr`/`OBS_BACKEND_ADDR`, `-rate` (default 2 batches/s), `-duration`; log-and-continue on push failure. Emits **no metrics** — a second writer on `http_requests_total{service="api"}` would corrupt `rate()`; app metrics move here in Phase 5.1 (closed by Phase 5.1 — see "Sample app metrics" below)
 - [x] `examples/sample-app/main_test.go` — decode the generated payload and run it through the real `logs.NewStreamLabels` / `logs.ValidateEntry`; pin the five-stream set and per-stream grouping
 
 **Packaging**
