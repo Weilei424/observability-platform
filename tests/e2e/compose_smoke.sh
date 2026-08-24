@@ -415,7 +415,7 @@ fi
 # and both non-empty when the series has samples. Two series therefore mean at
 # least four non-empty numeric columns; a frame whose samples are empty drops
 # the count below that.
-NUMCOLS=$(printf '%s' "$BODY" | jq '[.. | arrays | select(length > 0) | select(all(.[]; type == "number"))] | length' 2>/dev/null || echo 0)
+NUMCOLS=$(numeric_columns "$BODY")
 if [ "${NUMCOLS:-0}" -ge 4 ]; then
     log_pass "volume panel query — both series carry non-empty numeric samples"
 else
