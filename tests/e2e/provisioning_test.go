@@ -52,12 +52,13 @@ type dsRef struct {
 type datasourceFile struct {
 	APIVersion  int `yaml:"apiVersion"`
 	Datasources []struct {
-		Name     string         `yaml:"name"`
-		Type     string         `yaml:"type"`
-		UID      string         `yaml:"uid"`
-		Access   string         `yaml:"access"`
-		URL      string         `yaml:"url"`
-		JSONData map[string]any `yaml:"jsonData"`
+		Name      string         `yaml:"name"`
+		Type      string         `yaml:"type"`
+		UID       string         `yaml:"uid"`
+		Access    string         `yaml:"access"`
+		URL       string         `yaml:"url"`
+		IsDefault bool           `yaml:"isDefault"`
+		JSONData  map[string]any `yaml:"jsonData"`
 	} `yaml:"datasources"`
 }
 
@@ -118,33 +119,33 @@ type dashboardFile struct {
 	} `json:"templating"`
 }
 
-func loadDatasource(t *testing.T) datasourceFile {
+func loadDatasource(t *testing.T, path string) datasourceFile {
 	t.Helper()
-	b, err := os.ReadFile(filepath.FromSlash(lokiDatasourcePath))
+	b, err := os.ReadFile(filepath.FromSlash(path))
 	if err != nil {
-		t.Fatalf("read %s: %v", lokiDatasourcePath, err)
+		t.Fatalf("read %s: %v", path, err)
 	}
 	var f datasourceFile
 	if err := yaml.Unmarshal(b, &f); err != nil {
-		t.Fatalf("%s is not valid YAML — Grafana would skip it at startup: %v", lokiDatasourcePath, err)
+		t.Fatalf("%s is not valid YAML — Grafana would skip it at startup: %v", path, err)
 	}
 	// Exactly one, so the [0] every caller uses is not quietly ignoring a
 	// second datasource that the dashboard might really be pointing at.
 	if len(f.Datasources) != 1 {
-		t.Fatalf("%s declares %d datasources, want exactly 1", lokiDatasourcePath, len(f.Datasources))
+		t.Fatalf("%s declares %d datasources, want exactly 1", path, len(f.Datasources))
 	}
 	return f
 }
 
-func loadDashboard(t *testing.T) dashboardFile {
+func loadDashboard(t *testing.T, path string) dashboardFile {
 	t.Helper()
-	b, err := os.ReadFile(filepath.FromSlash(logsDashboardPath))
+	b, err := os.ReadFile(filepath.FromSlash(path))
 	if err != nil {
-		t.Fatalf("read %s: %v", logsDashboardPath, err)
+		t.Fatalf("read %s: %v", path, err)
 	}
 	var d dashboardFile
 	if err := json.Unmarshal(b, &d); err != nil {
-		t.Fatalf("%s is not valid JSON — Grafana would skip it at startup: %v", logsDashboardPath, err)
+		t.Fatalf("%s is not valid JSON — Grafana would skip it at startup: %v", path, err)
 	}
 	return d
 }
@@ -153,7 +154,7 @@ func loadDashboard(t *testing.T) dashboardFile {
 // depend on: the name the runbook tells you to click, the uid every dashboard
 // target references, and the proxy access mode the URL below relies on.
 func TestLokiDatasourceProvisioning(t *testing.T) {
-	ds := loadDatasource(t).Datasources[0]
+	ds := loadDatasource(t, lokiDatasourcePath).Datasources[0]
 
 	if ds.Name != datasourceName {
 		t.Errorf("name = %q, want %q (docs/runbooks/grafana-logs-demo.md navigates by this name)", ds.Name, datasourceName)
@@ -181,7 +182,7 @@ func TestLokiDatasourceProvisioning(t *testing.T) {
 // browser. The classic version of this bug is a URL of http://localhost:8080,
 // which inside the Grafana container points at Grafana itself.
 func TestLokiDatasourceURLMatchesComposeBackend(t *testing.T) {
-	ds := loadDatasource(t).Datasources[0]
+	ds := loadDatasource(t, lokiDatasourcePath).Datasources[0]
 
 	const wantScheme = "http://"
 	if !strings.HasPrefix(ds.URL, wantScheme) {
@@ -246,7 +247,7 @@ func containerPort(entry any) string {
 // TestLogsDashboardIdentity pins the uid the runbook and ARCHITECTURE_NOTES
 // name, and the title the runbook navigates by.
 func TestLogsDashboardIdentity(t *testing.T) {
-	d := loadDashboard(t)
+	d := loadDashboard(t, logsDashboardPath)
 	if d.UID != dashboardUID {
 		t.Errorf("uid = %q, want %q", d.UID, dashboardUID)
 	}
@@ -285,7 +286,7 @@ var wantPanels = []struct {
 // skipped by a loop over whatever survived.
 func loadPanels(t *testing.T) []dashboardPanel {
 	t.Helper()
-	panels := loadDashboard(t).Panels
+	panels := loadDashboard(t, logsDashboardPath).Panels
 
 	if len(panels) != len(wantPanels) {
 		var got []string
@@ -363,8 +364,8 @@ var wantVariables = []struct {
 // variable's own declared type, so a variable that changed kind fails the kind
 // assertion instead of quietly skipping every check below it.
 func TestLogsDashboardVariables(t *testing.T) {
-	wantDatasourceType := loadDatasource(t).Datasources[0].Type
-	d := loadDashboard(t)
+	wantDatasourceType := loadDatasource(t, lokiDatasourcePath).Datasources[0].Type
+	d := loadDashboard(t, logsDashboardPath)
 
 	if len(d.Templating.List) != len(wantVariables) {
 		var got []string
@@ -454,7 +455,7 @@ func checkDatasourceRef(t *testing.T, label string, ref *dsRef, wantType, wantUI
 // panel and target datasource reference against loki.yml's own type and uid, so
 // the two files cannot drift into independent constants.
 func TestLogsDashboardTargetsUseTheProvisionedDatasource(t *testing.T) {
-	ds := loadDatasource(t).Datasources[0]
+	ds := loadDatasource(t, lokiDatasourcePath).Datasources[0]
 
 	for _, p := range loadPanels(t) {
 		// A text panel legitimately has no datasource. A panel with targets is
@@ -537,7 +538,7 @@ func parsePanelExpr(expr string) error {
 // same reason examples/sample-app validates its payloads with the real logs
 // validators instead of a hand-written shape check.
 func TestLogsDashboardQueriesStayInsideTheSupportedSubset(t *testing.T) {
-	d := loadDashboard(t)
+	d := loadDashboard(t, logsDashboardPath)
 
 	declared := map[string]bool{}
 	for _, v := range d.Templating.List {
