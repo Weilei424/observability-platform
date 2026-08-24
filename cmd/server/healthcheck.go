@@ -5,6 +5,7 @@
 // curl, and no wget for a Compose or Kubernetes healthcheck to exec, and the
 // only executable present is this binary. Phase 5.2 reuses it as a Kubernetes
 // exec probe.
+
 package main
 
 import (
