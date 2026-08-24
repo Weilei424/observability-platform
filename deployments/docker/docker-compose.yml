@@ -1,5 +1,8 @@
+name: observability-platform
+
 services:
   backend:
+    restart: unless-stopped
     build:
       context: ../../
       dockerfile: deployments/docker/Dockerfile
@@ -15,8 +18,18 @@ services:
       OBS_LOGS_FLUSH_THRESHOLD_BYTES: "16384"
     volumes:
       - obs-data:/data
+    # The runtime image is distroless — no shell, no curl, no wget — so the probe
+    # is the server binary itself. /readyz also proves the data directory is
+    # writable, not just that the port is open.
+    healthcheck:
+      test: ["CMD", "/server", "-healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
 
   grafana:
+    restart: unless-stopped
     image: grafana/grafana:11.1.0
     ports:
       - "3000:3000"
@@ -35,7 +48,8 @@ services:
     environment:
       OBS_BACKEND_ADDR: http://backend:8080
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     restart: on-failure
 
   sample-app:
@@ -46,7 +60,8 @@ services:
     environment:
       OBS_BACKEND_ADDR: http://backend:8080
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     restart: on-failure
 
 volumes:

@@ -1,4 +1,4 @@
-.PHONY: build test lint run local-up local-down smoke smoke-logs smoke-compose bench bench-go bench-k6 help
+.PHONY: build test lint run local-up local-down local-logs local-reset smoke smoke-logs smoke-compose bench bench-go bench-k6 help
 
 ## build: Compile the backend binary
 build:
@@ -27,6 +27,14 @@ local-up:
 ## local-down: Stop and remove Docker containers
 local-down:
 	docker compose -f deployments/docker/docker-compose.yml down
+
+## local-logs: Follow logs from the running demo stack
+local-logs:
+	docker compose -f deployments/docker/docker-compose.yml logs -f
+
+## local-reset: Stop the demo and delete its data and Grafana volumes
+local-reset:
+	docker compose -f deployments/docker/docker-compose.yml down -v
 
 ## smoke: Run metrics + logs API smoke tests against a running backend (set BACKEND_ADDR to override localhost:8080)
 smoke:
