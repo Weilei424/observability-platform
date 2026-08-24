@@ -12,7 +12,6 @@ package e2e_test
 import (
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 
@@ -63,47 +62,12 @@ func TestPrometheusDatasourceProvisioning(t *testing.T) {
 
 // TestPrometheusDatasourceURLMatchesComposeBackend cross-references the URL
 // against docker-compose.yml rather than asserting a magic string, so renaming
-// the service or moving the port fails here instead of in a browser.
+// the service or moving the port fails here instead of in a browser. The
+// check itself is shared with the Loki datasource's version of this test
+// (TestLokiDatasourceURLMatchesComposeBackend) via
+// datasourceURLMatchesComposeBackend in provisioning_test.go.
 func TestPrometheusDatasourceURLMatchesComposeBackend(t *testing.T) {
-	ds := loadDatasource(t, promDatasourcePath).Datasources[0]
-
-	const wantScheme = "http://"
-	if !strings.HasPrefix(ds.URL, wantScheme) {
-		t.Fatalf("url = %q, want an %s URL", ds.URL, wantScheme)
-	}
-	hostPort := strings.TrimSuffix(strings.TrimPrefix(ds.URL, wantScheme), "/")
-	host, port, found := strings.Cut(hostPort, ":")
-	if !found {
-		t.Fatalf("url = %q, want an explicit host:port", ds.URL)
-	}
-
-	b, err := os.ReadFile(filepath.FromSlash(composePath))
-	if err != nil {
-		t.Fatalf("read %s: %v", composePath, err)
-	}
-	var compose struct {
-		Services map[string]struct {
-			Ports []any `yaml:"ports"`
-		} `yaml:"services"`
-	}
-	if err := yaml.Unmarshal(b, &compose); err != nil {
-		t.Fatalf("%s is not valid YAML: %v", composePath, err)
-	}
-
-	if host != backendComposeName {
-		t.Errorf("url host = %q, want the compose service name %q", host, backendComposeName)
-	}
-	svc, ok := compose.Services[host]
-	if !ok {
-		t.Fatalf("url host %q is not a service in %s — Grafana would not resolve it", host, composePath)
-	}
-	var containerPorts []string
-	for _, p := range svc.Ports {
-		containerPorts = append(containerPorts, containerPort(p))
-	}
-	if !slices.Contains(containerPorts, port) {
-		t.Errorf("url port %q is not a container port of compose service %q (container ports: %v)", port, host, containerPorts)
-	}
+	datasourceURLMatchesComposeBackend(t, promDatasourcePath)
 }
 
 // TestMetricDashboardIdentity pins the uids the runbooks and ARCHITECTURE_NOTES
