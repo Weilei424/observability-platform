@@ -1,3 +1,6 @@
+# Without this, Compose names the project after the file's directory ("docker"),
+# not this repo. tests/e2e/compose_smoke.sh passes -p obs-compose-e2e explicitly,
+# which outranks this and keeps its isolated project unaffected.
 name: observability-platform
 
 services:
