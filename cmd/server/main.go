@@ -30,6 +30,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Probe mode runs before the logger, the data directory, and every store: a
+	// healthcheck must not create files or replay a WAL. Config is loaded first
+	// so the probe follows OBS_HTTP_ADDR automatically.
+	if healthcheckRequested(os.Args[1:]) {
+		url, err := probeURL(cfg.HTTPAddr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "healthcheck: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(runHealthcheck(url, &http.Client{Timeout: 2 * time.Second}, os.Stderr))
+	}
+
 	log, err := observability.NewLogger(cfg.LogLevel)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "logger error: %v\n", err)

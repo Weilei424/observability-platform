@@ -527,9 +527,9 @@ Design: `docs/superpowers/specs/2026-08-23-phase-5.1-docker-compose-demo-design.
 - [x] `examples/sample-app/metrics_test.go` — payload through the real `metrics.NewLabels` + `metrics.ValidateSample`; exactly the seven series per tick; counter monotonicity and error counters present at 0 from tick one; gauge bounds; only-204-is-delivered
 
 **Health-gated startup**
-- [ ] `cmd/server/healthcheck.go` — `healthcheckRequested` / `probeURL` / `runHealthcheck`. The distroless image has no shell, `curl`, or `wget`, so the only thing a Compose healthcheck can exec is `/server` itself. `probeURL` maps wildcard hosts (`""`, `0.0.0.0`, `[::]`) to `127.0.0.1`, keeps IPv6 literals bracketed, and rejects port `0` as unprobeable
-- [ ] `cmd/server/main.go` — branch into probe mode right after `config.Load()` and before the logger, data directory, and every store: a probe must not create files or replay a WAL. Loading config first makes the probe follow `OBS_HTTP_ADDR`
-- [ ] `cmd/server/healthcheck_test.go` — `probeURL` address table including both error cases; `healthcheckRequested` arg forms; `runHealthcheck` exit codes against `httptest` (200→0, 503→1 with status on stderr, connection refused→1)
+- [x] `cmd/server/healthcheck.go` — `healthcheckRequested` / `probeURL` / `runHealthcheck`. The distroless image has no shell, `curl`, or `wget`, so the only thing a Compose healthcheck can exec is `/server` itself. `probeURL` maps wildcard hosts (`""`, `0.0.0.0`, `[::]`) to `127.0.0.1`, keeps IPv6 literals bracketed, and rejects port `0` as unprobeable
+- [x] `cmd/server/main.go` — branch into probe mode right after `config.Load()` and before the logger, data directory, and every store: a probe must not create files or replay a WAL. Loading config first makes the probe follow `OBS_HTTP_ADDR`
+- [x] `cmd/server/healthcheck_test.go` — `probeURL` address table including both error cases; `healthcheckRequested` arg forms; `runHealthcheck` exit codes against `httptest` (200→0, 503→1 with status on stderr, connection refused→1)
 - [ ] `deployments/docker/docker-compose.yml` — `healthcheck: ["CMD","/server","-healthcheck"]` on `backend`; both producers move to `depends_on: {backend: {condition: service_healthy}}`. Grafana stays ungated — its datasources are `access: proxy` and resolved lazily on first query
 
 **Packaging hygiene**
