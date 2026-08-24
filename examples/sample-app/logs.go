@@ -1,6 +1,7 @@
 // Log-line generation and the Loki push half of the sample app. The metrics
 // half lives in metrics.go; main.go owns the flags and the loop that drives
 // both.
+
 package main
 
 import (
