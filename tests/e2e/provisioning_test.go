@@ -404,7 +404,7 @@ func TestLogsDashboardVariables(t *testing.T) {
 			if v.IncludeAll {
 				t.Errorf("includeAll = true; the All option interpolates %s=~\"a|b\", which returns 400", v.Name)
 			}
-			checkDatasourceRef(t, "variable", v.Datasource, wantDatasourceType, datasourceUID)
+			checkDatasourceRef(t, "variable", v.Datasource, wantDatasourceType, datasourceUID, filepath.Base(lokiDatasourcePath))
 
 			var q lokiVariableQuery
 			if err := json.Unmarshal(v.Query, &q); err != nil {
@@ -431,23 +431,24 @@ func TestLogsDashboardVariables(t *testing.T) {
 
 // checkDatasourceRef asserts one Grafana datasource reference points at the
 // provisioned datasource by *both* type and uid, each cross-referenced against
-// loki.yml rather than compared to a constant.
+// sourceFile (the provisioning file that declares the wanted type/uid) rather
+// than compared to a constant.
 //
 // The type is not decoration. Grafana resolves the datasource by uid but builds
 // the query editor and the query model from the type, so a reference reading
 // {"type": "prometheus", "uid": "obs-loki"} sends the panel's LogQL through the
 // Prometheus query path — the panel breaks while the uid still looks right.
-func checkDatasourceRef(t *testing.T, label string, ref *dsRef, wantType, wantUID string) {
+func checkDatasourceRef(t *testing.T, label string, ref *dsRef, wantType, wantUID, sourceFile string) {
 	t.Helper()
 	if ref == nil {
 		t.Errorf("%s has no datasource; it would fall back to Grafana's default", label)
 		return
 	}
 	if ref.Type != wantType {
-		t.Errorf("%s datasource type = %q, want %q (loki.yml)", label, ref.Type, wantType)
+		t.Errorf("%s datasource type = %q, want %q (%s)", label, ref.Type, wantType, sourceFile)
 	}
 	if ref.UID != wantUID {
-		t.Errorf("%s datasource uid = %q, want %q (loki.yml)", label, ref.UID, wantUID)
+		t.Errorf("%s datasource uid = %q, want %q (%s)", label, ref.UID, wantUID, sourceFile)
 	}
 }
 
@@ -462,10 +463,10 @@ func TestLogsDashboardTargetsUseTheProvisionedDatasource(t *testing.T) {
 		// a query panel, and one that lost its datasource falls back to
 		// Grafana's default and renders an error.
 		if len(p.Targets) > 0 {
-			checkDatasourceRef(t, fmt.Sprintf("panel %d (%q)", p.ID, p.Title), p.Datasource, ds.Type, ds.UID)
+			checkDatasourceRef(t, fmt.Sprintf("panel %d (%q)", p.ID, p.Title), p.Datasource, ds.Type, ds.UID, filepath.Base(lokiDatasourcePath))
 		}
 		for _, tg := range p.Targets {
-			checkDatasourceRef(t, fmt.Sprintf("panel %d (%q) target %q", p.ID, p.Title, tg.RefID), tg.Datasource, ds.Type, ds.UID)
+			checkDatasourceRef(t, fmt.Sprintf("panel %d (%q) target %q", p.ID, p.Title, tg.RefID), tg.Datasource, ds.Type, ds.UID, filepath.Base(lokiDatasourcePath))
 		}
 	}
 }
