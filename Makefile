@@ -32,6 +32,8 @@ local-down:
 local-logs:
 	docker compose -f deployments/docker/docker-compose.yml logs -f
 
+# local-down deliberately keeps the volumes: data surviving a stack restart is
+# the durability story the demo tells, so discarding it has to be explicit.
 ## local-reset: Stop the demo and delete its data and Grafana volumes
 local-reset:
 	docker compose -f deployments/docker/docker-compose.yml down -v
