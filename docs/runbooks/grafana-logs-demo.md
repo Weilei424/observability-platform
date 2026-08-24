@@ -21,7 +21,7 @@ This starts four services:
 - **backend** on port 8080 — the observability backend
 - **grafana** on port 3000 — Grafana with provisioned datasources and dashboards
 - **load-generator** — continuously posts metrics
-- **sample-app** — continuously pushes log streams
+- **sample-app** — continuously pushes log streams (and its own metrics; see [`grafana-demo.md`](grafana-demo.md))
 
 ## Wait for data
 
