@@ -174,6 +174,16 @@ func TestLokiDatasourceProvisioning(t *testing.T) {
 	if got, ok := ds.JSONData["maxLines"]; !ok || got != 1000 {
 		t.Errorf("jsonData.maxLines = %v (present=%v), want 1000", got, ok)
 	}
+	// Prometheus, not Loki, must be the sole default: TestPrometheusDatasourceProvisioning
+	// (provisioning_metrics_test.go) asserts ds.IsDefault there for the reason
+	// given in its comment — a panel saved without an explicit datasource would
+	// otherwise resolve to Loki and send PromQL down the log query path. If this
+	// ever flips to true, both datasources are default, Grafana picks one
+	// arbitrarily, and that exact failure returns even with every other check
+	// here green.
+	if ds.IsDefault {
+		t.Error("isDefault = true, want false; Prometheus is the intended default (see TestPrometheusDatasourceProvisioning)")
+	}
 }
 
 // TestLokiDatasourceURLMatchesComposeBackend cross-references the datasource
@@ -181,8 +191,24 @@ func TestLokiDatasourceProvisioning(t *testing.T) {
 // renaming the backend service or moving its port fails here instead of in a
 // browser. The classic version of this bug is a URL of http://localhost:8080,
 // which inside the Grafana container points at Grafana itself.
+//
+// The check itself is shared with the Prometheus datasource's version of this
+// test (TestPrometheusDatasourceURLMatchesComposeBackend in
+// provisioning_metrics_test.go) via datasourceURLMatchesComposeBackend below;
+// each keeps its own Test function so the two still fail for their own
+// reasons.
 func TestLokiDatasourceURLMatchesComposeBackend(t *testing.T) {
-	ds := loadDatasource(t, lokiDatasourcePath).Datasources[0]
+	datasourceURLMatchesComposeBackend(t, lokiDatasourcePath)
+}
+
+// datasourceURLMatchesComposeBackend is the shared body of
+// TestLokiDatasourceURLMatchesComposeBackend and
+// TestPrometheusDatasourceURLMatchesComposeBackend. Both provisioning files
+// point at the same compose backend and need the same URL-vs-compose
+// cross-check; they differ only in which datasource file they read.
+func datasourceURLMatchesComposeBackend(t *testing.T, datasourcePath string) {
+	t.Helper()
+	ds := loadDatasource(t, datasourcePath).Datasources[0]
 
 	const wantScheme = "http://"
 	if !strings.HasPrefix(ds.URL, wantScheme) {
