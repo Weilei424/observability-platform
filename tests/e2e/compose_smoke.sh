@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 #
-# Phase 4.5 real-stack test: brings up the Docker Compose demo and drives it
-# through Grafana's own HTTP API, not the backend's.
+# Real-stack test: brings up the Docker Compose demo and drives it through
+# Grafana's own HTTP API, not the backend's. Covers both halves of the demo —
+# the Loki datasource, logs dashboard, and storage path from Phase 4.5, and the
+# Prometheus datasource plus both metric dashboards from Phase 5.1.
 #
 # The other two checks in `make smoke-logs` deliberately stop short of this.
 # tests/e2e/provisioning_test.go reads the provisioning files without starting
@@ -57,8 +59,9 @@ PASS=0
 FAIL=0
 RUN_ID="run$(date +%s%N | tr 0-9 a-j)"
 
-# The expected running set. load-generator has no assertion of its own anywhere
-# else in this script, so without this it could exit at startup unnoticed.
+# The expected running set. Every service is asserted on its own data elsewhere
+# in this run, but a producer can also exit between assertions, so the exact set
+# is checked after startup and again at the end.
 EXPECTED_SERVICES="backend grafana load-generator sample-app"
 
 # dc runs a compose command with a bound generous enough for an image build.
@@ -102,6 +105,23 @@ dsquery() {
     curl -s "${CURL_TIMEOUTS[@]}" -u "$GRAFANA_AUTH" -H 'Content-Type: application/json' \
         -X POST "$GRAFANA/api/ds/query" \
         -d "{\"queries\":[{\"refId\":\"A\",\"datasource\":{\"type\":\"loki\",\"uid\":\"obs-loki\"},\"expr\":\"$1\",\"queryType\":\"range\",\"maxLines\":100,\"intervalMs\":1000,\"maxDataPoints\":100}],\"from\":\"$from\",\"to\":\"$to\"}"
+}
+
+# promquery <expr> — one metrics panel query through Grafana's /api/ds/query,
+# exactly as a dashboard panel issues it, over the dashboards' own 5-minute
+# window. Callers pass PromQL with \" already escaped for JSON.
+promquery() {
+    curl -s "${CURL_TIMEOUTS[@]}" -u "$GRAFANA_AUTH" -H 'Content-Type: application/json' \
+        -X POST "$GRAFANA/api/ds/query" \
+        -d "{\"queries\":[{\"refId\":\"A\",\"datasource\":{\"type\":\"prometheus\",\"uid\":\"obs-prometheus\"},\"expr\":\"$1\",\"range\":true,\"intervalMs\":5000,\"maxDataPoints\":100}],\"from\":\"now-5m\",\"to\":\"now\"}"
+}
+
+# numeric_columns <body> — how many non-empty all-numeric arrays the dataframe
+# response carries. One series contributes two (timestamps and values), so this
+# distinguishes "a frame came back" from "a frame came back with samples in it",
+# which substring matching cannot.
+numeric_columns() {
+    printf '%s' "$1" | jq '[.. | arrays | select(length > 0) | select(all(.[]; type == "number"))] | length' 2>/dev/null || echo 0
 }
 
 # check_services asserts the exact set of running compose services. Called after
@@ -178,6 +198,8 @@ wait_for() {
 grafana_up()     { curl -sf "${CURL_TIMEOUTS[@]}" -u "$GRAFANA_AUTH" "$GRAFANA/api/health" | grep -q '"database": *"ok"'; }
 datasource_ok()  { gapi /api/datasources/uid/obs-loki/health | grep -q '"status":"OK"'; }
 sample_app_up()  { gapi /api/datasources/uid/obs-loki/resources/label/service/values | grep -q '"worker"'; }
+prom_datasource_ok()   { gapi /api/datasources/uid/obs-prometheus/health | grep -q '"status":"OK"'; }
+sample_app_metrics_up() { promquery 'sample_app_active_workers' | grep -q '"values"'; }
 
 echo "=== Phase 4.5 Compose stack test: project=$PROJECT (run_id=$RUN_ID) ==="
 
@@ -217,6 +239,13 @@ wait_for "Grafana is up" "$READY_TIMEOUT" grafana_up
 # Grafana resolves http://backend:8080 over the compose network and that the
 # backend answers the Loki health query.
 wait_for "Loki datasource health check passes (Save & test)" "$READY_TIMEOUT" datasource_ok
+# The metrics counterpart of the Loki health check: Grafana's "Save & test" for
+# the Prometheus datasource, which proves it resolves http://backend:8080 over
+# the compose network and that the backend answers the Prometheus health query.
+wait_for "Prometheus datasource health check passes (Save & test)" "$READY_TIMEOUT" prom_datasource_ok
+# The sample app now emits metrics as well as logs; without this a crash-looping
+# metrics half would show up only as an empty dashboard.
+wait_for "sample-app is pushing metrics" "$READY_TIMEOUT" sample_app_metrics_up
 # Both demo services must actually be producing; a sample-app that crash-looped
 # would otherwise show up only as an empty dashboard.
 wait_for "sample-app is pushing streams" "$READY_TIMEOUT" sample_app_up
@@ -248,6 +277,29 @@ check_contains "dashboard panel 2 expression is the one tested below" "$DASH" "$
 
 PANEL3_EXPR='sum by (level) (count_over_time({service=\"$service\"} |= \"$search\" [$__interval]))'
 check_contains "dashboard volume panel expression is the one tested below" "$DASH" "$PANEL3_EXPR"
+
+BODY=$(gapi /api/datasources/uid/obs-prometheus)
+check_contains "prometheus datasource provisioned — name" "$BODY" '"name":"observability-platform"'
+check_contains "prometheus datasource provisioned — type" "$BODY" '"type":"prometheus"'
+check_contains "prometheus datasource provisioned — url reaches the backend service" "$BODY" '"url":"http://backend:8080"'
+
+MDASH=$(gapi /api/dashboards/uid/obs-metrics-v1)
+check_contains "metrics dashboard provisioned — uid" "$MDASH" '"uid":"obs-metrics-v1"'
+check_contains "metrics dashboard provisioned — title" "$MDASH" '"title":"Observability Platform Metrics"'
+
+SDASH=$(gapi /api/dashboards/uid/obs-sample-app-v1)
+check_contains "sample-app dashboard provisioned — uid" "$SDASH" '"uid":"obs-sample-app-v1"'
+check_contains "sample-app dashboard provisioned — title" "$SDASH" '"title":"Observability Platform Sample App"'
+
+# As with the logs panels, the expressions run below are pinned against the
+# dashboards Grafana actually serves, so a panel edit fails here first.
+LOADGEN_EXPR='sum by (method)(rate(http_requests_total[1m]))'
+check_contains "metrics dashboard panel expression is the one tested below" "$MDASH" "$LOADGEN_EXPR"
+SAMPLE_RATE_EXPR='sum by (method)(rate(sample_app_requests_total[1m]))'
+check_contains "sample-app dashboard panel expression is the one tested below" "$SDASH" "$SAMPLE_RATE_EXPR"
+# The bare expression, not a '"expr": ...' fragment: Grafana re-serializes the
+# dashboard, so its key spacing is its own and must not be assumed.
+check_contains "sample-app dashboard workers panel expression is the one tested below" "$SDASH" 'sample_app_active_workers'
 
 # ---- Seed a marker stream -------------------------------------------
 echo ""
@@ -367,6 +419,42 @@ BODY=$(dsquery 'sum by (level) (count_over_time({service=\"compose-e2e\"} |= \"\
 check_contains "Explore volume query (with drop) — info level series" "$BODY" '"info"'
 check_absent   "Explore volume query (with drop) — no datasource error" "$BODY" '"error":"'
 
+echo ""
+echo "-- Metrics panel queries (Grafana's /api/ds/query) --"
+
+# Bare selectors, not rate(): rate needs two samples inside its window, so an
+# assertion on it would depend on how long the stack has been up. These prove
+# the series exist and carry samples; the rate expression is checked separately
+# for the absence of an error.
+BODY=$(promquery 'sample_app_active_workers')
+check_absent "sample-app metrics query — no datasource error" "$BODY" '"error":"'
+COLS=$(numeric_columns "$BODY")
+if [ "${COLS:-0}" -ge 2 ]; then
+    log_pass "sample-app metrics query — the series carries non-empty numeric samples"
+else
+    log_fail "sample-app metrics query — ${COLS:-0} non-empty numeric columns, want >= 2 (time+value); body: $BODY"
+fi
+
+# The load generator has produced metrics since Phase 2.5 and has never had a
+# data-level assertion anywhere — only the running-service check would notice if
+# it died mid-run while still leaving its earlier samples queryable.
+BODY=$(promquery 'http_requests_total')
+check_absent "load-generator metrics query — no datasource error" "$BODY" '"error":"'
+COLS=$(numeric_columns "$BODY")
+if [ "${COLS:-0}" -ge 2 ]; then
+    log_pass "load-generator metrics query — the series carries non-empty numeric samples"
+else
+    log_fail "load-generator metrics query — ${COLS:-0} non-empty numeric columns, want >= 2 (time+value); body: $BODY"
+fi
+
+# The panel expressions themselves. Their values depend on uptime, so only the
+# absence of a datasource error is asserted — the same rule the volume panel
+# check follows.
+BODY=$(promquery 'sum by (method)(rate(sample_app_requests_total[1m]))')
+check_absent "sample-app rate panel — no datasource error" "$BODY" '"error":"'
+BODY=$(promquery 'sum by (method)(rate(http_requests_total[1m]))')
+check_absent "metrics dashboard rate panel — no datasource error" "$BODY" '"error":"'
+
 # ---- Storage path: chunks and restart readback ----------------------
 echo ""
 echo "-- Storage path --"
@@ -392,6 +480,16 @@ else
     log_fail "backend container restart failed"
 fi
 wait_for "datasource health passes again after restart" "$READY_TIMEOUT" datasource_ok
+wait_for "prometheus datasource health passes again after restart" "$READY_TIMEOUT" prom_datasource_ok
+
+BODY=$(promquery 'sample_app_active_workers')
+check_absent "metrics survive the restart — no datasource error" "$BODY" '"error":"'
+COLS=$(numeric_columns "$BODY")
+if [ "${COLS:-0}" -ge 2 ]; then
+    log_pass "metrics survive the restart — samples still readable"
+else
+    log_fail "metrics survive the restart — ${COLS:-0} non-empty numeric columns, want >= 2; body: $BODY"
+fi
 
 BODY=$(dsquery '{service=\"compose-e2e\"} |= \"\"')
 check_contains "marker survives the restart — info line" "$BODY" "200 in 12ms run_id=$RUN_ID"
