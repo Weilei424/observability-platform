@@ -30,7 +30,7 @@ This is not a dashboard UI project. Grafana is the UI. The backend observability
 # Run locally
 make run
 
-# Start backend + Grafana + load generator in Docker
+# Start the demo stack in Docker: backend + Grafana + load generator + sample app
 make local-up   # backend: http://localhost:8080  grafana: http://localhost:3000
 make local-down
 make local-logs # follow the stack's logs
