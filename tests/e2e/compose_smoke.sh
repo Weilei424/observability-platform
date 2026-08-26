@@ -312,7 +312,7 @@ check_contains "sample-app dashboard workers panel expression is the one tested 
 
 # ---- Seed a marker stream -------------------------------------------
 echo ""
-echo "-- Seeding marker streams --"
+echo "-- Seeding markers --"
 
 # Every assertion that names a specific line or label value below reads this
 # marker rather than the demo's own output. The sample app picks levels at
@@ -333,6 +333,22 @@ if [ "$PUSH_STATUS" = "204" ]; then
     log_pass "seed marker streams (HTTP 204)"
 else
     log_fail "seed marker streams — got HTTP $PUSH_STATUS"
+fi
+
+# A metric marker for the restart check further down. Its value is unique to this
+# run and nothing writes this series afterwards, so reading that exact value back
+# after the restart proves the persisted path rather than the producer merely
+# having resumed. RANDOM keeps it distinct even if a previous run's volume
+# somehow survived (OBS_COMPOSE_KEEP_UP skips the `down -v` teardown).
+MARKER_VALUE=$(( (RANDOM % 90000) + 10000 ))
+MARKER_MS=$(( $(date +%s) * 1000 ))
+METRIC_STATUS=$(curl -s "${CURL_TIMEOUTS[@]}" -o /dev/null -w "%{http_code}" -X POST "$BACKEND/api/v1/ingest/metrics" \
+    -H "Content-Type: application/json" \
+    -d "{\"metrics\":[{\"name\":\"compose_e2e_marker\",\"labels\":{\"run_id\":\"$RUN_ID\"},\"timestamp_ms\":$MARKER_MS,\"value\":$MARKER_VALUE}]}")
+if [ "$METRIC_STATUS" = "204" ]; then
+    log_pass "seed metric marker (HTTP 204, value $MARKER_VALUE)"
+else
+    log_fail "seed metric marker — got HTTP $METRIC_STATUS"
 fi
 
 echo ""
@@ -491,13 +507,28 @@ fi
 wait_for "datasource health passes again after restart" "$READY_TIMEOUT" datasource_ok
 wait_for "prometheus datasource health passes again after restart" "$READY_TIMEOUT" prom_datasource_ok
 
+# The seeded marker is what makes this a persistence claim. Querying a live
+# series such as sample_app_active_workers cannot prove persistence: the sample
+# app keeps pushing throughout the restart, so fresh samples would satisfy the
+# assertion even if every pre-restart sample had been lost. Nothing writes the
+# marker after the restart, so its value can only come from persisted data.
+BODY=$(promquery 'compose_e2e_marker')
+check_absent "metric marker survives the restart — no datasource error" "$BODY" '"error":"'
+if printf '%s' "$BODY" | jq -e --argjson want "$MARKER_VALUE" \
+        '[.. | arrays | select(length > 0) | select(all(.[]; type == "number")) | .[]] | index($want)' >/dev/null 2>&1; then
+    log_pass "metric marker survives the restart — value $MARKER_VALUE read back"
+else
+    log_fail "metric marker survives the restart — value $MARKER_VALUE absent from response; body: $BODY"
+fi
+
+# Separately, the producer must still be writing. This is a LIVENESS claim, not a
+# persistence one — keeping the two apart is the point of the marker above.
 BODY=$(promquery 'sample_app_active_workers')
-check_absent "metrics survive the restart — no datasource error" "$BODY" '"error":"'
 COLS=$(numeric_columns "$BODY")
 if [ "${COLS:-0}" -ge 2 ]; then
-    log_pass "metrics survive the restart — samples still readable"
+    log_pass "sample-app metrics still readable after the restart"
 else
-    log_fail "metrics survive the restart — ${COLS:-0} non-empty numeric columns, want >= 2; body: $BODY"
+    log_fail "sample-app metrics still readable after the restart — ${COLS:-0} non-empty numeric columns, want >= 2; body: $BODY"
 fi
 
 BODY=$(dsquery '{service=\"compose-e2e\"} |= \"\"')
