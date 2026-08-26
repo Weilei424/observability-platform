@@ -553,9 +553,9 @@ Design: `docs/superpowers/specs/2026-08-23-phase-5.1-docker-compose-demo-design.
 **Verify**
 - [x] Verify: `go build ./...`, `go vet ./...`, `golangci-lint run`, `go test ./...` green
 - [x] Verify: `make smoke` and `make smoke-logs` exit 0 against a locally run backend
-- [ ] Verify: `docker compose -f deployments/docker/docker-compose.yml config` parses with the new `name:`, healthcheck, and dependency conditions
-- [ ] Verify *(requires Docker)*: `make smoke-compose` exits 0 — locally or via the CI `compose-e2e` job
-- [ ] Verify *(requires Docker + a browser)*: `make local-up`, then all three dashboards populate without manual setup
+- [x] Verify: `docker compose -f deployments/docker/docker-compose.yml config` parses with the new `name:`, healthcheck, and dependency conditions — never run by hand (Docker was unavailable in every authoring session), but the CI `compose-e2e` job cannot bring the stack up at all without the file parsing, and it is green at `7ae8f8d` ([run 32704903679](https://github.com/Weilei424/observability-platform/actions/runs/32704903679))
+- [x] Verify *(requires Docker)*: `make smoke-compose` exits 0 — green in CI at `7ae8f8d` ([run 32704903679](https://github.com/Weilei424/observability-platform/actions/runs/32704903679)), including the `Compose Stack E2E (through Grafana)` job. The restart assertion has since been hardened to read back a seeded marker rather than a live series, so that amendment is covered by its own later run — this citation dates itself rather than pinning the tip
+- [ ] Verify *(requires Docker + a browser)*: `make local-up`, then all three dashboards populate without manual setup — **still open.** The Grafana datasource and `/api/ds/query` checks in `compose_smoke.sh` prove the panel expressions return data, but not that panels render, legends interpolate, or the layout holds. Needs a human with a browser; no CI job can close it
 
 ### Phase 5.2 — Kubernetes Manifests and Helm Chart
 - [ ] Add Helm chart for backend
