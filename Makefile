@@ -20,7 +20,7 @@ lint:
 run:
 	go run ./cmd/server
 
-## local-up: Start backend + Grafana in Docker
+## local-up: Start the demo stack in Docker (backend, Grafana, load generator, sample app)
 local-up:
 	docker compose -f deployments/docker/docker-compose.yml up -d --build
 
