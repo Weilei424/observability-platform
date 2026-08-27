@@ -96,11 +96,13 @@ three empty dashboards.
 | `fullnameOverride` | `observability-producers` | Base name for both Deployments (`-sample-app` / `-load-generator` suffixes). |
 | `backend.url` | `http://observability-backend:8080` | Same cross-chart claim as the grafana chart's `backend.url`; see Cross-chart contract above. |
 | `sampleApp.enabled` | `true` | Set `false` to skip the sample app Deployment. |
+| `sampleApp.replicas` | `1` | Pod count for the sample app Deployment. |
 | `sampleApp.image.repository` | `observability-platform/sample-app` | Built by the `sampleapp` target. |
 | `sampleApp.image.tag` | `dev` | |
 | `sampleApp.rate` | `2` | Log batches per second. |
 | `sampleApp.metricsRate` | `1` | Metric pushes per second — an independent ticker from `rate`. |
 | `loadGenerator.enabled` | `true` | Set `false` to skip the load generator Deployment. |
+| `loadGenerator.replicas` | `1` | Pod count for the load generator Deployment. |
 | `loadGenerator.image.repository` | `observability-platform/load-generator` | Built by the `loadgen` target. |
 | `loadGenerator.image.tag` | `dev` | |
 | `loadGenerator.rate` | `5` | Requests simulated per second. |
