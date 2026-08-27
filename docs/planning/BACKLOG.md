@@ -558,16 +558,49 @@ Design: `docs/superpowers/specs/2026-08-23-phase-5.1-docker-compose-demo-design.
 - [x] Verify *(requires Docker + a browser)*: `make local-up`, then all three dashboards populate without manual setup — confirmed by hand in a browser on 2026-08-26 at `a61bed9`: *Observability Platform Metrics* (5 panels), *Observability Platform Sample App* (4 panels), and *Observability Platform Logs* all populated, with legend interpolation checked (a literal `{{method}}` would mean label interpolation broke). This is the one DoD item no automated check can close — the datasource and `/api/ds/query` assertions in `compose_smoke.sh` prove the panel expressions return data, not that panels render, legends resolve, or the layout holds
 
 ### Phase 5.2 — Kubernetes Manifests and Helm Chart
-- [ ] Add Helm chart for backend
-- [ ] Add Kubernetes manifests for Grafana demo
-- [ ] Add PersistentVolumeClaim support
-- [ ] Add ConfigMap support
-- [ ] Add Secret support
-- [ ] Add backend Service
-- [ ] Add Grafana Service
-- [ ] Verify: Helm install deploys backend
-- [ ] Verify: data persists across pod restart
-- [ ] Verify: Grafana queries backend inside Kubernetes
+Design: `docs/superpowers/specs/2026-08-26-phase-5.2-kubernetes-helm-design.md` · Plan: `docs/superpowers/plans/2026-08-26-phase-5.2-kubernetes-helm.md`
+
+**Backend chart** — `deployments/helm/backend/`
+- [ ] `Chart.yaml` + `values.yaml` — `fullnameOverride: observability-backend` so the ClusterIP Service name does not vary with the release name; both other charts default their `backend.url` to that literal
+- [ ] `templates/statefulset.yaml` — one replica with `volumeClaimTemplates` (default 2Gi, overridable `storageClassName`). StatefulSet rather than Deployment: the backend owns a WAL, blocks, and chunks on disk, and a Deployment on a ReadWriteOnce volume deadlocks on rolling update — the new pod waits forever for a volume the old pod still holds, which presents as a hung deploy rather than an error
+- [ ] `templates/statefulset.yaml` probes — **`httpGet`, not the `/server -healthcheck` exec mode.** Kubelet probes from outside the container, so the distroless no-shell constraint that forced the exec probe in Compose does not apply. Startup + readiness on `/readyz` (which also proves the data dir is writable), liveness on `/healthz` (bare 200, so a full volume cannot trigger a restart loop). The startup probe is load-bearing: WAL replay can outlast a readiness deadline, and without it a slow replay becomes an infinite restart
+- [ ] `templates/statefulset.yaml` securityContext — `runAsNonRoot`, uid 65532, `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, all capabilities dropped
+- [ ] `templates/configmap.yaml` — `OBS_*` env vars via `envFrom`; `OBS_DATA_DIR: /data` matching the volume mount
+- [ ] `templates/service.yaml` — headless Service for StatefulSet identity + ClusterIP on 8080
+- [ ] `values.yaml` image block — `IfNotPresent` so a `kind load`ed image is used without a registry
+
+**Grafana chart** — `deployments/helm/grafana/`
+- [ ] `templates/deployment.yaml` — stateless Deployment; three mounts (templated datasources, shipped dashboard provider, operator-created dashboards)
+- [ ] `templates/configmap-datasources.yaml` — **templated, never copied**: the backend URL is the one part of Grafana provisioning that differs per environment
+- [ ] Dashboards ConfigMap — created by the operator (`kubectl create configmap grafana-dashboards --from-file=observability/grafana/dashboards/`), name configurable via `dashboards.configMapName`. Helm cannot read files outside its own chart dir, and this keeps one source of truth instead of copies that drift. Mount is **not** `optional`: a missing ConfigMap must leave the pod in `ContainerCreating` naming what is absent, which is louder than a Grafana that starts happily with no dashboards
+- [ ] `templates/NOTES.txt` — print that exact `kubectl create configmap` command on install
+- [ ] `templates/secret.yaml` — Grafana admin password. **No default in `values.yaml`**: `CLAUDE.md` forbids secrets in git, and a shipped default is how a demo password reaches production. Require `admin.password` or `admin.existingSecret`, failing rendering with a clear message if given neither
+- [ ] `templates/service.yaml` — Grafana Service
+
+**Producers chart** — `deployments/helm/producers/`
+- [ ] `templates/deployment-sample-app.yaml` + `templates/deployment-load-generator.yaml` — reuse the existing `sampleapp`/`loadgen` Dockerfile stages unchanged; both address the backend via `backend.url`. Without this chart a fresh deploy renders three empty dashboards
+
+**Static verification** — `tests/e2e/helm_test.go` *(no cluster, runs in `go test ./...`; skips with a clear message if `helm` is absent)*
+- [ ] `helm lint` passes for all three charts; `helm template` renders and the output parses as a stream of K8s objects
+- [ ] **Cross-chart URL check** — every backend URL in the rendered Grafana and producers output resolves to a Service name *and port* the rendered backend output actually defines. Two charts make a claim about a third that Helm never checks; this is the K8s analogue of `TestLokiDatasourceURLMatchesComposeBackend`, which cross-references `docker-compose.yml` rather than trusting a literal
+- [ ] **Probe paths exist** — each rendered `httpGet.path` appears in `internal/api/router.go`. A probe pointed at a nonexistent path fails every pod without ever failing a test
+- [ ] **Config keys are real** — every backend ConfigMap key corresponds to a `v.SetDefault` in `internal/config/config.go`. Viper silently ignores unknown env vars, so a typo'd key is invisible at runtime
+- [ ] **Secret hygiene** — rendering Grafana with neither `admin.password` nor `admin.existingSecret` fails, and no chart's defaults contain a password
+
+**Cluster verification** — `.github/workflows/ci.yml` job `helm-k8s-e2e`
+- [ ] New job beside `compose-e2e`; installs `helm` and `kind` via `azure/setup-helm` and `helm/kind-action` (neither is preinstalled on the runner)
+- [ ] Create kind cluster; build `backend`/`sampleapp`/`loadgen` targets and `kind load` all three
+- [ ] Verify: `helm install` deploys the backend and the StatefulSet rolls out
+- [ ] Run the **documented** `kubectl create configmap` command, so the runbook step is a tested path rather than a hope; then install Grafana and producers
+- [ ] Verify: data persists across pod restart — ingest a marker with a **run-unique value**, `kubectl delete pod` the backend, wait for reschedule, read the marker back **by value**. Phase 5.1 shipped a restart check that queried a live series the producers kept writing, so fresh samples satisfied it even if every pre-restart sample had been lost; it asserted persistence and proved nothing. The producers chart makes that same failure mode available here
+- [ ] Verify: Grafana queries backend inside Kubernetes — through Grafana's `/api/ds/query`, not the backend's own API
+- [ ] Dump pod state and logs on failure, then delete the cluster
+
+**Docs**
+- [ ] `docs/runbooks/kubernetes-demo.md` — prerequisites, ordered install including the ConfigMap step, verification, port-forward, troubleshooting, cleanup
+- [ ] `deployments/helm/README.md` — values reference for all three charts
+- [ ] `README.md` — Kubernetes section pointing at the runbook
+- [ ] `docs/planning/ARCHITECTURE_NOTES.md` — K8s topology: three charts, the cross-chart contract, StatefulSet rationale, and the `httpGet`-over-exec probe correction
 
 ### Phase 5.3 — Platform Self-Observability
 - [ ] Add `/metrics` endpoint for backend internals
