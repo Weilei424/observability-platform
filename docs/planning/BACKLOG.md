@@ -597,10 +597,10 @@ Design: `docs/superpowers/specs/2026-08-26-phase-5.2-kubernetes-helm-design.md` 
 - [x] Dump pod state and logs on failure, then delete the cluster
 
 **Docs**
-- [ ] `docs/runbooks/kubernetes-demo.md` — prerequisites, ordered install including the ConfigMap step, verification, port-forward, troubleshooting, cleanup
-- [ ] `deployments/helm/README.md` — values reference for all three charts
-- [ ] `README.md` — Kubernetes section pointing at the runbook
-- [ ] `docs/planning/ARCHITECTURE_NOTES.md` — K8s topology: three charts, the cross-chart contract, StatefulSet rationale, and the `httpGet`-over-exec probe correction
+- [x] `docs/runbooks/kubernetes-demo.md` — prerequisites, ordered install including the ConfigMap step, verification, port-forward, troubleshooting, cleanup
+- [x] `deployments/helm/README.md` — values reference for all three charts
+- [x] `README.md` — Kubernetes section pointing at the runbook
+- [x] `docs/planning/ARCHITECTURE_NOTES.md` — K8s topology: three charts, the cross-chart contract, StatefulSet rationale, and the `httpGet`-over-exec probe correction
 
 ### Phase 5.3 — Platform Self-Observability
 - [ ] Add `/metrics` endpoint for backend internals
