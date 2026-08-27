@@ -161,6 +161,43 @@ helm install producers "$REPO_ROOT/deployments/helm/producers" -n "$NS" \
     --wait --timeout "$ROLLOUT_TIMEOUT" \
     && log_pass "helm install deploys the producers" || log_fail "helm install producers failed"
 
+# ---- Producers are actually writing -----------------------------------
+echo ""
+echo "-- Verifying producers write to the backend --"
+# Both generators log-and-continue on a push failure and never exit, so a
+# producer pointed at an unreachable backend stays Running and Ready forever:
+# `helm install --wait` succeeds and every check above this passes while all
+# three dashboards stay empty. This is the same class of gap an external
+# reviewer caught in this project's previous phase (compose_smoke.sh's
+# sample_app_metrics_up / load-generator checks) — query a series only the
+# producers write and require real samples, not merely the absence of an
+# error.
+kubectl port-forward -n "$NS" svc/observability-backend 18080:8080 >/dev/null 2>&1 &
+PF_PID=$!
+wait_for_port "backend port-forward is ready (producers check)" 30 "http://localhost:18080/healthz"
+
+PRODUCER_BODY=""
+PRODUCER_COLS=0
+START=$SECONDS
+while [ $((SECONDS - START)) -lt 60 ]; do
+    PRODUCER_BODY=$(curl -sg --max-time 10 "http://localhost:18080/api/v1/query?query=http_requests_total")
+    PRODUCER_COLS=$(numeric_columns "$PRODUCER_BODY")
+    [ "${PRODUCER_COLS:-0}" -ge 2 ] && break
+    sleep 2
+done
+# Guard the empty-body case explicitly, same as the post-restart query below:
+# jq -e treats an empty/non-JSON body inconsistently across builds, and an
+# empty $PRODUCER_BODY (a dropped connection or a stalled port-forward) must
+# not be indistinguishable from "no samples yet".
+if [ -z "$PRODUCER_BODY" ]; then
+    log_fail "load generator is writing to the backend — empty response body (connection or port-forward failure)"
+elif [ "${PRODUCER_COLS:-0}" -ge 2 ]; then
+    log_pass "load generator is writing http_requests_total with real samples"
+else
+    log_fail "load generator is writing to the backend — no numeric samples for http_requests_total after 60s; body: $PRODUCER_BODY"
+fi
+kill "$PF_PID" 2>/dev/null; PF_PID=""
+
 # ---- Seed a marker ---------------------------------------------------
 echo ""
 echo "-- Seeding a restart marker --"
@@ -196,9 +233,34 @@ else
     log_fail "pod did not come back"
 fi
 
-kubectl port-forward -n "$NS" svc/observability-backend 18080:8080 >/dev/null 2>&1 &
-PF_PID=$!
-wait_for_port "backend port-forward is ready (post-restart)" 30 "http://localhost:18080/healthz"
+# `kubectl delete pod --wait=true` returns as soon as the object is gone, not
+# once the replacement is Running — the controller has not necessarily
+# written status.readyReplicas: 0 yet, so `rollout status` immediately above
+# can read stale status and report "complete" against a pod that is not there
+# yet. Without this explicit wait, the port-forward below starts against no
+# Running pod, exits immediately, and wait_for_port then polls a dead tunnel
+# for its whole timeout — a FALSE failure on this phase's headline claim
+# (data survives a pod restart) even though the restart itself worked.
+if kubectl wait --for=condition=Ready "pod/observability-backend-0" -n "$NS" --timeout="$ROLLOUT_TIMEOUT"; then
+    log_pass "replacement pod reached Ready"
+else
+    log_fail "replacement pod did not reach Ready"
+fi
+
+# Retry the port-forward itself, not just the poll: a port-forward started in
+# the narrow window right after the pod flips Ready can still exit almost
+# immediately (e.g. the API server's tunnel briefly resetting), and one
+# retry is cheap insurance against that same false-failure shape.
+PF_PID=""
+for attempt in 1 2 3; do
+    kubectl port-forward -n "$NS" svc/observability-backend 18080:8080 >/dev/null 2>&1 &
+    PF_PID=$!
+    sleep 1
+    if kill -0 "$PF_PID" 2>/dev/null && wait_for_port "backend port-forward is ready (post-restart, attempt $attempt)" 15 "http://localhost:18080/healthz"; then
+        break
+    fi
+    kill "$PF_PID" 2>/dev/null; PF_PID=""
+done
 
 BODY=$(curl -sg --max-time 15 "http://localhost:18080/api/v1/query?query=k8s_e2e_marker")
 # `jq -e` treats zero output values the same as a successful non-null/false
