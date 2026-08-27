@@ -7,7 +7,7 @@ metadata:
     {{- include "producers.labels" . | nindent 4 }}
     app.kubernetes.io/part-of: load-generator
 spec:
-  replicas: 1
+  replicas: {{ .Values.loadGenerator.replicas }}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "producers.name" . }}-load-generator
