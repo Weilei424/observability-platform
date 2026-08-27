@@ -5,7 +5,11 @@ Wait for it to become ready:
 
 Reach the API locally:
   kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "backend.name" . }} 8080:{{ .Values.service.port }}
-  curl -g 'http://localhost:8080/api/v1/query?query=up'
+  curl -g 'http://localhost:8080/api/v1/query?query=http_requests_total'
+
+This backend is empty until something pushes to it — install the producers chart
+first and expect an empty result here otherwise. It is not a readiness check by
+itself (that's the rollout status command above); it only confirms the API answers.
 
 Other charts address this backend at:
   http://{{ include "backend.name" . }}:{{ .Values.service.port }}
