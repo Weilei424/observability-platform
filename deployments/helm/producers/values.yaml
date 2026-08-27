@@ -1,0 +1,31 @@
+fullnameOverride: observability-producers
+
+backend:
+  # Same cross-chart claim as the grafana chart makes; see that chart's comment.
+  url: http://observability-backend:8080
+
+sampleApp:
+  enabled: true
+  image:
+    repository: observability-platform/sample-app
+    tag: dev
+    pullPolicy: IfNotPresent
+  # Log batches per second and metric pushes per second, the sample app's two
+  # independent tickers.
+  rate: 2
+  metricsRate: 1
+
+loadGenerator:
+  enabled: true
+  image:
+    repository: observability-platform/load-generator
+    tag: dev
+    pullPolicy: IfNotPresent
+  rate: 5
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 128Mi

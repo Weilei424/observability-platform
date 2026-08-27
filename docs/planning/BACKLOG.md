@@ -578,7 +578,7 @@ Design: `docs/superpowers/specs/2026-08-26-phase-5.2-kubernetes-helm-design.md` 
 - [x] `templates/service.yaml` — Grafana Service
 
 **Producers chart** — `deployments/helm/producers/`
-- [ ] `templates/deployment-sample-app.yaml` + `templates/deployment-load-generator.yaml` — reuse the existing `sampleapp`/`loadgen` Dockerfile stages unchanged; both address the backend via `backend.url`. Without this chart a fresh deploy renders three empty dashboards
+- [x] `templates/deployment-sample-app.yaml` + `templates/deployment-load-generator.yaml` — reuse the existing `sampleapp`/`loadgen` Dockerfile stages unchanged; both address the backend via `backend.url`. Without this chart a fresh deploy renders three empty dashboards
 
 **Static verification** — `tests/e2e/helm_test.go` *(no cluster, runs in `go test ./...`; skips with a clear message if `helm` is absent)*
 - [ ] `helm lint` passes for all three charts; `helm template` renders and the output parses as a stream of K8s objects

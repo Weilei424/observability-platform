@@ -1,0 +1,45 @@
+{{- if .Values.sampleApp.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "producers.name" . }}-sample-app
+  labels:
+    {{- include "producers.labels" . | nindent 4 }}
+    app.kubernetes.io/part-of: sample-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "producers.name" . }}-sample-app
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "producers.name" . }}-sample-app
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+      containers:
+        - name: sample-app
+          image: "{{ .Values.sampleApp.image.repository }}:{{ .Values.sampleApp.image.tag }}"
+          imagePullPolicy: {{ .Values.sampleApp.image.pullPolicy }}
+          args:
+            - -rate={{ .Values.sampleApp.rate }}
+            - -metrics-rate={{ .Values.sampleApp.metricsRate }}
+          env:
+            # OBS_BACKEND_ADDR takes precedence over the -addr flag in this
+            # generator, so it is the only address setting needed.
+            - name: OBS_BACKEND_ADDR
+              value: {{ .Values.backend.url | quote }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+{{- end }}

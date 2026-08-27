@@ -1,0 +1,6 @@
+apiVersion: v2
+name: observability-platform-producers
+description: Demo traffic for the observability platform — a log/metric emitting sample app and a metrics load generator
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
