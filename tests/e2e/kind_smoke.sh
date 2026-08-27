@@ -45,6 +45,15 @@ wait_for_port() {
     return 1
 }
 
+# numeric_columns <body> — how many non-empty all-numeric arrays a Grafana
+# dataframe response carries (one series contributes two: timestamps and
+# values). Same helper as compose_smoke.sh's; used to require positive
+# evidence a real frame came back, not merely the absence of an error key —
+# an empty or non-JSON body has no numeric columns either.
+numeric_columns() {
+    printf '%s' "$1" | jq '[.. | arrays | select(length > 0) | select(all(.[]; type == "number"))] | length' 2>/dev/null || echo 0
+}
+
 for tool in kind kubectl helm docker jq; do
     command -v "$tool" >/dev/null 2>&1 || { echo "FATAL: $tool is required" >&2; exit 2; }
 done
@@ -101,7 +110,10 @@ for target in backend:backend sampleapp:sample-app loadgen:load-generator; do
         echo "FATAL: docker build --target $stage failed" >&2
         exit 2
     fi
-    kind load docker-image "observability-platform/$name:dev" --name "$CLUSTER" >/dev/null
+    if ! kind load docker-image "observability-platform/$name:dev" --name "$CLUSTER" >/dev/null; then
+        echo "FATAL: kind load docker-image $name failed" >&2
+        exit 2
+    fi
 done
 log_pass "built and loaded three images"
 
@@ -189,11 +201,21 @@ PF_PID=$!
 wait_for_port "backend port-forward is ready (post-restart)" 30 "http://localhost:18080/healthz"
 
 BODY=$(curl -sg --max-time 15 "http://localhost:18080/api/v1/query?query=k8s_e2e_marker")
-if printf '%s' "$BODY" | jq -e --argjson want "$MARKER_VALUE" \
-        '[.. | strings | tonumber? // empty] | index($want)' >/dev/null 2>&1; then
-    log_pass "data persists across pod restart — marker value $MARKER_VALUE read back"
+# `jq -e` treats zero output values the same as a successful non-null/false
+# result on some jq builds — an empty $BODY (a dropped connection or a
+# port-forward that closed) would otherwise print PASS on this phase's
+# headline persistence claim. Guard the empty case explicitly, and read the
+# match back into a variable instead of trusting -e's exit status alone.
+if [ -z "$BODY" ]; then
+    log_fail "data persists across pod restart — empty response body from the query (connection or port-forward failure)"
 else
-    log_fail "marker value $MARKER_VALUE not found after restart; body: $BODY"
+    MATCH=$(printf '%s' "$BODY" | jq -r --argjson want "$MARKER_VALUE" \
+        '([.. | strings | tonumber? // empty] | index($want)) // "null"' 2>/dev/null)
+    if [ -n "$MATCH" ] && [ "$MATCH" != "null" ]; then
+        log_pass "data persists across pod restart — marker value $MARKER_VALUE read back"
+    else
+        log_fail "marker value $MARKER_VALUE not found after restart; body: $BODY"
+    fi
 fi
 kill "$PF_PID" 2>/dev/null; PF_PID=""
 
@@ -217,14 +239,24 @@ fi
 DSQ=$(curl -s --max-time 20 -u "admin:e2e-only" -H 'Content-Type: application/json' \
     -X POST "http://localhost:13000/api/ds/query" \
     -d '{"queries":[{"refId":"A","datasource":{"type":"prometheus","uid":"obs-prometheus"},"expr":"k8s_e2e_marker","range":true,"intervalMs":5000,"maxDataPoints":100}],"from":"now-15m","to":"now"}')
-# Look for the error *key*, not the bare word — this response is Grafana's
-# dataframe JSON over a metric series, and a field unrelated to failure could
-# legitimately contain the substring "error" (compose_smoke.sh's check_absent
-# makes the same distinction for the same reason).
-if printf '%s' "$DSQ" | grep -q '"error":"'; then
+# An absence-of-error test alone passes on an empty body (a dropped
+# connection) or an HTML error page from a broken proxy — neither contains
+# `"error":"`. Mirror compose_smoke.sh's check_absent: guard the empty body
+# first, then look for the error *key* (not the bare word — a field unrelated
+# to failure could legitimately contain the substring "error"), and finally
+# require positive evidence — a real numeric dataframe for k8s_e2e_marker —
+# so a non-JSON body cannot pass just by lacking an error key.
+if [ -z "$DSQ" ]; then
+    log_fail "Grafana query returned an empty response body (connection or port-forward failure)"
+elif printf '%s' "$DSQ" | grep -q '"error":"'; then
     log_fail "Grafana query returned an error: $DSQ"
 else
-    log_pass "Grafana queries the backend inside Kubernetes"
+    COLS=$(numeric_columns "$DSQ")
+    if [ "${COLS:-0}" -ge 2 ]; then
+        log_pass "Grafana queries the backend inside Kubernetes — marker series returned with samples"
+    else
+        log_fail "Grafana query returned no numeric samples for k8s_e2e_marker (cols=${COLS:-0}); body: $DSQ"
+    fi
 fi
 kill "$PF_PID" 2>/dev/null; PF_PID=""
 
