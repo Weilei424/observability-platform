@@ -54,7 +54,7 @@ numeric_columns() {
     printf '%s' "$1" | jq '[.. | arrays | select(length > 0) | select(all(.[]; type == "number"))] | length' 2>/dev/null || echo 0
 }
 
-for tool in kind kubectl helm docker jq; do
+for tool in kind kubectl helm docker jq curl; do
     command -v "$tool" >/dev/null 2>&1 || { echo "FATAL: $tool is required" >&2; exit 2; }
 done
 
@@ -68,7 +68,7 @@ teardown() {
         echo ""
         echo "-- Events --"
         kubectl get events -n "$NS" --sort-by=.lastTimestamp 2>&1 | tail -25
-        for app in observability-backend observability-grafana; do
+        for app in observability-backend observability-grafana observability-producers-sample-app observability-producers-load-generator; do
             echo ""
             echo "-- Logs: $app --"
             kubectl logs -n "$NS" -l "app.kubernetes.io/name=$app" --tail=40 2>&1 | tail -40
