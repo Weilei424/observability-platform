@@ -5,6 +5,12 @@ metadata:
   labels:
     {{- include "backend.labels" . | nindent 4 }}
 data:
+  # Derived from service.port rather than left to the http_addr default of
+  # :8080, so the container actually listens on the port the Services and
+  # probes are configured for. Without this, --set service.port=<anything
+  # else> retargets every probe at a port nothing listens on and the pod
+  # fails startup with no obvious cause.
+  OBS_HTTP_ADDR: {{ printf ":%d" (.Values.service.port | int) | quote }}
   {{- range $key, $value := .Values.config }}
   {{ $key }}: {{ $value | quote }}
   {{- end }}
