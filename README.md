@@ -58,6 +58,16 @@ two simulated workloads never mix in one panel.
 
 The provisioned **Observability Platform Logs** dashboard and Grafana Explore show live log streams from the sample app; see [`docs/runbooks/grafana-logs-demo.md`](docs/runbooks/grafana-logs-demo.md).
 
+## Kubernetes
+
+The Compose demo above remains the fastest way to see the project work; Kubernetes is
+the deployment demonstration, not a replacement for it. Three Helm charts —
+`deployments/helm/backend`, `deployments/helm/grafana`, `deployments/helm/producers` —
+install the same backend image as a StatefulSet, Grafana, and the two producers into any
+cluster. See [`docs/runbooks/kubernetes-demo.md`](docs/runbooks/kubernetes-demo.md) for
+the full walkthrough and [`deployments/helm/README.md`](deployments/helm/README.md) for
+the per-chart values reference.
+
 ## Local Metrics Demo (without Docker)
 
 **1. Start the backend:**
