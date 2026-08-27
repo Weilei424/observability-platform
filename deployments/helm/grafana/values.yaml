@@ -1,0 +1,39 @@
+fullnameOverride: observability-grafana
+
+image:
+  repository: grafana/grafana
+  tag: "11.1.0"
+  pullPolicy: IfNotPresent
+
+service:
+  port: 3000
+
+backend:
+  # This is a claim about a Service the BACKEND chart owns — Helm cannot check
+  # it across charts. tests/e2e/helm_test.go renders both and fails if this URL
+  # does not resolve to a Service the backend chart actually creates.
+  url: http://observability-backend:8080
+
+dashboards:
+  # Created by the operator, not by this chart: Helm can only read files inside
+  # its own chart directory, and copying the dashboards in would fork them from
+  # observability/grafana/dashboards/. See the runbook.
+  #   kubectl create configmap grafana-dashboards \
+  #     --from-file=observability/grafana/dashboards/
+  configMapName: grafana-dashboards
+
+admin:
+  user: admin
+  # No default password, deliberately: CLAUDE.md forbids secrets in git, and a
+  # chart that ships a working default is how a demo password reaches
+  # production. Set admin.password, or point admin.existingSecret at a Secret
+  # you created. Rendering fails if you provide neither.
+  password: ""
+  existingSecret: ""
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi

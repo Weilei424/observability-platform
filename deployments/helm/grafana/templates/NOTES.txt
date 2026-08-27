@@ -1,0 +1,13 @@
+Grafana installed as release {{ .Release.Name }}, pointed at {{ .Values.backend.url }}.
+
+THIS CHART DOES NOT SHIP THE DASHBOARDS. It mounts a ConfigMap you create, so
+that observability/grafana/dashboards/ stays the single source of truth:
+
+  kubectl create configmap {{ .Values.dashboards.configMapName }} \
+    --from-file=observability/grafana/dashboards/ -n {{ .Release.Namespace }}
+
+Without it the pod stays in ContainerCreating, naming the missing ConfigMap.
+
+Open Grafana:
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "grafana.name" . }} 3000:{{ .Values.service.port }}
+  # then http://localhost:3000 as {{ .Values.admin.user }}

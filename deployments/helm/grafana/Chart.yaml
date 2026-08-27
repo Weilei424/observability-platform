@@ -1,0 +1,6 @@
+apiVersion: v2
+name: observability-platform-grafana
+description: Grafana configured against the observability-platform backend, with provisioned datasources and dashboards
+type: application
+version: 0.1.0
+appVersion: "11.1.0"

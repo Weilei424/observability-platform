@@ -570,12 +570,12 @@ Design: `docs/superpowers/specs/2026-08-26-phase-5.2-kubernetes-helm-design.md` 
 - [x] `values.yaml` image block — `IfNotPresent` so a `kind load`ed image is used without a registry
 
 **Grafana chart** — `deployments/helm/grafana/`
-- [ ] `templates/deployment.yaml` — stateless Deployment; three mounts (templated datasources, shipped dashboard provider, operator-created dashboards)
-- [ ] `templates/configmap-datasources.yaml` — **templated, never copied**: the backend URL is the one part of Grafana provisioning that differs per environment
-- [ ] Dashboards ConfigMap — created by the operator (`kubectl create configmap grafana-dashboards --from-file=observability/grafana/dashboards/`), name configurable via `dashboards.configMapName`. Helm cannot read files outside its own chart dir, and this keeps one source of truth instead of copies that drift. Mount is **not** `optional`: a missing ConfigMap must leave the pod in `ContainerCreating` naming what is absent, which is louder than a Grafana that starts happily with no dashboards
-- [ ] `templates/NOTES.txt` — print that exact `kubectl create configmap` command on install
-- [ ] `templates/secret.yaml` — Grafana admin password. **No default in `values.yaml`**: `CLAUDE.md` forbids secrets in git, and a shipped default is how a demo password reaches production. Require `admin.password` or `admin.existingSecret`, failing rendering with a clear message if given neither
-- [ ] `templates/service.yaml` — Grafana Service
+- [x] `templates/deployment.yaml` — stateless Deployment; three mounts (templated datasources, shipped dashboard provider, operator-created dashboards)
+- [x] `templates/configmap-datasources.yaml` — **templated, never copied**: the backend URL is the one part of Grafana provisioning that differs per environment
+- [x] Dashboards ConfigMap — created by the operator (`kubectl create configmap grafana-dashboards --from-file=observability/grafana/dashboards/`), name configurable via `dashboards.configMapName`. Helm cannot read files outside its own chart dir, and this keeps one source of truth instead of copies that drift. Mount is **not** `optional`: a missing ConfigMap must leave the pod in `ContainerCreating` naming what is absent, which is louder than a Grafana that starts happily with no dashboards
+- [x] `templates/NOTES.txt` — print that exact `kubectl create configmap` command on install
+- [x] `templates/secret.yaml` — Grafana admin password. **No default in `values.yaml`**: `CLAUDE.md` forbids secrets in git, and a shipped default is how a demo password reaches production. Require `admin.password` or `admin.existingSecret`, failing rendering with a clear message if given neither
+- [x] `templates/service.yaml` — Grafana Service
 
 **Producers chart** — `deployments/helm/producers/`
 - [ ] `templates/deployment-sample-app.yaml` + `templates/deployment-load-generator.yaml` — reuse the existing `sampleapp`/`loadgen` Dockerfile stages unchanged; both address the backend via `backend.url`. Without this chart a fresh deploy renders three empty dashboards
