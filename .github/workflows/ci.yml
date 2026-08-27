@@ -34,6 +34,12 @@ jobs:
       - name: Build
         run: go build ./...
 
+      # tests/e2e/helm_test.go calls `helm template` and skips itself when
+      # helm is not on PATH; without this step those chart-validation tests
+      # silently skip on every run.
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
       - name: Test
         run: go test ./...
 
@@ -68,3 +74,28 @@ jobs:
 
       - name: Compose stack test
         run: bash tests/e2e/compose_smoke.sh
+
+  helm-k8s-e2e:
+    name: Helm + Kubernetes E2E (kind)
+    runs-on: ubuntu-latest
+    # tests/e2e/helm_test.go validates the charts without a cluster; only this
+    # job proves the images start, the PVC binds, the probes pass against a
+    # real server, and data survives rescheduling.
+    needs: build-test-lint
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Neither helm nor kind is preinstalled on ubuntu-latest.
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Set up kind
+        uses: helm/kind-action@v1
+        with:
+          install_only: true
+
+      - name: Kind cluster test
+        run: bash tests/e2e/kind_smoke.sh

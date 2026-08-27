@@ -588,13 +588,13 @@ Design: `docs/superpowers/specs/2026-08-26-phase-5.2-kubernetes-helm-design.md` 
 - [x] **Secret hygiene** — rendering Grafana with neither `admin.password` nor `admin.existingSecret` fails, and no chart's defaults contain a password
 
 **Cluster verification** — `.github/workflows/ci.yml` job `helm-k8s-e2e`
-- [ ] New job beside `compose-e2e`; installs `helm` and `kind` via `azure/setup-helm` and `helm/kind-action` (neither is preinstalled on the runner)
-- [ ] Create kind cluster; build `backend`/`sampleapp`/`loadgen` targets and `kind load` all three
+- [x] New job beside `compose-e2e`; installs `helm` and `kind` via `azure/setup-helm` and `helm/kind-action` (neither is preinstalled on the runner)
+- [x] Create kind cluster; build `backend`/`sampleapp`/`loadgen` targets and `kind load` all three
 - [ ] Verify: `helm install` deploys the backend and the StatefulSet rolls out
-- [ ] Run the **documented** `kubectl create configmap` command, so the runbook step is a tested path rather than a hope; then install Grafana and producers
+- [x] Run the **documented** `kubectl create configmap` command, so the runbook step is a tested path rather than a hope; then install Grafana and producers
 - [ ] Verify: data persists across pod restart — ingest a marker with a **run-unique value**, `kubectl delete pod` the backend, wait for reschedule, read the marker back **by value**. Phase 5.1 shipped a restart check that queried a live series the producers kept writing, so fresh samples satisfied it even if every pre-restart sample had been lost; it asserted persistence and proved nothing. The producers chart makes that same failure mode available here
 - [ ] Verify: Grafana queries backend inside Kubernetes — through Grafana's `/api/ds/query`, not the backend's own API
-- [ ] Dump pod state and logs on failure, then delete the cluster
+- [x] Dump pod state and logs on failure, then delete the cluster
 
 **Docs**
 - [ ] `docs/runbooks/kubernetes-demo.md` — prerequisites, ordered install including the ConfigMap step, verification, port-forward, troubleshooting, cleanup
