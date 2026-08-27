@@ -133,8 +133,13 @@ Port-forward the backend and confirm it answers:
 
 ```bash
 kubectl port-forward -n obs svc/observability-backend 8080:8080
-curl -g 'http://localhost:8080/api/v1/query?query=up'
+curl -g 'http://localhost:8080/api/v1/query?query=http_requests_total'
 ```
+
+`up` is a Prometheus scrape-synthesized series; this backend is push-only, so `up`
+never has any data and would make a working deploy look broken. `http_requests_total`
+is written by the load generator installed in step 4, so a non-empty result here is
+real proof the producers are reaching the backend.
 
 In a second terminal, port-forward Grafana and open it in a browser:
 
@@ -147,6 +152,11 @@ The same three dashboards from the Compose demo should be present and, after ~15
 seconds, showing live data from the producers: **Observability Platform Metrics**,
 **Observability Platform Sample App**, and **Observability Platform Logs**.
 
+`make smoke-kind` (`tests/e2e/kind_smoke.sh`) automates everything above end to end in
+a disposable `kind` cluster, plus a pod-restart persistence check and a check that the
+producers are actually reaching the backend — it is CI's `helm-k8s-e2e` job, runnable
+locally the same way.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -154,6 +164,7 @@ seconds, showing live data from the producers: **Observability Platform Metrics*
 | Grafana pod stuck in `ContainerCreating`, event names a missing ConfigMap | the dashboards ConfigMap step was skipped | run the `kubectl create configmap` command, then `kubectl rollout restart deploy/observability-grafana` |
 | `helm install grafana` fails with a message about `admin.password` | no password supplied; the chart ships none by design | pass `--set admin.password=...` or `--set admin.existingSecret=...` |
 | Backend pod `ImagePullBackOff` | the image was never loaded into the cluster | `kind load docker-image observability-platform/backend:dev --name <cluster>` |
+| `kubectl create configmap grafana-dashboards` fails with `already exists` | re-running this runbook in a namespace from a previous, incompletely cleaned-up run | `kubectl delete configmap grafana-dashboards -n obs` (also covered by Cleanup below), then re-run the create command |
 
 ## Cleanup
 
@@ -161,9 +172,15 @@ seconds, showing live data from the producers: **Observability Platform Metrics*
 helm uninstall producers -n obs
 helm uninstall grafana -n obs
 helm uninstall backend -n obs
+kubectl delete configmap grafana-dashboards -n obs
 kubectl delete pvc -n obs --all
 kind delete cluster --name obs-demo
 ```
+
+The dashboards ConfigMap is created directly with `kubectl create`, not by any chart's
+`helm install`, so no `helm uninstall` above removes it — deleting the cluster makes
+this step moot, but leaving it out is what causes the `already exists` failure above
+if you ever reuse the namespace without deleting the cluster.
 
 The PVC is not removed by `helm uninstall` — StatefulSet volumes are left behind on
 purpose, so an accidental uninstall cannot silently delete a WAL. Delete it explicitly,
