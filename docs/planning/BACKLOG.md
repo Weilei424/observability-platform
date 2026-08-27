@@ -561,13 +561,13 @@ Design: `docs/superpowers/specs/2026-08-23-phase-5.1-docker-compose-demo-design.
 Design: `docs/superpowers/specs/2026-08-26-phase-5.2-kubernetes-helm-design.md` · Plan: `docs/superpowers/plans/2026-08-26-phase-5.2-kubernetes-helm.md`
 
 **Backend chart** — `deployments/helm/backend/`
-- [ ] `Chart.yaml` + `values.yaml` — `fullnameOverride: observability-backend` so the ClusterIP Service name does not vary with the release name; both other charts default their `backend.url` to that literal
-- [ ] `templates/statefulset.yaml` — one replica with `volumeClaimTemplates` (default 2Gi, overridable `storageClassName`). StatefulSet rather than Deployment: the backend owns a WAL, blocks, and chunks on disk, and a Deployment on a ReadWriteOnce volume deadlocks on rolling update — the new pod waits forever for a volume the old pod still holds, which presents as a hung deploy rather than an error
-- [ ] `templates/statefulset.yaml` probes — **`httpGet`, not the `/server -healthcheck` exec mode.** Kubelet probes from outside the container, so the distroless no-shell constraint that forced the exec probe in Compose does not apply. Startup + readiness on `/readyz` (which also proves the data dir is writable), liveness on `/healthz` (bare 200, so a full volume cannot trigger a restart loop). The startup probe is load-bearing: WAL replay can outlast a readiness deadline, and without it a slow replay becomes an infinite restart
-- [ ] `templates/statefulset.yaml` securityContext — `runAsNonRoot`, uid 65532, `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, all capabilities dropped
-- [ ] `templates/configmap.yaml` — `OBS_*` env vars via `envFrom`; `OBS_DATA_DIR: /data` matching the volume mount
-- [ ] `templates/service.yaml` — headless Service for StatefulSet identity + ClusterIP on 8080
-- [ ] `values.yaml` image block — `IfNotPresent` so a `kind load`ed image is used without a registry
+- [x] `Chart.yaml` + `values.yaml` — `fullnameOverride: observability-backend` so the ClusterIP Service name does not vary with the release name; both other charts default their `backend.url` to that literal
+- [x] `templates/statefulset.yaml` — one replica with `volumeClaimTemplates` (default 2Gi, overridable `storageClassName`). StatefulSet rather than Deployment: the backend owns a WAL, blocks, and chunks on disk, and a Deployment on a ReadWriteOnce volume deadlocks on rolling update — the new pod waits forever for a volume the old pod still holds, which presents as a hung deploy rather than an error
+- [x] `templates/statefulset.yaml` probes — **`httpGet`, not the `/server -healthcheck` exec mode.** Kubelet probes from outside the container, so the distroless no-shell constraint that forced the exec probe in Compose does not apply. Startup + readiness on `/readyz` (which also proves the data dir is writable), liveness on `/healthz` (bare 200, so a full volume cannot trigger a restart loop). The startup probe is load-bearing: WAL replay can outlast a readiness deadline, and without it a slow replay becomes an infinite restart
+- [x] `templates/statefulset.yaml` securityContext — `runAsNonRoot`, uid 65532, `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, all capabilities dropped
+- [x] `templates/configmap.yaml` — `OBS_*` env vars via `envFrom`; `OBS_DATA_DIR: /data` matching the volume mount
+- [x] `templates/service.yaml` — headless Service for StatefulSet identity + ClusterIP on 8080
+- [x] `values.yaml` image block — `IfNotPresent` so a `kind load`ed image is used without a registry
 
 **Grafana chart** — `deployments/helm/grafana/`
 - [ ] `templates/deployment.yaml` — stateless Deployment; three mounts (templated datasources, shipped dashboard provider, operator-created dashboards)

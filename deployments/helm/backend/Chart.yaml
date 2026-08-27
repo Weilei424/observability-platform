@@ -1,0 +1,6 @@
+apiVersion: v2
+name: observability-platform-backend
+description: Single-node observability backend — Prometheus- and Loki-compatible APIs over custom WAL, chunk, and block storage
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

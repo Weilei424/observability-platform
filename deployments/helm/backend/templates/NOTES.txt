@@ -1,0 +1,11 @@
+observability-platform backend installed as release {{ .Release.Name }}.
+
+Wait for it to become ready:
+  kubectl rollout status statefulset/{{ include "backend.name" . }} -n {{ .Release.Namespace }}
+
+Reach the API locally:
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "backend.name" . }} 8080:{{ .Values.service.port }}
+  curl -g 'http://localhost:8080/api/v1/query?query=up'
+
+Other charts address this backend at:
+  http://{{ include "backend.name" . }}:{{ .Values.service.port }}

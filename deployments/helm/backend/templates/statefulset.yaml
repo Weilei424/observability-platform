@@ -1,0 +1,90 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "backend.name" . }}
+  labels:
+    {{- include "backend.labels" . | nindent 4 }}
+spec:
+  # One replica, deliberately. Two pods would each own a private PVC and a
+  # private WAL, so a query would see whichever shard it landed on. Phase 6
+  # makes replicas meaningful.
+  replicas: 1
+  serviceName: {{ include "backend.name" . }}-headless
+  selector:
+    matchLabels:
+      {{- include "backend.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "backend.labels" . | nindent 8 }}
+      annotations:
+        # Roll the pod when configuration changes; without this a ConfigMap edit
+        # leaves the old env vars in the running container indefinitely.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      containers:
+        - name: backend
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "backend.name" . }}-config
+          # httpGet, not the /server -healthcheck exec mode: kubelet performs
+          # the request itself, from outside the container, so the distroless
+          # no-shell constraint that forces an exec probe in Compose does not
+          # apply here.
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: {{ .Values.startupProbe.periodSeconds }}
+            # WAL replay on a large volume can outlast a readiness deadline.
+            # Without this budget a slow replay is killed and restarts into the
+            # same replay, forever.
+            failureThreshold: {{ .Values.startupProbe.failureThreshold }}
+          readinessProbe:
+            # /readyz also proves the data directory is writable — it creates
+            # and removes a temp file there (internal/api/handlers.go).
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            # /healthz is a bare 200 and touches no disk. Pointing liveness at
+            # /readyz would turn a full volume into an endless restart loop.
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.config.OBS_DATA_DIR }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        {{- if .Values.persistence.storageClassName }}
+        storageClassName: {{ .Values.persistence.storageClassName }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}

@@ -1,0 +1,43 @@
+# The Service name is pinned rather than derived from the release name, because
+# the grafana and producers charts default their backend.url to this exact
+# literal. Changing it here means changing it in both of those charts too;
+# tests/e2e/helm_test.go fails if they disagree.
+fullnameOverride: observability-backend
+
+image:
+  repository: observability-platform/backend
+  tag: dev
+  # IfNotPresent so a locally built image loaded with `kind load docker-image`
+  # is used as-is. Always would make the kubelet try to pull from a registry
+  # that does not have it, and the pod would sit in ImagePullBackOff.
+  pullPolicy: IfNotPresent
+
+service:
+  port: 8080
+
+persistence:
+  size: 2Gi
+  # Empty means the cluster default StorageClass. kind provides local-path.
+  storageClassName: ""
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+# Every key below must be one viper actually reads; it silently ignores unknown
+# OBS_* variables, so a typo here would be invisible at runtime rather than an
+# error. tests/e2e/helm_test.go cross-references these against
+# internal/config/config.go.
+config:
+  OBS_DATA_DIR: /data
+  OBS_LOG_LEVEL: info
+  OBS_RETENTION: 0s
+
+# Startup probe budget: failureThreshold * periodSeconds is how long WAL replay
+# is allowed to take before the pod is killed. 30 * 5s = 150s.
+startupProbe:
+  periodSeconds: 5
+  failureThreshold: 30

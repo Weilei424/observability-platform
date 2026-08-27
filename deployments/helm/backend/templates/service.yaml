@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "backend.name" . }}
+  labels:
+    {{- include "backend.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "backend.selectorLabels" . | nindent 4 }}
+---
+# Headless Service: gives the StatefulSet stable per-pod DNS. Required by the
+# StatefulSet's serviceName field even with a single replica.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "backend.name" . }}-headless
+  labels:
+    {{- include "backend.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "backend.selectorLabels" . | nindent 4 }}
