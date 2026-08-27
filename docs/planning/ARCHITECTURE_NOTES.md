@@ -327,8 +327,72 @@ wget — so its Compose healthcheck execs the server binary itself: `/server -he
 probes `/readyz` over loopback and exits 0 or 1. `/readyz` creates and removes a temp
 file in the data directory, so a passing probe means the process is serving *and* its
 storage is writable. Both producers wait on `condition: service_healthy`; Grafana does
-not, because its datasources are `access: proxy` and resolved on first query. Phase 5.2
-reuses the same command as a Kubernetes exec probe.
+not, because its datasources are `access: proxy` and resolved on first query. Phase 5.2's
+Kubernetes probes use `httpGet` instead of this exec command — see "Kubernetes topology"
+below for why the two environments correctly differ here.
+
+### Kubernetes topology (introduced in 5.2)
+
+Three separate Helm charts under `deployments/helm/` — `backend`, `grafana`,
+`producers` — rather than one umbrella chart, because they scale and fail
+independently: the backend is stateful and singular, Grafana is stateless and singular,
+and the producers are optional demo traffic an operator might disable or scale without
+touching either of the other two.
+
+**Cross-chart contract.** The grafana and producers charts both default `backend.url` to
+`http://observability-backend:8080` — the literal Service name the backend chart creates
+via its pinned `fullnameOverride: observability-backend`. Helm renders each chart in
+isolation and never checks a claim one chart makes about another, so two charts silently
+pointing at a Service the third no longer creates is possible with every chart still
+linting clean. `tests/e2e/helm_test.go`'s `TestCrossChartBackendURLResolves` is the
+Kubernetes analogue of `TestLokiDatasourceURLMatchesComposeBackend` (which
+cross-references `docker-compose.yml` instead of trusting a literal): it renders all
+three charts and fails if any `backend.url` doesn't resolve to a Service name and port
+the backend chart's own rendered output actually defines.
+
+**StatefulSet, not Deployment.** The backend owns a WAL and on-disk chunks/blocks on a
+`ReadWriteOnce` volume. A Deployment's rolling update starts the new pod before
+terminating the old one; the new pod would wait forever for a volume the old pod still
+holds, which presents as a hung rollout rather than a clear error. A StatefulSet
+terminates the old pod first. `volumeClaimTemplates` gives each pod (there is only one)
+its own PVC, which also seeds Phase 6 — sharding needs one PVC per shard, and the
+StatefulSet's stable per-pod identity (via a headless Service) is what a ring assigns
+shards to.
+
+**The `httpGet`-over-exec probe correction.** Kubernetes probes are performed by the
+kubelet from outside the container, unlike Docker Compose's healthcheck, which execs a
+command *inside* the container. The backend's runtime image is distroless — no shell —
+which is exactly why the Compose healthcheck has to exec the server binary's own
+`-healthcheck` mode instead of a normal `curl`. That constraint does not apply to a
+kubelet probe, because it never enters the container to run anything; it just makes an
+HTTP request from the node. So the Kubernetes StatefulSet uses plain `httpGet` probes —
+startup and readiness against `/readyz`, liveness against `/healthz` — while Compose
+correctly keeps its exec-based healthcheck. Neither is a mistake; each is right for the
+mechanism its platform actually uses to probe. The startup probe carries a 150-second
+budget (`periodSeconds: 5` × `failureThreshold: 30`), because WAL replay on a large
+volume can outlast a readiness deadline, and without that budget a slow replay would be
+killed and simply restart into the same replay, forever. Liveness is pinned to
+`/healthz` rather than `/readyz` specifically because `/readyz` touches disk (it creates
+and removes a temp file to prove the data directory is writable); pointing liveness at
+it would turn a full volume into an endless restart loop instead of a clear "not ready."
+
+**The dashboards ConfigMap is operator-created, not chart-shipped.** Helm can only read
+files inside its own chart directory, so copying
+`observability/grafana/dashboards/` into the grafana chart would fork a second copy that
+drifts from the one Compose provisions. Instead the chart mounts a ConfigMap
+(`dashboards.configMapName`, default `grafana-dashboards`) that the operator creates
+directly from that directory before installing the chart — one source of truth instead
+of two. The mount is deliberately **not** `optional`: a missing ConfigMap leaves the pod
+in `ContainerCreating`, naming exactly what's absent, which is louder than a Grafana
+that starts happily with three empty dashboards. `tests/e2e/kind_smoke.sh` runs the
+documented `kubectl create configmap` command verbatim in CI, so the runbook step is a
+tested path rather than a hope.
+
+**Single-replica ceiling.** The backend StatefulSet runs one replica, deliberately, not
+as a temporary gap. Each replica would own a private PVC and a private WAL; with more
+than one, a query would see whichever shard happened to receive it, with no merge across
+replicas. That ceiling is real and is recorded here rather than hidden — resolving it is
+exactly what Phase 6's ring-based sharding and query fanout are for.
 
 ### LogQL metric queries (introduced in 4.6)
 
