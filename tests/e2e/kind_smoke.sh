@@ -25,6 +25,26 @@ FAIL=0
 log_pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 log_fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 
+# wait_for_port <label> <timeout-seconds> <url> — polls a freshly started
+# port-forward until it actually answers, instead of guessing with a fixed
+# sleep. Following compose_smoke.sh's own rule: a polling loop's deadline only
+# means something if each attempt is guaranteed to return, so every curl here
+# carries its own --max-time — a tunnel that accepts the connection and then
+# stalls would otherwise hang the whole loop instead of letting it retry.
+wait_for_port() {
+    local label="$1" timeout="$2" url="$3"
+    local start=$SECONDS
+    while [ $((SECONDS - start)) -lt "$timeout" ]; do
+        if curl -sf --max-time 5 "$url" >/dev/null 2>&1; then
+            log_pass "$label ($((SECONDS - start))s)"
+            return 0
+        fi
+        sleep 1
+    done
+    log_fail "$label — not ready after ${timeout}s"
+    return 1
+}
+
 for tool in kind kubectl helm docker jq; do
     command -v "$tool" >/dev/null 2>&1 || { echo "FATAL: $tool is required" >&2; exit 2; }
 done
@@ -134,7 +154,7 @@ echo ""
 echo "-- Seeding a restart marker --"
 kubectl port-forward -n "$NS" svc/observability-backend 18080:8080 >/dev/null 2>&1 &
 PF_PID=$!
-sleep 5
+wait_for_port "backend port-forward is ready" 30 "http://localhost:18080/healthz"
 
 # A run-unique value, on a series nothing else writes. Querying a live producer
 # series after the restart would prove nothing: the producers keep writing
@@ -166,7 +186,7 @@ fi
 
 kubectl port-forward -n "$NS" svc/observability-backend 18080:8080 >/dev/null 2>&1 &
 PF_PID=$!
-sleep 5
+wait_for_port "backend port-forward is ready (post-restart)" 30 "http://localhost:18080/healthz"
 
 BODY=$(curl -sg --max-time 15 "http://localhost:18080/api/v1/query?query=k8s_e2e_marker")
 if printf '%s' "$BODY" | jq -e --argjson want "$MARKER_VALUE" \
@@ -182,7 +202,7 @@ echo ""
 echo "-- Querying through Grafana --"
 kubectl port-forward -n "$NS" svc/observability-grafana 13000:3000 >/dev/null 2>&1 &
 PF_PID=$!
-sleep 8
+wait_for_port "grafana port-forward is ready" 30 "http://localhost:13000/api/health"
 
 # Through Grafana's own API, not the backend's: this is what proves the
 # in-cluster datasource URL resolves and Grafana can reach the backend Service.
@@ -197,7 +217,11 @@ fi
 DSQ=$(curl -s --max-time 20 -u "admin:e2e-only" -H 'Content-Type: application/json' \
     -X POST "http://localhost:13000/api/ds/query" \
     -d '{"queries":[{"refId":"A","datasource":{"type":"prometheus","uid":"obs-prometheus"},"expr":"k8s_e2e_marker","range":true,"intervalMs":5000,"maxDataPoints":100}],"from":"now-15m","to":"now"}')
-if printf '%s' "$DSQ" | grep -q '"error"'; then
+# Look for the error *key*, not the bare word — this response is Grafana's
+# dataframe JSON over a metric series, and a field unrelated to failure could
+# legitimately contain the substring "error" (compose_smoke.sh's check_absent
+# makes the same distinction for the same reason).
+if printf '%s' "$DSQ" | grep -q '"error":"'; then
     log_fail "Grafana query returned an error: $DSQ"
 else
     log_pass "Grafana queries the backend inside Kubernetes"
