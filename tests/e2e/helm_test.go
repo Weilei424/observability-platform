@@ -43,7 +43,17 @@ type k8sObject struct {
 			Port int    `yaml:"port"`
 			Name string `yaml:"name"`
 		} `yaml:"ports"`
+		// Selector is a Service's pod selector: a flat map[string]string. A
+		// Deployment/StatefulSet also has a spec.selector key, but shaped as
+		// {matchLabels: {...}} — a nested map, not a flat string map — so this
+		// field is typed loosely (map[string]any) to decode either shape
+		// without error, and is only interpreted as a flat string map where the
+		// caller has already checked Kind == "Service".
+		Selector map[string]any `yaml:"selector"`
 		Template struct {
+			Metadata struct {
+				Labels map[string]string `yaml:"labels"`
+			} `yaml:"metadata"`
 			Spec struct {
 				Containers []struct {
 					Name           string `yaml:"name"`
@@ -76,10 +86,17 @@ type probe struct {
 }
 
 // helmAvailable skips the test when helm is not installed. These tests shell
-// out, so a missing binary is an environment gap, not a failure of the charts.
+// out, so a missing binary is an environment gap, not a failure of the charts
+// — except in CI, where a missing helm means the "Set up Helm" step regressed
+// or was removed, and a silent skip would look identical to a pass. CI sets
+// the CI environment variable by convention (GitHub Actions, among others),
+// so that's what distinguishes the two cases.
 func helmAvailable(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("helm"); err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatalf("helm is not installed, and CI is set; these chart tests must not silently skip in CI: %v", err)
+		}
 		t.Skip("helm is not installed; skipping chart validation")
 	}
 }
@@ -159,8 +176,9 @@ func TestChartsLint(t *testing.T) {
 func TestCrossChartBackendURLResolves(t *testing.T) {
 	backend := render(t, backendChart)
 
-	// Collect every Service name and the ports it exposes.
+	// Collect every Service name, the ports it exposes, and its pod selector.
 	services := map[string]map[int]bool{}
+	selectors := map[string]map[string]string{}
 	for _, o := range backend {
 		if o.Kind != "Service" {
 			continue
@@ -170,9 +188,33 @@ func TestCrossChartBackendURLResolves(t *testing.T) {
 			ports[p.Port] = true
 		}
 		services[o.Metadata.Name] = ports
+		sel := map[string]string{}
+		for k, v := range o.Spec.Selector {
+			if s, ok := v.(string); ok {
+				sel[k] = s
+			}
+		}
+		selectors[o.Metadata.Name] = sel
 	}
 	if len(services) == 0 {
 		t.Fatal("backend chart rendered no Services")
+	}
+
+	// The StatefulSet's pod template labels, to check each Service selector
+	// actually matches pods the backend chart creates — a Service can exist,
+	// name the right port, and still select zero pods (a typo'd label, or a
+	// selector that drifted from the pod template), leaving Grafana with a
+	// perfectly valid-looking datasource pointed at an endpoint-less Service.
+	// helm lint and every check above this pass regardless.
+	var podLabels map[string]string
+	for _, o := range backend {
+		if o.Kind != "StatefulSet" {
+			continue
+		}
+		podLabels = o.Spec.Template.Metadata.Labels
+	}
+	if len(podLabels) == 0 {
+		t.Fatal("backend chart rendered no StatefulSet with pod template labels")
 	}
 
 	// Every backend URL asserted by the other two charts.
@@ -230,6 +272,21 @@ func TestCrossChartBackendURLResolves(t *testing.T) {
 		}
 		if !ports[port] {
 			t.Errorf("%s points at %s:%d, but that Service exposes %v", who, host, port, ports)
+		}
+
+		// A Service can name the right port and still route to nothing: its
+		// selector must be a subset of the actual pod template labels, or
+		// Kubernetes creates the Service with zero Endpoints and every request
+		// through it fails, silently, forever.
+		sel := selectors[host]
+		if len(sel) == 0 {
+			t.Errorf("%s points at Service %q, which has no pod selector; it would have no Endpoints", who, host)
+			continue
+		}
+		for k, v := range sel {
+			if podLabels[k] != v {
+				t.Errorf("%s points at Service %q, whose selector %v is not satisfied by the backend pod template labels %v (key %q wants %q, pod has %q); the Service would have no Endpoints", who, host, sel, podLabels, k, v, podLabels[k])
+			}
 		}
 	}
 }
