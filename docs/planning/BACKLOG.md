@@ -581,11 +581,11 @@ Design: `docs/superpowers/specs/2026-08-26-phase-5.2-kubernetes-helm-design.md` 
 - [x] `templates/deployment-sample-app.yaml` + `templates/deployment-load-generator.yaml` — reuse the existing `sampleapp`/`loadgen` Dockerfile stages unchanged; both address the backend via `backend.url`. Without this chart a fresh deploy renders three empty dashboards
 
 **Static verification** — `tests/e2e/helm_test.go` *(no cluster, runs in `go test ./...`; skips with a clear message if `helm` is absent)*
-- [ ] `helm lint` passes for all three charts; `helm template` renders and the output parses as a stream of K8s objects
-- [ ] **Cross-chart URL check** — every backend URL in the rendered Grafana and producers output resolves to a Service name *and port* the rendered backend output actually defines. Two charts make a claim about a third that Helm never checks; this is the K8s analogue of `TestLokiDatasourceURLMatchesComposeBackend`, which cross-references `docker-compose.yml` rather than trusting a literal
-- [ ] **Probe paths exist** — each rendered `httpGet.path` appears in `internal/api/router.go`. A probe pointed at a nonexistent path fails every pod without ever failing a test
-- [ ] **Config keys are real** — every backend ConfigMap key corresponds to a `v.SetDefault` in `internal/config/config.go`. Viper silently ignores unknown env vars, so a typo'd key is invisible at runtime
-- [ ] **Secret hygiene** — rendering Grafana with neither `admin.password` nor `admin.existingSecret` fails, and no chart's defaults contain a password
+- [x] `helm lint` passes for all three charts; `helm template` renders and the output parses as a stream of K8s objects
+- [x] **Cross-chart URL check** — every backend URL in the rendered Grafana and producers output resolves to a Service name *and port* the rendered backend output actually defines. Two charts make a claim about a third that Helm never checks; this is the K8s analogue of `TestLokiDatasourceURLMatchesComposeBackend`, which cross-references `docker-compose.yml` rather than trusting a literal
+- [x] **Probe paths exist** — each rendered `httpGet.path` appears in `internal/api/router.go`. A probe pointed at a nonexistent path fails every pod without ever failing a test
+- [x] **Config keys are real** — every backend ConfigMap key corresponds to a `v.SetDefault` in `internal/config/config.go`. Viper silently ignores unknown env vars, so a typo'd key is invisible at runtime
+- [x] **Secret hygiene** — rendering Grafana with neither `admin.password` nor `admin.existingSecret` fails, and no chart's defaults contain a password
 
 **Cluster verification** — `.github/workflows/ci.yml` job `helm-k8s-e2e`
 - [ ] New job beside `compose-e2e`; installs `helm` and `kind` via `azure/setup-helm` and `helm/kind-action` (neither is preinstalled on the runner)
