@@ -1,4 +1,4 @@
-.PHONY: build test lint run local-up local-down local-logs local-reset smoke smoke-logs smoke-compose bench bench-go bench-k6 help
+.PHONY: build test lint run local-up local-down local-logs local-reset smoke smoke-logs smoke-compose smoke-kind bench bench-go bench-k6 help
 
 ## build: Compile the backend binary
 build:
@@ -54,6 +54,10 @@ smoke-logs:
 ## smoke-compose: Bring up the Compose stack and test it through Grafana's API (needs Docker; ports 3000/8080 free)
 smoke-compose:
 	bash tests/e2e/compose_smoke.sh
+
+## smoke-kind: Deploy all three Helm charts into a kind cluster and test the restart/persistence path (needs kind, kubectl, helm, docker)
+smoke-kind:
+	bash tests/e2e/kind_smoke.sh
 
 ## bench-go: Run Go micro-benchmarks (storage/query engine, in-process)
 bench-go:
