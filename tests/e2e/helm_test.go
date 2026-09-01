@@ -61,8 +61,13 @@ type k8sObject struct {
 					ReadinessProbe *probe `yaml:"readinessProbe"`
 					LivenessProbe  *probe `yaml:"livenessProbe"`
 					Env            []struct {
-						Name  string `yaml:"name"`
-						Value string `yaml:"value"`
+						Name      string `yaml:"name"`
+						Value     string `yaml:"value"`
+						ValueFrom *struct {
+							FieldRef *struct {
+								FieldPath string `yaml:"fieldPath"`
+							} `yaml:"fieldRef"`
+						} `yaml:"valueFrom"`
 					} `yaml:"env"`
 				} `yaml:"containers"`
 				Volumes []struct {
@@ -251,8 +256,27 @@ func TestCrossChartBackendURLResolves(t *testing.T) {
 			}
 		}
 	}
-	if len(urls) < 3 {
-		t.Fatalf("expected at least 3 backend URLs (grafana + 2 producers), found %d: %v", len(urls), urls)
+	// The exact set, not a minimum count. Four consumers point at the backend:
+	// Grafana's two datasources and both producer containers. A `>= 3` bar
+	// passes when one of them is missing entirely — drop OBS_BACKEND_ADDR from
+	// the sample-app container and three URLs remain, all of them valid, while
+	// the sample-app and logs dashboards go permanently empty. Naming the keys
+	// also catches a container being renamed out from under this test, which a
+	// count alone cannot see.
+	wantURLs := []string{
+		"grafana datasource #1",
+		"grafana datasource #2",
+		"producers/load-generator",
+		"producers/sample-app",
+	}
+	for _, who := range wantURLs {
+		if _, ok := urls[who]; !ok {
+			t.Errorf("no backend URL found for %q; found %v", who, urls)
+		}
+	}
+	if len(urls) != len(wantURLs) {
+		t.Fatalf("expected exactly %d backend URLs (%v), found %d: %v",
+			len(wantURLs), wantURLs, len(urls), urls)
 	}
 
 	for who, url := range urls {
@@ -385,6 +409,75 @@ func TestBackendConfigKeysAreReal(t *testing.T) {
 	}
 	if checked == 0 {
 		t.Fatal("no ConfigMap keys were checked; the backend chart must have changed shape")
+	}
+}
+
+// TestBackendRejectsHTTPAddrOverride pins service.port as the single owner of
+// the listen port.
+//
+// The ConfigMap derives OBS_HTTP_ADDR from service.port and then emits every
+// .Values.config entry, so a config.OBS_HTTP_ADDR would render the key twice in
+// one ConfigMap: rejected outright by some parsers, and silently last-write-wins
+// in others — which leaves the server listening on one port while the Services
+// and all three probes still point at another.
+func TestBackendRejectsHTTPAddrOverride(t *testing.T) {
+	helmAvailable(t)
+
+	out, err := exec.Command("helm", "template", "backend", backendChart,
+		"--set-string", "config.OBS_HTTP_ADDR=:9090").CombinedOutput()
+	if err == nil {
+		t.Fatalf("helm template accepted config.OBS_HTTP_ADDR; it must fail instead.\nRendered:\n%s", out)
+	}
+	if !strings.Contains(string(out), "service.port") {
+		t.Errorf("the rejection message does not name service.port, so it does not tell the operator what to set instead: %s", out)
+	}
+
+	// The supported knob still works, and still produces exactly one key.
+	for _, o := range render(t, backendChart, "service.port=9090") {
+		if o.Kind != "ConfigMap" {
+			continue
+		}
+		if got := o.Data["OBS_HTTP_ADDR"]; got != ":9090" {
+			t.Errorf("OBS_HTTP_ADDR = %q with service.port=9090, want %q", got, ":9090")
+		}
+	}
+}
+
+// TestProducersCarryPodInstanceLabel pins the per-pod series identity that makes
+// the replicas knobs safe.
+//
+// Both generators keep their counters in process memory. Two replicas emitting
+// identical label sets are two independent counters under one series identity:
+// samples interleave at the same timestamps and rate() reads every switch
+// between them as a counter reset. The env var below is what the generators turn
+// into an `instance` label, so a replicas value above 1 is only correct while it
+// is present.
+func TestProducersCarryPodInstanceLabel(t *testing.T) {
+	var checked int
+	for _, o := range render(t, producersChart) {
+		for _, c := range o.Spec.Template.Spec.Containers {
+			var found bool
+			for _, e := range c.Env {
+				if e.Name != "OBS_INSTANCE" {
+					continue
+				}
+				found = true
+				if e.ValueFrom == nil || e.ValueFrom.FieldRef == nil {
+					t.Errorf("%s: OBS_INSTANCE must come from the downward API, not a literal value %q", c.Name, e.Value)
+					continue
+				}
+				if got := e.ValueFrom.FieldRef.FieldPath; got != "metadata.name" {
+					t.Errorf("%s: OBS_INSTANCE fieldPath = %q, want %q — anything shared between replicas defeats the label", c.Name, got, "metadata.name")
+				}
+			}
+			if !found {
+				t.Errorf("%s: no OBS_INSTANCE env var; with replicas > 1 its samples would collide with the other replicas' under one series identity", c.Name)
+			}
+			checked++
+		}
+	}
+	if checked != 2 {
+		t.Fatalf("checked %d producer containers, want 2 (sample-app and load-generator)", checked)
 	}
 }
 
