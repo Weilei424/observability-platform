@@ -297,7 +297,28 @@ kill "$PF_PID" 2>/dev/null; PF_PID=""
 # ---- Restart ---------------------------------------------------------
 echo ""
 echo "-- Deleting the backend pod --"
-kubectl delete pod observability-backend-0 -n "$NS" --wait=true
+# The UID of the pod that holds the marker, read BEFORE the delete.
+#
+# A StatefulSet pod keeps its name across a reschedule, so every check in this
+# section — rollout status, `kubectl wait --for=condition=Ready`, the query
+# itself — is satisfied by the ORIGINAL pod if the delete never happened. And
+# the delete's exit status was unchecked while this script deliberately runs
+# without `set -e`, so an RBAC denial, a typo'd name, or a webhook rejection
+# left the process untouched and the marker was read back out of the very
+# memory the restart was supposed to prove it had left. The UID is the one
+# identifier that must change; comparing it is what makes this a restart test
+# rather than a query test.
+OLD_UID=$(kubectl get pod observability-backend-0 -n "$NS" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+if [ -z "$OLD_UID" ]; then
+    log_fail "could not read the backend pod UID before the restart"
+fi
+
+if kubectl delete pod observability-backend-0 -n "$NS" --wait=true; then
+    log_pass "deleted the backend pod"
+else
+    log_fail "deleting the backend pod failed — nothing below this actually tests a restart"
+fi
+
 if kubectl rollout status statefulset/observability-backend -n "$NS" --timeout="$ROLLOUT_TIMEOUT"; then
     log_pass "StatefulSet rescheduled the pod"
 else
@@ -316,6 +337,19 @@ if kubectl wait --for=condition=Ready "pod/observability-backend-0" -n "$NS" --t
     log_pass "replacement pod reached Ready"
 else
     log_fail "replacement pod did not reach Ready"
+fi
+
+# Same name, different object: this is the assertion that the marker below is
+# read out of a process that started after the delete.
+NEW_UID=$(kubectl get pod observability-backend-0 -n "$NS" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+if [ -z "$NEW_UID" ]; then
+    log_fail "could not read the backend pod UID after the restart"
+elif [ -z "$OLD_UID" ]; then
+    : # already counted above; nothing to compare against
+elif [ "$NEW_UID" = "$OLD_UID" ]; then
+    log_fail "the backend pod was never replaced — UID is still $OLD_UID, so the persistence check below would read the original process"
+else
+    log_pass "the pod is a new object ($OLD_UID -> $NEW_UID)"
 fi
 
 # Retry the port-forward itself, not just the poll: a port-forward started in
