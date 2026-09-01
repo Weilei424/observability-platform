@@ -54,7 +54,7 @@ func seriesKey(name string, labels map[string]string) string {
 // name or a dropped label would still render a dashboard panel — an empty one —
 // so nothing else in the suite would notice.
 func TestSamples_ExactlyTheDocumentedSeries(t *testing.T) {
-	w := newWorkload()
+	w := newWorkload("")
 	w.tick(rand.New(rand.NewSource(1)))
 
 	got := w.samples(1_700_000_000_000)
@@ -80,7 +80,7 @@ func TestSamples_ExactlyTheDocumentedSeries(t *testing.T) {
 // strongest form of the invariant, and it does not depend on which way a
 // particular rand seed rolls.
 func TestSamples_ErrorCountersArePresentBeforeAnyError(t *testing.T) {
-	w := newWorkload()
+	w := newWorkload("")
 
 	var found int
 	for _, s := range w.samples(1) {
@@ -99,7 +99,7 @@ func TestSamples_ErrorCountersArePresentBeforeAnyError(t *testing.T) {
 // TestTick_CountersAreMonotonicAndBounded runs the simulation long enough to
 // exercise both clamp directions of the worker random walk.
 func TestTick_CountersAreMonotonicAndBounded(t *testing.T) {
-	w := newWorkload()
+	w := newWorkload("")
 	r := rand.New(rand.NewSource(7))
 
 	prev := map[string]float64{}
@@ -146,7 +146,7 @@ func TestTick_CountersAreMonotonicAndBounded(t *testing.T) {
 // the same validators the ingest handler uses, so a generator change ingest
 // would reject fails here instead of silently producing an empty dashboard.
 func TestEncodeMetrics_PayloadPassesRealValidators(t *testing.T) {
-	w := newWorkload()
+	w := newWorkload("")
 	r := rand.New(rand.NewSource(3))
 	var all []metricSample
 	for i := 0; i < 50; i++ {
@@ -241,4 +241,43 @@ func TestPostMetrics_RequestShape(t *testing.T) {
 	if gotType != "application/json" {
 		t.Errorf("Content-Type = %q, want application/json", gotType)
 	}
+}
+
+// TestSamples_InstanceLabel covers the per-pod series identity that makes
+// sampleApp.replicas > 1 safe. The counters are process-local, so two replicas
+// writing the same label set are two independent counters under one series
+// identity — interleaved samples at identical timestamps, which rate() reads as
+// repeated counter resets.
+func TestSamples_InstanceLabel(t *testing.T) {
+	t.Run("omitted when unset", func(t *testing.T) {
+		for _, s := range newWorkload("").samples(1) {
+			if v, ok := s.Labels["instance"]; ok {
+				t.Errorf("%s carries instance=%q with no instance configured; Compose and `go run` must keep their existing series", s.Name, v)
+			}
+		}
+	})
+
+	t.Run("on every series when set", func(t *testing.T) {
+		got := newWorkload("observability-producers-sample-app-abc12").samples(1)
+		if len(got) != len(wantSeries) {
+			t.Fatalf("samples() returned %d series, want %d", len(got), len(wantSeries))
+		}
+		for _, s := range got {
+			// Every series, not most: one unlabelled series is enough to
+			// reintroduce the collision for that series.
+			if s.Labels["instance"] != "observability-producers-sample-app-abc12" {
+				t.Errorf("%s: instance = %q, want the configured pod name", s.Name, s.Labels["instance"])
+			}
+		}
+	})
+
+	t.Run("two replicas produce distinct series", func(t *testing.T) {
+		a := newWorkload("pod-a").samples(1)
+		b := newWorkload("pod-b").samples(1)
+		for i := range a {
+			if seriesKey(a[i].Name, a[i].Labels) == seriesKey(b[i].Name, b[i].Labels) {
+				t.Errorf("series %d has the same identity for both replicas: %s", i, seriesKey(a[i].Name, a[i].Labels))
+			}
+		}
+	})
 }
