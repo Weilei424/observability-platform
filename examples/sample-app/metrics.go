@@ -53,10 +53,27 @@ type workload struct {
 	getErrors, postErrors   int64
 	getLatency, postLatency float64
 	activeWorkers           float64
+
+	// instance distinguishes this process's series from another replica's.
+	// See newWorkload.
+	instance string
 }
 
-func newWorkload() *workload {
-	return &workload{activeWorkers: 4}
+// newWorkload starts the simulation. instance is the value of the `instance`
+// label on every series this process writes; empty means no such label.
+//
+// The label is what makes replicas > 1 safe. Counters live in process memory,
+// so two replicas emitting identical label sets are two independent counters
+// sharing one series identity: their samples interleave at the same timestamps
+// and every switch between them looks to rate() like a counter reset, which
+// silently understates the Request Rate and Error Rate panels. The Deployment
+// sets OBS_INSTANCE from the pod name via the downward API, giving each replica
+// its own series; sum-by panels aggregate them back together correctly.
+//
+// Unset — Docker Compose, `go run`, the unit tests — the label is omitted
+// entirely, so single-writer setups keep exactly the series they had.
+func newWorkload(instance string) *workload {
+	return &workload{activeWorkers: 4, instance: instance}
 }
 
 // tick advances the simulation one step: one GET and one POST served, a ~5%
@@ -96,7 +113,7 @@ func (w *workload) tick(r *rand.Rand) {
 // satisfy rate()'s two-sample requirement, so the Error Rate panel would render
 // empty for exactly as long as nothing was going wrong.
 func (w *workload) samples(tsMs int64) []metricSample {
-	return []metricSample{
+	out := []metricSample{
 		{
 			Name:        "sample_app_requests_total",
 			Labels:      map[string]string{"service": serviceLabel, "method": "GET", "status": "200"},
@@ -140,6 +157,15 @@ func (w *workload) samples(tsMs int64) []metricSample {
 			Value:       w.activeWorkers,
 		},
 	}
+	// Applied here rather than in each literal above so a series added later
+	// cannot be the one that forgets it: a single unlabelled series is enough
+	// to reintroduce the interleaving this label prevents.
+	if w.instance != "" {
+		for i := range out {
+			out[i].Labels["instance"] = w.instance
+		}
+	}
+	return out
 }
 
 // encodeMetrics marshals the ingest payload: {"metrics":[{...}]}
