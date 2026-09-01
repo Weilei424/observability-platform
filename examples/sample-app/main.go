@@ -115,7 +115,9 @@ func main() {
 	metricsTicker := time.NewTicker(metricsInterval)
 	defer metricsTicker.Stop()
 
-	wl := newWorkload()
+	// OBS_INSTANCE is set from the pod name by the producers chart; unset
+	// everywhere else. See newWorkload.
+	wl := newWorkload(os.Getenv("OBS_INSTANCE"))
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
