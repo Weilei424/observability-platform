@@ -23,6 +23,28 @@ func defaultAddr() string {
 	return "http://localhost:8080"
 }
 
+// withInstance returns base plus an `instance` label when one is configured,
+// and base unchanged when it is not.
+//
+// The label is what makes replicas > 1 safe. The counters below live in process
+// memory, so two replicas emitting identical label sets are two independent
+// counters sharing one series identity: their samples interleave at the same
+// timestamps and every switch between them looks to rate() like a counter
+// reset, which silently understates the metrics dashboard's Request Rate and
+// Error Rate panels. The Deployment sets OBS_INSTANCE from the pod name via the
+// downward API, giving each replica its own series; the dashboard's sum-by
+// panels aggregate them back together correctly.
+//
+// Unset — Docker Compose, `go run` — the label is omitted entirely, so
+// single-writer setups keep exactly the series they had.
+func withInstance(instance string, base map[string]string) map[string]string {
+	if instance == "" {
+		return base
+	}
+	base["instance"] = instance
+	return base
+}
+
 func main() {
 	addr := flag.String("addr", defaultAddr(), "backend base URL; OBS_BACKEND_ADDR env var takes precedence if set")
 	rate := flag.Float64("rate", 5, "requests per second (must be > 0)")
@@ -53,6 +75,10 @@ func main() {
 	defer ticker.Stop()
 
 	client := &http.Client{Timeout: 5 * time.Second}
+	// OBS_INSTANCE is set from the pod name by the producers chart; unset
+	// everywhere else. See withInstance.
+	instance := os.Getenv("OBS_INSTANCE")
+	lbl := func(m map[string]string) map[string]string { return withInstance(instance, m) }
 	var sent, errs int
 	var getTotal, postTotal int64
 	var getErrors, postErrors int64
@@ -90,31 +116,31 @@ func main() {
 			metrics := []any{
 				map[string]any{
 					"name":         "http_requests_total",
-					"labels":       map[string]string{"service": "api", "method": "GET", "status": "200"},
+					"labels":       lbl(map[string]string{"service": "api", "method": "GET", "status": "200"}),
 					"timestamp_ms": tsMs,
 					"value":        float64(getTotal),
 				},
 				map[string]any{
 					"name":         "http_requests_total",
-					"labels":       map[string]string{"service": "api", "method": "POST", "status": "201"},
+					"labels":       lbl(map[string]string{"service": "api", "method": "POST", "status": "201"}),
 					"timestamp_ms": tsMs,
 					"value":        float64(postTotal),
 				},
 				map[string]any{
 					"name":         "http_request_duration_seconds",
-					"labels":       map[string]string{"service": "api", "method": "GET"},
+					"labels":       lbl(map[string]string{"service": "api", "method": "GET"}),
 					"timestamp_ms": tsMs,
 					"value":        getLatency,
 				},
 				map[string]any{
 					"name":         "http_request_duration_seconds",
-					"labels":       map[string]string{"service": "api", "method": "POST"},
+					"labels":       lbl(map[string]string{"service": "api", "method": "POST"}),
 					"timestamp_ms": tsMs,
 					"value":        postLatency,
 				},
 				map[string]any{
 					"name":         "active_connections",
-					"labels":       map[string]string{"service": "api"},
+					"labels":       lbl(map[string]string{"service": "api"}),
 					"timestamp_ms": tsMs,
 					"value":        activeConns,
 				},
@@ -125,7 +151,7 @@ func main() {
 				getErrors++
 				metrics = append(metrics, map[string]any{
 					"name":         "http_errors_total",
-					"labels":       map[string]string{"service": "api", "method": "GET", "status": "500"},
+					"labels":       lbl(map[string]string{"service": "api", "method": "GET", "status": "500"}),
 					"timestamp_ms": tsMs,
 					"value":        float64(getErrors),
 				})
@@ -134,7 +160,7 @@ func main() {
 				postErrors++
 				metrics = append(metrics, map[string]any{
 					"name":         "http_errors_total",
-					"labels":       map[string]string{"service": "api", "method": "POST", "status": "503"},
+					"labels":       lbl(map[string]string{"service": "api", "method": "POST", "status": "503"}),
 					"timestamp_ms": tsMs,
 					"value":        float64(postErrors),
 				})
