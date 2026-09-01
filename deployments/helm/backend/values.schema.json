@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "observability-platform backend chart values",
+  "description": "Only `config` is constrained here. The backend loads its settings through viper's AutomaticEnv with the OBS prefix, which reads ONLY the keys internal/config/config.go declares a default for: an OBS_* variable that matches nothing is not an error, it is silently ignored, so a typo leaves the operator watching default behavior while believing they changed something. Helm validates values against this schema before rendering, which turns that silence into an install-time error. tests/e2e/helm_test.go cross-references the key list below against config.go in both directions, so it cannot drift from the code.",
+  "type": "object",
+  "properties": {
+    "config": {
+      "type": "object",
+      "description": "Backend environment variables, rendered into the ConfigMap. Every key must be one internal/config/config.go declares.",
+      "additionalProperties": false,
+      "properties": {
+        "OBS_HTTP_ADDR": {
+          "$comment": "Listed because it is a real config key, but templates/configmap.yaml rejects it with an actionable message: service.port owns the listen address, and setting both emits the key twice in one ConfigMap.",
+          "type": ["string"]
+        },
+        "OBS_DATA_DIR": { "type": ["string"] },
+        "OBS_LOG_LEVEL": { "type": ["string"] },
+        "OBS_WAL_SEGMENT_MAX_BYTES": { "type": ["string", "integer"] },
+        "OBS_WAL_SYNC_EVERY_N": { "type": ["string", "integer"] },
+        "OBS_LOGS_FLUSH_THRESHOLD_BYTES": { "type": ["string", "integer"] },
+        "OBS_MAINTENANCE_INTERVAL": { "type": ["string"] },
+        "OBS_FLUSH_INTERVAL": { "type": ["string"] },
+        "OBS_FLUSH_SEALED_CHUNKS": { "type": ["string", "integer"] },
+        "OBS_FLUSH_WAL_BYTES": { "type": ["string", "integer"] },
+        "OBS_COMPACTION_BASE_RANGE": { "type": ["string"] },
+        "OBS_COMPACTION_MULTIPLIER": { "type": ["string", "integer"] },
+        "OBS_COMPACTION_LEVELS": { "type": ["string", "integer"] },
+        "OBS_RETENTION": { "type": ["string"] }
+      }
+    }
+  }
+}
