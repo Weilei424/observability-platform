@@ -31,6 +31,13 @@ spec:
           env:
             - name: OBS_BACKEND_ADDR
               value: {{ .Values.backend.url | quote }}
+            # Per-pod series identity; see the same block in
+            # deployment-sample-app.yaml. loadGenerator.replicas is only safe
+            # above 1 because of this.
+            - name: OBS_INSTANCE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           securityContext:
