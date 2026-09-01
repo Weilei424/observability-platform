@@ -11,11 +11,14 @@ package e2e_test
 // pod while every test stays green.
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -52,7 +55,8 @@ type k8sObject struct {
 		Selector map[string]any `yaml:"selector"`
 		Template struct {
 			Metadata struct {
-				Labels map[string]string `yaml:"labels"`
+				Labels      map[string]string `yaml:"labels"`
+				Annotations map[string]string `yaml:"annotations"`
 			} `yaml:"metadata"`
 			Spec struct {
 				Containers []struct {
@@ -412,6 +416,104 @@ func TestBackendConfigKeysAreReal(t *testing.T) {
 	}
 }
 
+// backendSchemaConfigKeys returns the config keys the backend chart's
+// values.schema.json allows, and whether it forbids everything else.
+func backendSchemaConfigKeys(t *testing.T) (keys []string, closed bool) {
+	t.Helper()
+	var schema struct {
+		Properties struct {
+			Config struct {
+				AdditionalProperties *bool                      `json:"additionalProperties"`
+				Properties           map[string]json.RawMessage `json:"properties"`
+			} `json:"config"`
+		} `json:"properties"`
+	}
+	raw := readFile(t, backendChart+"/values.schema.json")
+	if err := json.Unmarshal([]byte(raw), &schema); err != nil {
+		t.Fatalf("values.schema.json does not parse: %v", err)
+	}
+	for k := range schema.Properties.Config.Properties {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	closed = schema.Properties.Config.AdditionalProperties != nil && !*schema.Properties.Config.AdditionalProperties
+	return keys, closed
+}
+
+// TestBackendConfigOverridesAreValidated closes the gap TestBackendConfigKeysAreReal
+// leaves open: that test reads the RENDERED ConfigMap, so it only ever sees the
+// chart's own defaults. Any --set config.<anything> passed at install time went
+// straight through into the ConfigMap.
+//
+// That matters because viper's AutomaticEnv reads only the keys config.go
+// declares a default for. An unknown OBS_* variable is not an error — it is
+// silently ignored, so `--set-string config.OBS_LOG_LEVLE=debug` installed
+// cleanly, rendered the typo into the ConfigMap, and left the operator watching
+// info-level logs while believing they had enabled debug.
+//
+// values.schema.json is what Helm checks BEFORE rendering, so the typo now fails
+// the install. The key list is asserted against config.go in both directions
+// here so the schema cannot drift from the code it is supposed to mirror.
+func TestBackendConfigOverridesAreValidated(t *testing.T) {
+	schemaKeys, closed := backendSchemaConfigKeys(t)
+	if !closed {
+		t.Error(`values.schema.json does not set "additionalProperties": false under config; unknown keys would be accepted again`)
+	}
+	if len(schemaKeys) == 0 {
+		t.Fatal("values.schema.json declares no config keys")
+	}
+
+	// config.go is the source of truth: viper reads exactly the keys it
+	// declares a default for.
+	configSrc := readFile(t, configPath)
+	var codeKeys []string
+	for _, m := range regexp.MustCompile(`SetDefault\("([a-z0-9_]+)"`).FindAllStringSubmatch(configSrc, -1) {
+		codeKeys = append(codeKeys, "OBS_"+strings.ToUpper(m[1]))
+	}
+	slices.Sort(codeKeys)
+	if len(codeKeys) == 0 {
+		t.Fatalf("found no SetDefault calls in %s; this test cannot check anything", configPath)
+	}
+
+	for _, k := range schemaKeys {
+		if !slices.Contains(codeKeys, k) {
+			t.Errorf("values.schema.json allows %q, which has no matching SetDefault in %s; viper would ignore it silently", k, configPath)
+		}
+	}
+	for _, k := range codeKeys {
+		if !slices.Contains(schemaKeys, k) {
+			t.Errorf("%s declares %q but values.schema.json does not allow it, so operators cannot set a real backend option", configPath, k)
+		}
+	}
+
+	helmAvailable(t)
+
+	// The behavior all of the above exists for.
+	out, err := exec.Command("helm", "template", "backend", backendChart,
+		"--set-string", "config.OBS_LOG_LEVLE=debug").CombinedOutput()
+	if err == nil {
+		t.Errorf("helm template accepted a typo'd config key and rendered it:\n%s", out)
+	} else if !strings.Contains(string(out), "OBS_LOG_LEVLE") {
+		t.Errorf("the rejection does not name the offending key, so the operator cannot see the typo:\n%s", out)
+	}
+
+	// A real key must still be settable — the guard must not be a blanket ban
+	// on overrides.
+	found := false
+	for _, o := range render(t, backendChart, "config.OBS_RETENTION=24h") {
+		if o.Kind != "ConfigMap" {
+			continue
+		}
+		if got := o.Data["OBS_RETENTION"]; got != "24h" {
+			t.Errorf("OBS_RETENTION = %q after an override, want %q", got, "24h")
+		}
+		found = true
+	}
+	if !found {
+		t.Error("no ConfigMap rendered with a valid config override")
+	}
+}
+
 // TestBackendRejectsHTTPAddrOverride pins service.port as the single owner of
 // the listen port.
 //
@@ -513,6 +615,68 @@ func TestGrafanaChartShipsNoPassword(t *testing.T) {
 			t.Errorf("values.yaml ships a password default: %q", trimmed)
 		}
 	}
+}
+
+// grafanaPodTemplateAnnotations returns the Grafana Deployment's pod template
+// annotations for one set of --set overrides.
+func grafanaPodTemplateAnnotations(t *testing.T, setArgs ...string) map[string]string {
+	t.Helper()
+	for _, o := range render(t, grafanaChart, setArgs...) {
+		if o.Kind == "Deployment" {
+			return o.Spec.Template.Metadata.Annotations
+		}
+	}
+	t.Fatalf("grafana chart rendered no Deployment with %v", setArgs)
+	return nil
+}
+
+// TestGrafanaUpgradeRollsThePod covers what `helm upgrade` does NOT do on its
+// own: a Deployment whose pod template is byte-identical creates no new
+// ReplicaSet, so the running container keeps every value it read at startup.
+//
+// Grafana reads all three of these once, at startup: the provisioned
+// datasources, the dashboard provider, and GF_SECURITY_ADMIN_PASSWORD from the
+// Secret. Rotating admin.password used to rewrite the Secret and leave this
+// template unchanged — `helm upgrade` reported success, and the old password
+// kept working.
+func TestGrafanaUpgradeRollsThePod(t *testing.T) {
+	before := grafanaPodTemplateAnnotations(t, "admin.password=first-password")
+
+	for _, key := range []string{"checksum/datasources", "checksum/provider", "checksum/admin-secret"} {
+		if before[key] == "" {
+			t.Errorf("pod template has no %s annotation; a change to that file would not restart Grafana. Have: %v", key, before)
+		}
+	}
+
+	t.Run("rotating the password changes the pod template", func(t *testing.T) {
+		after := grafanaPodTemplateAnnotations(t, "admin.password=second-password")
+		if before["checksum/admin-secret"] == after["checksum/admin-secret"] {
+			t.Errorf("checksum/admin-secret is %q for two different passwords; helm upgrade would not restart Grafana and the old password would stay live",
+				before["checksum/admin-secret"])
+		}
+		// The unrelated inputs must NOT churn: an annotation that changes on
+		// every render restarts Grafana on every upgrade and stops meaning
+		// anything.
+		if before["checksum/datasources"] != after["checksum/datasources"] {
+			t.Error("checksum/datasources changed when only the password did")
+		}
+	})
+
+	t.Run("repointing the backend changes the pod template", func(t *testing.T) {
+		after := grafanaPodTemplateAnnotations(t, "admin.password=first-password", "backend.url=http://elsewhere:9090")
+		if before["checksum/datasources"] == after["checksum/datasources"] {
+			t.Error("checksum/datasources is unchanged for a different backend.url; Grafana would keep provisioning the old datasource until something else restarted it")
+		}
+	})
+
+	t.Run("identical values render identically", func(t *testing.T) {
+		again := grafanaPodTemplateAnnotations(t, "admin.password=first-password")
+		for k, v := range before {
+			if again[k] != v {
+				t.Errorf("%s is not stable across identical renders: %q then %q — every upgrade would restart Grafana", k, v, again[k])
+			}
+		}
+	})
 }
 
 // TestGrafanaDashboardsVolumeIsNotOptional pins a deliberate design decision:
