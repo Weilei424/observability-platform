@@ -4,12 +4,20 @@ metadata:
   name: {{ include "backend.name" . }}-config
   labels:
     {{- include "backend.labels" . | nindent 4 }}
+{{- if hasKey .Values.config "OBS_HTTP_ADDR" }}
+{{- fail "config.OBS_HTTP_ADDR is not settable: the listen port is owned by service.port, which the Services and every probe are derived from. Set service.port instead." }}
+{{- end }}
 data:
-  # Derived from service.port rather than left to the http_addr default of
-  # :8080, so the container actually listens on the port the Services and
-  # probes are configured for. Without this, --set service.port=<anything
-  # else> retargets every probe at a port nothing listens on and the pod
-  # fails startup with no obvious cause.
+  # service.port is the single owner of the listen port: it is derived here
+  # rather than left to the http_addr default of :8080, so the container
+  # actually listens on the port the Services and probes are configured for.
+  # Without this, --set service.port=<anything else> retargets every probe at
+  # a port nothing listens on and the pod fails startup with no obvious cause.
+  #
+  # A config.OBS_HTTP_ADDR entry would emit this key twice in one ConfigMap —
+  # rejected by the API server, or silently last-write-wins, leaving the server
+  # on a port the Services and probes do not use. The guard above rejects it at
+  # render time with a message naming the key that does work.
   OBS_HTTP_ADDR: {{ printf ":%d" (.Values.service.port | int) | quote }}
   {{- range $key, $value := .Values.config }}
   {{ $key }}: {{ $value | quote }}
