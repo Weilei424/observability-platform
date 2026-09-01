@@ -14,7 +14,22 @@ spec:
       labels:
         {{- include "grafana.labels" . | nindent 8 }}
       annotations:
+        # Every chart-managed file the container reads only at startup. A pod
+        # template that does not change is a pod that Kubernetes does not
+        # restart, so `helm upgrade` would report success while the running
+        # container kept the old values.
+        #
+        # The password is the one that bites: GF_SECURITY_ADMIN_PASSWORD is
+        # resolved from the Secret when the container starts, so rotating
+        # admin.password rewrote the Secret, left this template byte-identical,
+        # and the old password kept working with no indication anything had
+        # been missed.
         checksum/datasources: {{ include (print $.Template.BasePath "/configmap-datasources.yaml") . | sha256sum }}
+        checksum/provider: {{ include (print $.Template.BasePath "/configmap-provider.yaml") . | sha256sum }}
+        # Renders empty when admin.existingSecret is set — the chart manages no
+        # Secret then, and rotating an external Secret is the operator's own
+        # rollout to trigger.
+        checksum/admin-secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
     spec:
       containers:
         - name: grafana
