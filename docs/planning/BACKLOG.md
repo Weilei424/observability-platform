@@ -590,10 +590,10 @@ Design: `docs/superpowers/specs/2026-08-26-phase-5.2-kubernetes-helm-design.md` 
 **Cluster verification** — `.github/workflows/ci.yml` job `helm-k8s-e2e`
 - [x] New job beside `compose-e2e`; installs `helm` and `kind` via `azure/setup-helm` and `helm/kind-action` (neither is preinstalled on the runner)
 - [x] Create kind cluster; build `backend`/`sampleapp`/`loadgen` targets and `kind load` all three
-- [ ] Verify: `helm install` deploys the backend and the StatefulSet rolls out
+- [x] Verify: `helm install` deploys the backend and the StatefulSet rolls out — green in the `helm-k8s-e2e` job of [run 33463860081](https://github.com/Weilei424/observability-platform/actions/runs/33463860081) on `b58bcce`
 - [x] Run the **documented** `kubectl create configmap` command, so the runbook step is a tested path rather than a hope; then install Grafana and producers
-- [ ] Verify: data persists across pod restart — ingest a marker with a **run-unique value**, `kubectl delete pod` the backend, wait for reschedule, read the marker back **by value**. Phase 5.1 shipped a restart check that queried a live series the producers kept writing, so fresh samples satisfied it even if every pre-restart sample had been lost; it asserted persistence and proved nothing. The producers chart makes that same failure mode available here
-- [ ] Verify: Grafana queries backend inside Kubernetes — through Grafana's `/api/ds/query`, not the backend's own API
+- [ ] Verify: data persists across pod restart — ingest a marker with a **run-unique value**, `kubectl delete pod` the backend, wait for reschedule, read the marker back **by value**. Phase 5.1 shipped a restart check that queried a live series the producers kept writing, so fresh samples satisfied it even if every pre-restart sample had been lost; it asserted persistence and proved nothing. The producers chart makes that same failure mode available here. **Open pending a re-run**: run 33463860081 passed this check, but the `kubectl delete pod` exit status was unchecked in a script that runs without `set -e`, and a StatefulSet pod keeps its name across a reschedule — so a delete that never happened would have left every later check satisfied by the original process. The script now checks the delete and compares the pod UID before and after; the gate closes on the next green `helm-k8s-e2e` run
+- [x] Verify: Grafana queries backend inside Kubernetes — through Grafana's `/api/ds/query`, not the backend's own API — green in the same run
 - [x] Dump pod state and logs on failure, then delete the cluster
 
 **Docs**
