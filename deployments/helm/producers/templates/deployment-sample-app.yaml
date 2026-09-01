@@ -34,6 +34,16 @@ spec:
             # generator, so it is the only address setting needed.
             - name: OBS_BACKEND_ADDR
               value: {{ .Values.backend.url | quote }}
+            # Every series this pod writes carries instance=<pod name>. The
+            # generator's counters are process-local, so without a per-pod
+            # label two replicas write one series identity from two independent
+            # counters: samples interleave at the same timestamps and rate()
+            # reads each switch as a counter reset. sampleApp.replicas is only
+            # safe above 1 because of this.
+            - name: OBS_INSTANCE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           securityContext:
