@@ -45,14 +45,62 @@ wait_for_port() {
     return 1
 }
 
-# numeric_columns <body> — how many non-empty all-numeric arrays a Grafana
-# dataframe response carries (one series contributes two: timestamps and
+# numeric_columns <body> — how many non-empty all-numeric arrays a GRAFANA
+# DATAFRAME response carries (one series contributes two: timestamps and
 # values). Same helper as compose_smoke.sh's; used to require positive
 # evidence a real frame came back, not merely the absence of an error key —
 # an empty or non-JSON body has no numeric columns either.
+#
+# Only valid against /api/ds/query. It must never be pointed at the backend's
+# own Prometheus API: a Prometheus sample is [<number>, "<string>"], so
+# `all(.[]; type == "number")` is false for every valid vector and the count is
+# always 0. Use prom_sample_count below for those.
 numeric_columns() {
     printf '%s' "$1" | jq '[.. | arrays | select(length > 0) | select(all(.[]; type == "number"))] | length' 2>/dev/null || echo 0
 }
+
+# prom_sample_count <body> — how many real samples a Prometheus instant-query
+# response carries. Prometheus renders sample values as strings ([ts, "1.5"]),
+# which is exactly what internal/api/query.go emits, so this reads
+# .data.result[].value[1] and counts the entries that parse as a number.
+#
+# Everything that is not a successful envelope with numeric samples counts 0:
+# an error envelope (filtered by the status check), an empty result array, a
+# body that is not JSON at all (jq exits non-zero), an empty body (jq prints
+# nothing), and a sample whose value is not a finite number. The last case
+# needs the explicit isinfinite/isnan filter: jq's tonumber ACCEPTS "NaN" and
+# "+Inf", and neither is evidence that a producer wrote a real sample.
+prom_sample_count() {
+    local n
+    n=$(printf '%s' "$1" | jq '
+        [ select(.status == "success")
+        | .data.result[]? | objects | .value[1]? | strings | tonumber?
+        | select((isinfinite or isnan) | not) ] | length
+    ' 2>/dev/null)
+    [ -n "$n" ] || n=0
+    printf '%s' "$n"
+}
+
+# loki_entry_count <body> — how many log entries a Loki query_range response
+# carries, across every returned stream. Same contract as prom_sample_count:
+# anything that is not a successful envelope holding real entries counts 0.
+loki_entry_count() {
+    local n
+    n=$(printf '%s' "$1" | jq '
+        [ select(.status == "success")
+        | .data.result[]? | objects | .values[]? | select(length == 2) ] | length
+    ' 2>/dev/null)
+    [ -n "$n" ] || n=0
+    printf '%s' "$n"
+}
+
+# Sourcing hook for tests/e2e/kind_smoke_helpers_test.go, which exercises the
+# assertion helpers above against fixtures. Everything below this line needs a
+# cluster; the helpers above do not, and a helper that silently counts zero for
+# every valid response is exactly the failure this hook exists to catch.
+if [ "${OBS_KIND_SMOKE_LIB_ONLY:-0}" = "1" ]; then
+    return 0 2>/dev/null || exit 0
+fi
 
 for tool in kind kubectl helm docker jq curl; do
     command -v "$tool" >/dev/null 2>&1 || { echo "FATAL: $tool is required" >&2; exit 2; }
@@ -172,30 +220,53 @@ echo "-- Verifying producers write to the backend --"
 # sample_app_metrics_up / load-generator checks) — query a series only the
 # producers write and require real samples, not merely the absence of an
 # error.
+#
+# One series per producer, and one per signal. http_requests_total is written
+# only by the load generator; a check on it alone leaves a disconnected
+# sample-app invisible, with both the sample-app and logs dashboards empty
+# while the suite passes. So this also queries sample_app_active_workers (the
+# sample app's metrics half) and a sample-app log stream (its Loki half) —
+# three assertions covering all three provisioned dashboards.
 kubectl port-forward -n "$NS" svc/observability-backend 18080:8080 >/dev/null 2>&1 &
 PF_PID=$!
 wait_for_port "backend port-forward is ready (producers check)" 30 "http://localhost:18080/healthz"
 
-PRODUCER_BODY=""
-PRODUCER_COLS=0
-START=$SECONDS
-while [ $((SECONDS - START)) -lt 60 ]; do
-    PRODUCER_BODY=$(curl -sg --max-time 10 "http://localhost:18080/api/v1/query?query=http_requests_total")
-    PRODUCER_COLS=$(numeric_columns "$PRODUCER_BODY")
-    [ "${PRODUCER_COLS:-0}" -ge 2 ] && break
-    sleep 2
-done
-# Guard the empty-body case explicitly, same as the post-restart query below:
-# jq -e treats an empty/non-JSON body inconsistently across builds, and an
-# empty $PRODUCER_BODY (a dropped connection or a stalled port-forward) must
-# not be indistinguishable from "no samples yet".
-if [ -z "$PRODUCER_BODY" ]; then
-    log_fail "load generator is writing to the backend — empty response body (connection or port-forward failure)"
-elif [ "${PRODUCER_COLS:-0}" -ge 2 ]; then
-    log_pass "load generator is writing http_requests_total with real samples"
-else
-    log_fail "load generator is writing to the backend — no numeric samples for http_requests_total after 60s; body: $PRODUCER_BODY"
-fi
+# await_samples <label> <writer> <url> <counter-fn> — polls one producer query
+# until the response carries real samples, then records a single PASS or FAIL.
+# The empty-body case is called out separately: an empty $BODY (a dropped
+# connection or a stalled port-forward) must not read as "no samples yet",
+# which points the reader at the wrong component.
+await_samples() {
+    local label="$1" writer="$2" url="$3" counter="$4"
+    local body="" n=0 start=$SECONDS
+    while [ $((SECONDS - start)) -lt 60 ]; do
+        body=$(curl -sg --max-time 10 "$url")
+        n=$("$counter" "$body")
+        [ "${n:-0}" -ge 1 ] && break
+        sleep 2
+    done
+    if [ -z "$body" ]; then
+        log_fail "$writer is writing to the backend — empty response body for $label (connection or port-forward failure)"
+    elif [ "${n:-0}" -ge 1 ]; then
+        log_pass "$writer is writing $label with real samples ($n)"
+    else
+        log_fail "$writer is writing to the backend — no samples for $label after 60s; body: $body"
+    fi
+}
+
+await_samples "http_requests_total" "load generator" \
+    "http://localhost:18080/api/v1/query?query=http_requests_total" prom_sample_count
+await_samples "sample_app_active_workers" "sample app" \
+    "http://localhost:18080/api/v1/query?query=sample_app_active_workers" prom_sample_count
+# The logs half: the sample app is the only writer of {service="worker"}, and
+# it is the stream the provisioned logs dashboard reads. start/end are explicit
+# because query_range's default window is not guaranteed to cover the few
+# minutes this run has been up.
+LOKI_START_NS=$(( ($(date +%s) - 900) * 1000000000 ))
+LOKI_END_NS=$(( ($(date +%s) + 60) * 1000000000 ))
+await_samples 'log stream {service="worker"}' "sample app" \
+    "http://localhost:18080/loki/api/v1/query_range?query=%7Bservice%3D%22worker%22%7D&limit=100&start=${LOKI_START_NS}&end=${LOKI_END_NS}" \
+    loki_entry_count
 kill "$PF_PID" 2>/dev/null; PF_PID=""
 
 # ---- Seed a marker ---------------------------------------------------
