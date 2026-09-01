@@ -52,8 +52,23 @@ private WAL, so a query would see whichever shard it landed on.
 Every `config.*` key must start with `OBS_` and correspond to a `v.SetDefault` in
 `internal/config/config.go` — Viper silently ignores env vars it has no default for, so a
 typo'd key would be invisible at runtime rather than an error.
-`TestBackendConfigKeysAreReal` in `tests/e2e/helm_test.go` checks this for every key
-actually shipped in `values.yaml`.
+
+That is enforced in two places, because they catch different mistakes. `values.schema.json`
+lists the allowed keys and sets `additionalProperties: false`, so Helm rejects an unknown
+key from **any** source — including an `--set config.OBS_LOG_LEVLE=debug` typed at install
+time — before it renders anything:
+
+```console
+$ helm install backend deployments/helm/backend --set-string config.OBS_LOG_LEVLE=debug
+Error: values don't meet the specifications of the schema(s) in the following chart(s):
+observability-platform-backend:
+- config: Additional property OBS_LOG_LEVLE is not allowed
+```
+
+And in `tests/e2e/helm_test.go`, `TestBackendConfigKeysAreReal` checks every key shipped in
+`values.yaml` against `config.go`, while `TestBackendConfigOverridesAreValidated` checks the
+schema's key list against `config.go` in both directions — so the schema cannot fall behind
+a newly added backend option, and cannot allow one that no longer exists.
 
 Probes use `httpGet` against `/readyz` (startup and readiness) and `/healthz`
 (liveness) — not the `/server -healthcheck` exec mode the Compose healthcheck uses. The
@@ -83,6 +98,15 @@ dashboards themselves come from an operator-created ConfigMap, not from this cha
 | `resources.requests.cpu` | `100m` | |
 | `resources.requests.memory` | `128Mi` | |
 | `resources.limits.memory` | `512Mi` | |
+
+Grafana reads its provisioned datasources, its dashboard provider, and
+`GF_SECURITY_ADMIN_PASSWORD` **once, at startup**, so the pod template carries a
+`checksum/` annotation for each chart-managed input. Without them a `helm upgrade` that
+changes only the Secret or a ConfigMap leaves the pod template byte-identical, no new
+ReplicaSet is created, and the running container keeps the old values — an upgrade that
+reports success and changes nothing. Rotating `admin.password` therefore restarts Grafana;
+rotating a Secret named by `admin.existingSecret` does not, because the chart does not
+manage that object and cannot see its contents.
 
 ## `producers` chart
 
