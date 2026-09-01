@@ -37,7 +37,7 @@ private WAL, so a query would see whichever shard it landed on.
 | `image.repository` | `observability-platform/backend` | Image name; built by the `backend` target in `deployments/docker/Dockerfile`. |
 | `image.tag` | `dev` | Image tag. |
 | `image.pullPolicy` | `IfNotPresent` | So a `kind load docker-image`ed image is used as-is with no registry. |
-| `service.port` | `8080` | Backend HTTP port, exposed on both the ClusterIP and the headless Service. |
+| `service.port` | `8080` | Backend HTTP port, exposed on both the ClusterIP and the headless Service, and the sole owner of the listen address: the ConfigMap derives `OBS_HTTP_ADDR` from it. Setting `config.OBS_HTTP_ADDR` is rejected at render time — it would emit the key twice and leave the server on a port the Services and probes do not use. |
 | `persistence.size` | `2Gi` | Size of the per-pod PVC created from `volumeClaimTemplates`. |
 | `persistence.storageClassName` | `""` (cluster default) | Set to pin a specific StorageClass; empty lets the cluster choose (`local-path` on kind). |
 | `resources.requests.cpu` | `100m` | |
@@ -96,13 +96,13 @@ three empty dashboards.
 | `fullnameOverride` | `observability-producers` | Base name for both Deployments (`-sample-app` / `-load-generator` suffixes). |
 | `backend.url` | `http://observability-backend:8080` | Same cross-chart claim as the grafana chart's `backend.url`; see Cross-chart contract above. |
 | `sampleApp.enabled` | `true` | Set `false` to skip the sample app Deployment. |
-| `sampleApp.replicas` | `1` | Pod count for the sample app Deployment. |
+| `sampleApp.replicas` | `1` | Pod count for the sample app Deployment. Safe above 1: each pod labels its series with `instance=<pod name>` (`OBS_INSTANCE`, from the downward API), so replicas do not share a series identity. Log streams are not split that way — they are appends, not counters. |
 | `sampleApp.image.repository` | `observability-platform/sample-app` | Built by the `sampleapp` target. |
 | `sampleApp.image.tag` | `dev` | |
 | `sampleApp.rate` | `2` | Log batches per second. |
 | `sampleApp.metricsRate` | `1` | Metric pushes per second — an independent ticker from `rate`. |
 | `loadGenerator.enabled` | `true` | Set `false` to skip the load generator Deployment. |
-| `loadGenerator.replicas` | `1` | Pod count for the load generator Deployment. |
+| `loadGenerator.replicas` | `1` | Pod count for the load generator Deployment. Carries the same per-pod `instance` label as `sampleApp.replicas`. |
 | `loadGenerator.image.repository` | `observability-platform/load-generator` | Built by the `loadgen` target. |
 | `loadGenerator.image.tag` | `dev` | |
 | `loadGenerator.rate` | `5` | Requests simulated per second. |
