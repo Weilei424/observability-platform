@@ -120,7 +120,11 @@ func main() {
 
 	store := metrics.NewWALStore(w, blockStore, cfg.DataDir)
 	engine := metrics.NewQueryEngine(blockStore)
-	reg, mx := observability.NewRegistry(blockStore, blockStore)
+	reg, inst := observability.NewRegistry(observability.RegistryOptions{
+		Cardinality: blockStore,
+		Storage:     blockStore,
+	})
+	mx := inst.Maintenance
 	srv := api.New(cfg, log, store, engine, reg, logIngester, logQuery)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
