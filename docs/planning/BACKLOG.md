@@ -623,7 +623,7 @@ backend's own query API, so every internal metric was unreachable from any dashb
 - [ ] `wal.DirStats` — WAL size and segment count in one read, with `DirSize` reimplemented over it
 - [ ] `logs.Store.Stats` — stream, chunk, and chunk-byte counts, deduplicating streams across head and index
 - [ ] Split `internal/observability` into `registry.go`, `collectors.go`, `http.go`
-- [ ] WAL and logs pull collectors — a failed read emits a gap plus `obs_collector_errors_total`, never a zero
+- [x] WAL and logs pull collectors — a failed read emits a gap plus `obs_collector_errors_total`, never a zero
 - [ ] Emit WAL size metrics — `obs_wal_bytes{wal}`, `obs_wal_segments{wal}`
 - [ ] Emit log chunk count metrics — `obs_log_chunks_total`, `obs_log_streams_total`, `obs_log_chunk_bytes`
 - [ ] Emit query latency metrics — `obs_http_request_duration_seconds{route,method}`, buckets 1ms–10s
