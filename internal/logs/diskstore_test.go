@@ -719,3 +719,71 @@ func TestNewStore_ReplayWarnsOnInvalidLabels(t *testing.T) {
 		t.Errorf("replay logged %q, want a warning naming the skipped record", got)
 	}
 }
+
+func appendLine(t *testing.T, s *Store, labels map[string]string, tsNs int64, line string) {
+	t.Helper()
+	if err := s.Append(mustLabels(t, labels), tsNs, line); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+}
+
+func TestStoreStatsCountsHeadAndPersistedStreams(t *testing.T) {
+	s := newTestStore(t, t.TempDir(), 1<<30)
+	defer s.Close()
+
+	// Two streams in the head, nothing flushed yet: streams counted, no chunks.
+	appendLine(t, s, map[string]string{"service": "api"}, 1_000, "one")
+	appendLine(t, s, map[string]string{"service": "web"}, 2_000, "two")
+
+	streams, chunks, bytes, err := s.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if streams != 2 {
+		t.Errorf("streams = %d, want 2 (both still in the head)", streams)
+	}
+	if chunks != 0 || bytes != 0 {
+		t.Errorf("chunks/bytes = %d/%d, want 0/0 before any flush", chunks, bytes)
+	}
+
+	if err := s.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	streams, chunks, bytes, err = s.Stats()
+	if err != nil {
+		t.Fatalf("Stats after flush: %v", err)
+	}
+	// The head is drained into the index. The same two streams must still be
+	// counted once each — double-counting across head and index is the bug this
+	// asserts against.
+	if streams != 2 {
+		t.Errorf("streams = %d after flush, want 2", streams)
+	}
+	if chunks != 2 {
+		t.Errorf("chunks = %d, want 2 (one chunk file per stream)", chunks)
+	}
+	if bytes <= 0 {
+		t.Errorf("bytes = %d, want > 0 once chunk files exist", bytes)
+	}
+}
+
+func TestStoreStatsDoesNotDoubleCountAStreamInBothHeadAndIndex(t *testing.T) {
+	s := newTestStore(t, t.TempDir(), 1<<30)
+	defer s.Close()
+
+	appendLine(t, s, map[string]string{"service": "api"}, 1_000, "before flush")
+	if err := s.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	// Same labels again: now the stream exists in the index AND in the head.
+	appendLine(t, s, map[string]string{"service": "api"}, 3_000, "after flush")
+
+	streams, _, _, err := s.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if streams != 1 {
+		t.Errorf("streams = %d, want 1; the same stream in head and index is one stream", streams)
+	}
+}

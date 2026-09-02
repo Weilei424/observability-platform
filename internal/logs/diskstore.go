@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -320,6 +321,53 @@ func (s *Store) Flush() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.flushLocked()
+}
+
+// Stats reports distinct stream count, persisted chunk-file count, and the total
+// on-disk bytes of those chunk files. It is read at metrics scrape time.
+//
+// Streams are deduplicated across the head and the index: after a flush the same
+// stream exists in both, and counting it twice would make the gauge climb on every
+// flush without a single new stream being created.
+func (s *Store) Stats() (streams, chunks int, bytes int64, err error) {
+	s.mu.Lock()
+	ids := make(map[StreamID]struct{}, len(s.head)+len(s.index.labels))
+	for id := range s.head {
+		ids[id] = struct{}{}
+	}
+	for id := range s.index.labels {
+		ids[id] = struct{}{}
+	}
+	for _, refs := range s.index.refs {
+		chunks += len(refs)
+	}
+	chunksDir := s.chunksDir
+	s.mu.Unlock()
+
+	// The filesystem walk is deliberately outside the lock: it is the slow part,
+	// and holding the store's mutex through it would stall ingest for the length
+	// of a scrape.
+	entries, rerr := os.ReadDir(chunksDir)
+	if rerr != nil {
+		if os.IsNotExist(rerr) {
+			return len(ids), chunks, 0, nil
+		}
+		return 0, 0, 0, fmt.Errorf("logs: readdir %s: %w", chunksDir, rerr)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		fi, ferr := e.Info()
+		if ferr != nil {
+			if os.IsNotExist(ferr) {
+				continue
+			}
+			return 0, 0, 0, fmt.Errorf("logs: info %s: %w", e.Name(), ferr)
+		}
+		bytes += fi.Size()
+	}
+	return len(ids), chunks, bytes, nil
 }
 
 // StreamLabelSet returns a stream's labels from the persisted index, or from the
