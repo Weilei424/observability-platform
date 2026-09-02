@@ -50,3 +50,39 @@ func (m *HTTPMetrics) Observe(route, method string, status int, d time.Duration)
 	m.Requests.WithLabelValues(route, method, strconv.Itoa(status)).Inc()
 	m.Duration.WithLabelValues(route, method).Observe(d.Seconds())
 }
+
+// IngestMetrics count accepted and rejected data at the ingest edge. The reason
+// label is a closed set produced by the API layer's classifier; raw validation
+// fields are client-influenced and never become label values.
+type IngestMetrics struct {
+	SamplesIngested  prometheus.Counter
+	SamplesRejected  *prometheus.CounterVec
+	LogLinesIngested prometheus.Counter
+	LogLinesRejected *prometheus.CounterVec
+}
+
+// NewIngestMetrics builds the instruments without registering them.
+func NewIngestMetrics() *IngestMetrics {
+	return &IngestMetrics{
+		SamplesIngested: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "obs_samples_ingested_total",
+			Help: "Total metric samples accepted and appended.",
+		}),
+		SamplesRejected: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "obs_samples_rejected_total",
+			Help: "Total metric samples rejected, by reason.",
+		}, []string{"reason"}),
+		LogLinesIngested: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "obs_log_lines_ingested_total",
+			Help: "Total log lines accepted and appended.",
+		}),
+		LogLinesRejected: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "obs_log_lines_rejected_total",
+			Help: "Total log lines rejected, by reason.",
+		}, []string{"reason"}),
+	}
+}
+
+func (m *IngestMetrics) collectors() []prometheus.Collector {
+	return []prometheus.Collector{m.SamplesIngested, m.SamplesRejected, m.LogLinesIngested, m.LogLinesRejected}
+}

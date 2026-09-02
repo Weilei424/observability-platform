@@ -103,11 +103,15 @@ func (s *Server) handleIngestMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(validationErrors) > 0 {
+		for _, ve := range validationErrors {
+			s.ingest.SamplesRejected.WithLabelValues(metricRejectReason(ve.Field)).Inc()
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]any{"errors": validationErrors})
 		return
 	}
 
 	var appendErrors []error
+	var appended int
 	for _, ps := range samples {
 		if err := s.ingester.Append(ps.labels, ps.timestampMs, ps.value); err != nil {
 			s.log.Error("ingester append failed",
@@ -115,8 +119,14 @@ func (s *Server) handleIngestMetrics(w http.ResponseWriter, r *http.Request) {
 				"request_id", chimiddleware.GetReqID(r.Context()),
 				"err", err)
 			appendErrors = append(appendErrors, err)
+			continue
 		}
+		appended++
 	}
+	// Count what actually landed, before the error branch: a partial append leaves
+	// those samples in the store, and reporting zero would understate ingest.
+	s.ingest.SamplesIngested.Add(float64(appended))
+	s.ingest.SamplesRejected.WithLabelValues("append").Add(float64(len(appendErrors)))
 	if len(appendErrors) > 0 {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return

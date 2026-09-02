@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/masonwheeler/observability-platform/internal/api"
@@ -14,6 +15,7 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/logs"
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/observability"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func newIngestTestServer(t *testing.T) (*api.Server, *metrics.MemoryStore) {
@@ -35,6 +37,30 @@ func newIngestTestServer(t *testing.T) (*api.Server, *metrics.MemoryStore) {
 		Registry:    reg,
 		LogIngester: logs.NewMemoryStore(),
 	}), store
+}
+
+// newTestServerWithIngest mirrors newIngestTestServer but wires a caller-supplied
+// IngestMetrics into Deps so a test can read the counters after driving requests.
+func newTestServerWithIngest(t *testing.T, im *observability.IngestMetrics) *api.Server {
+	t.Helper()
+	store := metrics.NewMemoryStore()
+	engine := metrics.NewQueryEngine(store)
+	cfg := &config.Config{
+		HTTPAddr: ":8080",
+		DataDir:  t.TempDir(),
+		LogLevel: "info",
+	}
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	reg, _ := observability.NewRegistry(observability.RegistryOptions{Cardinality: store})
+	return api.New(api.Deps{
+		Config:      cfg,
+		Logger:      log,
+		Ingester:    store,
+		Engine:      engine,
+		Registry:    reg,
+		LogIngester: logs.NewMemoryStore(),
+		Ingest:      im,
+	})
 }
 
 func postIngest(t *testing.T, srv *api.Server, body any) *httptest.ResponseRecorder {
@@ -299,5 +325,54 @@ func TestIngestMetrics_MalformedJSON_Returns400(t *testing.T) {
 
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+}
+
+func TestIngestCountsAcceptedSamples(t *testing.T) {
+	im := observability.NewIngestMetrics()
+	s := newTestServerWithIngest(t, im)
+
+	body := `{"metrics":[
+		{"name":"a","timestamp_ms":1,"value":1},
+		{"name":"b","timestamp_ms":2,"value":2}
+	]}`
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/ingest/metrics", strings.NewReader(body)))
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rec.Code)
+	}
+	if got := testutil.ToFloat64(im.SamplesIngested); got != 2 {
+		t.Errorf("obs_samples_ingested_total = %v, want 2", got)
+	}
+}
+
+func TestIngestCountsRejectionsByClassifiedReason(t *testing.T) {
+	im := observability.NewIngestMetrics()
+	s := newTestServerWithIngest(t, im)
+
+	// One bad metric name and one client-supplied label name that is invalid.
+	// The second must be counted as "labels", NOT as its own label value.
+	body := `{"metrics":[
+		{"name":"!bad","timestamp_ms":1,"value":1},
+		{"name":"ok","labels":{"1nope":"x"},"timestamp_ms":2,"value":2}
+	]}`
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/ingest/metrics", strings.NewReader(body)))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if got := testutil.ToFloat64(im.SamplesRejected.WithLabelValues("name")); got != 1 {
+		t.Errorf("rejected{reason=name} = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(im.SamplesRejected.WithLabelValues("labels")); got != 1 {
+		t.Errorf("rejected{reason=labels} = %v, want 1", got)
+	}
+	if n := testutil.CollectAndCount(im.SamplesRejected); n != 2 {
+		t.Errorf("rejection counter has %d series, want exactly 2 (name, labels)", n)
+	}
+	if got := testutil.ToFloat64(im.SamplesIngested); got != 0 {
+		t.Errorf("ingested = %v, want 0; a request with validation errors appends nothing", got)
 	}
 }

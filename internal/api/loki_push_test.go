@@ -16,6 +16,7 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/logs"
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/observability"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // failingIngester is a logs.Ingester whose Append always fails, used to exercise
@@ -55,6 +56,27 @@ func newPushServerWithIngester(t *testing.T, ing logs.Ingester) *api.Server {
 		Engine:      engine,
 		Registry:    reg,
 		LogIngester: ing,
+	})
+}
+
+// newPushTestServerWithIngest mirrors newPushServerWithIngester but wires a
+// caller-supplied IngestMetrics into Deps so a test can read the counters after
+// driving push requests.
+func newPushTestServerWithIngest(t *testing.T, im *observability.IngestMetrics) *api.Server {
+	t.Helper()
+	cfg := &config.Config{HTTPAddr: ":0", DataDir: t.TempDir(), LogLevel: "info"}
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	mstore := metrics.NewMemoryStore()
+	engine := metrics.NewQueryEngine(mstore)
+	reg, _ := observability.NewRegistry(observability.RegistryOptions{Cardinality: mstore})
+	return api.New(api.Deps{
+		Config:      cfg,
+		Logger:      log,
+		Ingester:    mstore,
+		Engine:      engine,
+		Registry:    reg,
+		LogIngester: logs.NewMemoryStore(),
+		Ingest:      im,
 	})
 }
 
@@ -383,5 +405,44 @@ func TestLokiPush_ProtobufContentType_Returns400(t *testing.T) {
 	_ = json.NewDecoder(rr.Body).Decode(&body)
 	if body["error"] == nil {
 		t.Error("expected an error message for unsupported content-type")
+	}
+}
+
+func TestPushCountsAcceptedLines(t *testing.T) {
+	im := observability.NewIngestMetrics()
+	s := newPushTestServerWithIngest(t, im)
+
+	body := `{"streams":[{"stream":{"service":"api"},"values":[["1700000000000000000","hello"],["1700000000000000001","world"]]}]}`
+	rec := postPush(t, s, body, "application/json")
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := testutil.ToFloat64(im.LogLinesIngested); got != 2 {
+		t.Errorf("obs_log_lines_ingested_total = %v, want 2", got)
+	}
+}
+
+func TestPushCountsRejectionsByClassifiedReason(t *testing.T) {
+	im := observability.NewIngestMetrics()
+	s := newPushTestServerWithIngest(t, im)
+
+	// One valid stream and one whose timestamp is not a numeric string. The push
+	// path validates all-or-nothing, so the whole batch is rejected and nothing is
+	// appended — but the rejection is still classified as "timestamp".
+	body := `{"streams":[` +
+		`{"stream":{"service":"api"},"values":[["1700000000000000000","hello"]]},` +
+		`{"stream":{"service":"web"},"values":[["notanumber","world"]]}` +
+		`]}`
+	rec := postPush(t, s, body, "application/json")
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := testutil.ToFloat64(im.LogLinesRejected.WithLabelValues("timestamp")); got != 1 {
+		t.Errorf("rejected{reason=timestamp} = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(im.LogLinesIngested); got != 0 {
+		t.Errorf("ingested = %v, want 0; a request with validation errors appends nothing", got)
 	}
 }

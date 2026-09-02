@@ -53,6 +53,7 @@ type Metrics struct {
 type Instruments struct {
 	Maintenance *Metrics
 	HTTP        *HTTPMetrics
+	Ingest      *IngestMetrics
 }
 
 // NewRegistry returns a Prometheus registry plus the push-model instrument
@@ -117,5 +118,8 @@ func NewRegistry(opts RegistryOptions) (*prometheus.Registry, *Instruments) {
 	httpMetrics := NewHTTPMetrics()
 	reg.MustRegister(httpMetrics.collectors()...)
 
-	return reg, &Instruments{Maintenance: m, HTTP: httpMetrics}
+	ingestMetrics := NewIngestMetrics()
+	reg.MustRegister(ingestMetrics.collectors()...)
+
+	return reg, &Instruments{Maintenance: m, HTTP: httpMetrics, Ingest: ingestMetrics}
 }

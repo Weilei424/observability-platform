@@ -157,20 +157,29 @@ func (s *Server) handleLokiPush(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(validationErrors) > 0 {
+		for _, ve := range validationErrors {
+			s.ingest.LogLinesRejected.WithLabelValues(logRejectReason(ve.Field)).Inc()
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]any{"errors": validationErrors})
 		return
 	}
 
-	for _, e := range entries {
+	for i, e := range entries {
 		if err := s.logIngester.Append(e.labels, e.tsNs, e.line); err != nil {
 			s.log.Error("log ingester append failed",
 				"component", "logs_push",
 				"request_id", chimiddleware.GetReqID(r.Context()),
 				"err", err)
+			// entries[:i] already landed; the push handler returns on the first
+			// append error rather than collecting them, so count what landed
+			// before this one plus the one failure, then stop.
+			s.ingest.LogLinesIngested.Add(float64(i))
+			s.ingest.LogLinesRejected.WithLabelValues("append").Inc()
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 			return
 		}
 	}
+	s.ingest.LogLinesIngested.Add(float64(len(entries)))
 	w.WriteHeader(http.StatusNoContent)
 }
 

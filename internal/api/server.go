@@ -26,7 +26,8 @@ type Deps struct {
 
 	// HTTP and Ingest are optional. When nil, New substitutes unregistered
 	// instruments so handlers never nil-check and tests never panic.
-	HTTP *observability.HTTPMetrics
+	HTTP   *observability.HTTPMetrics
+	Ingest *observability.IngestMetrics
 }
 
 type Server struct {
@@ -39,11 +40,15 @@ type Server struct {
 	logIngester logs.Ingester
 	logQuery    *logs.QueryEngine
 	http        *observability.HTTPMetrics
+	ingest      *observability.IngestMetrics
 }
 
 func New(d Deps) *Server {
 	if d.HTTP == nil {
 		d.HTTP = observability.NewHTTPMetrics()
+	}
+	if d.Ingest == nil {
+		d.Ingest = observability.NewIngestMetrics()
 	}
 	s := &Server{
 		cfg:         d.Config,
@@ -54,6 +59,7 @@ func New(d Deps) *Server {
 		logIngester: d.LogIngester,
 		logQuery:    d.LogQuery,
 		http:        d.HTTP,
+		ingest:      d.Ingest,
 	}
 	s.router = s.buildRouter()
 	return s
