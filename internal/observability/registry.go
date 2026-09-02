@@ -52,6 +52,7 @@ type Metrics struct {
 // at scrape time and nobody holds a handle to them.
 type Instruments struct {
 	Maintenance *Metrics
+	HTTP        *HTTPMetrics
 }
 
 // NewRegistry returns a Prometheus registry plus the push-model instrument
@@ -113,5 +114,8 @@ func NewRegistry(opts RegistryOptions) (*prometheus.Registry, *Instruments) {
 		m.RetentionDeletedTotal, m.FlushesTotal, m.FlushFailuresTotal,
 	)
 
-	return reg, &Instruments{Maintenance: m}
+	httpMetrics := NewHTTPMetrics()
+	reg.MustRegister(httpMetrics.collectors()...)
+
+	return reg, &Instruments{Maintenance: m, HTTP: httpMetrics}
 }
