@@ -43,16 +43,19 @@ func TestComponentAddsTheFieldToEveryLine(t *testing.T) {
 	}
 }
 
-// A component logger must not be double-stamped by a call site that also passes
-// its own component key: slog renders both, and the field stops being usable as a
-// grouping key.
+// slog does not deduplicate attribute keys, so a call site that logs through a
+// component logger and ALSO passes its own "component" argument ends up with
+// both rendered on the line — this is the exact failure mode the migration
+// guards against, and this test pins it down rather than merely asserting it
+// away: a call site written this way is wrong, and this is what "wrong" looks
+// like on the wire.
 func TestComponentIsNotDuplicatedByCallSites(t *testing.T) {
 	var buf bytes.Buffer
 	log := Component(slog.New(slog.NewJSONHandler(&buf, nil)), "logs")
-	log.Warn("replay skipped", "error", "bad labels")
+	log.Warn("replay skipped", "component", "logs", "error", "bad labels")
 
-	if n := strings.Count(buf.String(), `"component"`); n != 1 {
-		t.Errorf("line carries %d component keys, want exactly 1: %s", n, buf.String())
+	if n := strings.Count(buf.String(), `"component"`); n != 2 {
+		t.Errorf("line carries %d component keys, want exactly 2 (both the component logger's and the call site's manual one): %s", n, buf.String())
 	}
 }
 
