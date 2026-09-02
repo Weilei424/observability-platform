@@ -51,7 +51,7 @@ func newLokiServerAt(t *testing.T, dir string) (*api.Server, *logs.Store, func()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	mstore := metrics.NewMemoryStore()
 	engine := metrics.NewQueryEngine(mstore)
-	reg, _ := observability.NewRegistry(mstore, nil)
+	reg, _ := observability.NewRegistry(observability.RegistryOptions{Cardinality: mstore})
 	return api.New(cfg, log, mstore, engine, reg, store, logs.NewQueryEngine(store)), store, closeStore
 }
 
