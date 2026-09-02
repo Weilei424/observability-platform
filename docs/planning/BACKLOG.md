@@ -620,13 +620,13 @@ backend's own query API, so every internal metric was unreachable from any dashb
 - [x] Emit compaction duration metrics — `obs_compaction_duration_seconds`
 
 **Instrumentation**
-- [ ] `wal.DirStats` — WAL size and segment count in one read, with `DirSize` reimplemented over it
-- [ ] `logs.Store.Stats` — stream, chunk, and chunk-byte counts, deduplicating streams across head and index
-- [ ] Split `internal/observability` into `registry.go`, `collectors.go`, `http.go`
+- [x] `wal.DirStats` — WAL size and segment count in one read, with `DirSize` reimplemented over it
+- [x] `logs.Store.Stats` — stream, chunk, and chunk-byte counts, deduplicating streams across head and index
+- [x] Split `internal/observability` into `registry.go`, `collectors.go`, `http.go`
 - [x] WAL and logs pull collectors — a failed read emits a gap plus `obs_collector_errors_total`, never a zero
-- [ ] Emit WAL size metrics — `obs_wal_bytes{wal}`, `obs_wal_segments{wal}`
-- [ ] Emit log chunk count metrics — `obs_log_chunks_total`, `obs_log_streams_total`, `obs_log_chunk_bytes`
-- [ ] Emit query latency metrics — `obs_http_request_duration_seconds{route,method}`, buckets 1ms–10s
+- [x] Emit WAL size metrics — `obs_wal_bytes{wal}`, `obs_wal_segments{wal}`
+- [x] Emit log chunk count metrics — `obs_log_chunks_total`, `obs_log_streams_total`, `obs_log_chunk_bytes`
+- [x] Emit query latency metrics — `obs_http_request_duration_seconds{route,method}`, buckets 1ms–10s
 - [ ] Emit error count metrics — derived from `obs_http_requests_total{status=~"5.."}`, not a separate counter
 - [ ] HTTP middleware labelled by chi **route pattern**, with `<unmatched>` for 404s — never the raw path
 - [ ] Replace `api.New`'s seven positional parameters with `api.Deps` (10 call sites)
