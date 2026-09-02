@@ -632,7 +632,7 @@ backend's own query API, so every internal metric was unreachable from any dashb
 - [x] Replace `api.New`'s seven positional parameters with `api.Deps` (10 call sites)
 - [x] Emit ingestion rate metrics — `obs_samples_ingested_total`, `obs_log_lines_ingested_total`
 - [x] Reject counters with a closed-set `reason` classifier — `ValidationError.Field` is client-supplied and must never become a label value
-- [ ] `observability.Component` and request-scoped loggers; migrate the 9 ad-hoc `component` call sites onto a fixed name set
+- [x] `observability.Component` and request-scoped loggers; migrate the 9 ad-hoc `component` call sites onto a fixed name set
 
 **Deployment**
 - [ ] `observability/prometheus/prometheus.yml` scrape config
