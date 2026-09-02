@@ -17,7 +17,7 @@ type fakeStorage struct {
 func (f fakeStorage) StorageStats() (int, int64) { return f.blocks, f.bytes }
 
 func TestNewRegistry_ExposesCardinality(t *testing.T) {
-	reg, _ := NewRegistry(fakeCard{s: 5, n: 3, p: 7}, nil)
+	reg, _ := NewRegistry(RegistryOptions{Cardinality: fakeCard{s: 5, n: 3, p: 7}})
 	mfs, err := reg.Gather()
 	if err != nil {
 		t.Fatalf("Gather: %v", err)
@@ -42,9 +42,9 @@ func TestNewRegistry_ExposesCardinality(t *testing.T) {
 }
 
 func TestNewRegistry_ExposesStorageStats(t *testing.T) {
-	reg, m := NewRegistry(fakeCard{s: 1, n: 1, p: 1}, fakeStorage{blocks: 4, bytes: 2048})
-	if m == nil {
-		t.Fatal("expected non-nil Metrics handle")
+	reg, inst := NewRegistry(RegistryOptions{Cardinality: fakeCard{s: 1, n: 1, p: 1}, Storage: fakeStorage{blocks: 4, bytes: 2048}})
+	if inst == nil {
+		t.Fatal("expected non-nil Instruments handle")
 	}
 	mfs, err := reg.Gather()
 	if err != nil {
@@ -62,9 +62,9 @@ func TestNewRegistry_ExposesStorageStats(t *testing.T) {
 }
 
 func TestNewRegistry_PushMetricsRegistered(t *testing.T) {
-	reg, m := NewRegistry(fakeCard{}, fakeStorage{})
-	m.CompactionsTotal.Inc()
-	m.FlushesTotal.Add(2)
+	reg, inst := NewRegistry(RegistryOptions{Cardinality: fakeCard{}, Storage: fakeStorage{}})
+	inst.Maintenance.CompactionsTotal.Inc()
+	inst.Maintenance.FlushesTotal.Add(2)
 	mfs, _ := reg.Gather()
 	names := map[string]bool{}
 	for _, mf := range mfs {
