@@ -627,9 +627,9 @@ backend's own query API, so every internal metric was unreachable from any dashb
 - [x] Emit WAL size metrics — `obs_wal_bytes{wal}`, `obs_wal_segments{wal}`
 - [x] Emit log chunk count metrics — `obs_log_chunks_total`, `obs_log_streams_total`, `obs_log_chunk_bytes`
 - [x] Emit query latency metrics — `obs_http_request_duration_seconds{route,method}`, buckets 1ms–10s
-- [ ] Emit error count metrics — derived from `obs_http_requests_total{status=~"5.."}`, not a separate counter
-- [ ] HTTP middleware labelled by chi **route pattern**, with `<unmatched>` for 404s — never the raw path
-- [ ] Replace `api.New`'s seven positional parameters with `api.Deps` (10 call sites)
+- [x] Emit error count metrics — derived from `obs_http_requests_total{status=~"5.."}`, not a separate counter
+- [x] HTTP middleware labelled by chi **route pattern**, with `<unmatched>` for 404s — never the raw path
+- [x] Replace `api.New`'s seven positional parameters with `api.Deps` (10 call sites)
 - [ ] Emit ingestion rate metrics — `obs_samples_ingested_total`, `obs_log_lines_ingested_total`
 - [ ] Reject counters with a closed-set `reason` classifier — `ValidationError.Field` is client-supplied and must never become a label value
 - [ ] `observability.Component` and request-scoped loggers; migrate the 9 ad-hoc `component` call sites onto a fixed name set
