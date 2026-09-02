@@ -51,7 +51,7 @@ func newLogServer(t *testing.T, dataDir, logsWALDir string) (*api.Server, *logs.
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	mstore := metrics.NewMemoryStore()
 	engine := metrics.NewQueryEngine(mstore)
-	reg, _ := observability.NewRegistry(mstore, nil)
+	reg, _ := observability.NewRegistry(observability.RegistryOptions{Cardinality: mstore})
 	logIngester := logs.NewWALStore(lw, logStore)
 	return api.New(cfg, log, mstore, engine, reg, logIngester, nil), logStore, lw
 }
@@ -75,7 +75,7 @@ func newDiskLogServer(t *testing.T, dataDir string) (*api.Server, *logs.Store) {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	mstore := metrics.NewMemoryStore()
 	engine := metrics.NewQueryEngine(mstore)
-	reg, _ := observability.NewRegistry(mstore, nil)
+	reg, _ := observability.NewRegistry(observability.RegistryOptions{Cardinality: mstore})
 	return api.New(cfg, log, mstore, engine, reg, store, nil), store
 }
 
