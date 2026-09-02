@@ -102,8 +102,9 @@ func main() {
 	}
 
 	logsDir := filepath.Join(cfg.DataDir, "logs")
+	logsWALDir := filepath.Join(logsDir, "wal")
 	logStore, err := logs.NewStore(
-		filepath.Join(logsDir, "wal"),
+		logsWALDir,
 		filepath.Join(logsDir, "chunks"),
 		filepath.Join(logsDir, "index"),
 		cfg.WALSegmentMaxBytes,
@@ -123,17 +124,23 @@ func main() {
 	reg, inst := observability.NewRegistry(observability.RegistryOptions{
 		Cardinality: blockStore,
 		Storage:     blockStore,
+		WALs: []observability.WALSource{
+			{Name: "metrics", Stats: func() (int64, int, error) { return wal.DirStats(walDir) }},
+			{Name: "logs", Stats: func() (int64, int, error) { return wal.DirStats(logsWALDir) }},
+		},
+		Logs: logStore,
 	})
 	mx := inst.Maintenance
 	srv := api.New(api.Deps{
 		Config:      cfg,
-		Logger:      log,
+		Logger:      observability.Component(log, "api"),
 		Ingester:    store,
 		Engine:      engine,
 		Registry:    reg,
 		LogIngester: logIngester,
 		LogQuery:    logQuery,
 		HTTP:        inst.HTTP,
+		Ingest:      inst.Ingest,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -146,7 +153,7 @@ func main() {
 		FlushWALBytes:       cfg.FlushWALBytes,
 		Ranges:              compactor.Ranges(cfg.CompactionBaseRange.Milliseconds(), int64(cfg.CompactionMultiplier), cfg.CompactionLevels),
 		Retention:           cfg.Retention,
-	}, mx, log)
+	}, mx, observability.Component(log, "compactor"))
 
 	compDone := make(chan struct{})
 	go func() {
