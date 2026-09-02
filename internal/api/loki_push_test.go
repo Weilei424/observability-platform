@@ -47,7 +47,7 @@ func newPushServerWithIngester(t *testing.T, ing logs.Ingester) *api.Server {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	mstore := metrics.NewMemoryStore()
 	engine := metrics.NewQueryEngine(mstore)
-	reg, _ := observability.NewRegistry(mstore, nil)
+	reg, _ := observability.NewRegistry(observability.RegistryOptions{Cardinality: mstore})
 	return api.New(cfg, log, mstore, engine, reg, ing, nil)
 }
 
