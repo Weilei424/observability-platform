@@ -603,16 +603,58 @@ Design: `docs/superpowers/specs/2026-08-26-phase-5.2-kubernetes-helm-design.md` 
 - [x] `docs/planning/ARCHITECTURE_NOTES.md` — K8s topology: three charts, the cross-chart contract, StatefulSet rationale, and the `httpGet`-over-exec probe correction
 
 ### Phase 5.3 — Platform Self-Observability
-- [ ] Add `/metrics` endpoint for backend internals
-- [ ] Emit ingestion rate metrics
-- [ ] Emit query latency metrics
-- [ ] Emit WAL size metrics
-- [ ] Emit block count metrics
-- [ ] Emit compaction duration metrics
-- [ ] Emit log chunk count metrics
-- [ ] Emit error count metrics
-- [ ] Add Grafana dashboard for backend internals
+
+Design: `docs/superpowers/specs/2026-08-31-phase-5.3-self-observability-design.md`
+Plan: `docs/superpowers/plans/2026-08-31-phase-5.3-self-observability.md`
+
+Two items on the original list were already satisfied before this phase and are
+marked as such rather than rebuilt: `obs_blocks_total` (block count) and
+`obs_compaction_duration_seconds` (compaction duration) have been registered since
+Phase 3.4, and `/metrics` has been routed since Phase 3.3. What was missing was
+anything *scraping* that endpoint — Grafana's Prometheus datasource points at the
+backend's own query API, so every internal metric was unreachable from any dashboard.
+
+**Already shipped — verified, not rebuilt**
+- [x] `/metrics` endpoint for backend internals (`internal/api/router.go`)
+- [x] Emit block count metrics — `obs_blocks_total`, `obs_blocks_bytes`
+- [x] Emit compaction duration metrics — `obs_compaction_duration_seconds`
+
+**Instrumentation**
+- [ ] `wal.DirStats` — WAL size and segment count in one read, with `DirSize` reimplemented over it
+- [ ] `logs.Store.Stats` — stream, chunk, and chunk-byte counts, deduplicating streams across head and index
+- [ ] Split `internal/observability` into `registry.go`, `collectors.go`, `http.go`
+- [ ] WAL and logs pull collectors — a failed read emits a gap plus `obs_collector_errors_total`, never a zero
+- [ ] Emit WAL size metrics — `obs_wal_bytes{wal}`, `obs_wal_segments{wal}`
+- [ ] Emit log chunk count metrics — `obs_log_chunks_total`, `obs_log_streams_total`, `obs_log_chunk_bytes`
+- [ ] Emit query latency metrics — `obs_http_request_duration_seconds{route,method}`, buckets 1ms–10s
+- [ ] Emit error count metrics — derived from `obs_http_requests_total{status=~"5.."}`, not a separate counter
+- [ ] HTTP middleware labelled by chi **route pattern**, with `<unmatched>` for 404s — never the raw path
+- [ ] Replace `api.New`'s seven positional parameters with `api.Deps` (10 call sites)
+- [ ] Emit ingestion rate metrics — `obs_samples_ingested_total`, `obs_log_lines_ingested_total`
+- [ ] Reject counters with a closed-set `reason` classifier — `ValidationError.Field` is client-supplied and must never become a label value
+- [ ] `observability.Component` and request-scoped loggers; migrate the 9 ad-hoc `component` call sites onto a fixed name set
+
+**Deployment**
+- [ ] `observability/prometheus/prometheus.yml` scrape config
+- [ ] `prometheus` service in Docker Compose, pinned image, health-gated
+- [ ] `deployments/helm/prometheus` chart — Deployment, Service, scrape ConfigMap, emptyDir storage
+- [ ] Internals Grafana datasource (`obs-internals`) in both the Compose datasource dir and the Helm ConfigMap
+
+**Dashboard**
+- [ ] `observability/grafana/dashboards/self-observability.json` (uid `obs-self-v1`) — ingest, query, storage, maintenance rows
+- [ ] Make its exemption from the PromQL-subset rule explicit, with a guard that the exempt and enforced lists never overlap
+
+**Verification**
+- [ ] Static: internals datasource and dashboard pinned; every metric the dashboard names checked against what the registry actually exposes
+- [ ] Helm: new chart renders; Grafana's internals URL resolves to a Service the Prometheus chart creates
+- [ ] Compose: `up == 1` **and** a panel query through Grafana returns numeric data — `up` alone passes on a scrape returning zero series
+- [ ] Kind: same panel assertion in-cluster
 - [ ] Verify: platform dashboard shows ingest/query/storage health
+
+**Docs**
+- [ ] `docs/runbooks/self-observability.md` — both runtimes, the two-Prometheus-datasource distinction, troubleshooting
+- [ ] `README.md` — self-observability section and port 9090
+- [ ] `docs/planning/ARCHITECTURE_NOTES.md` — separate-store decision, collector error policy, route-label rule, component name set, datasource uids
 
 ### Phase 5.4 — Documentation and Demo Runbook
 - [ ] Add architecture diagram for metrics path
