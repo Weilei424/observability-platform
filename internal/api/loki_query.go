@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/masonwheeler/observability-platform/internal/logs"
 	"github.com/masonwheeler/observability-platform/internal/metrics"
+	"github.com/masonwheeler/observability-platform/internal/observability"
 )
 
 // maxEpochSeconds is the largest whole-second epoch whose nanosecond count still
@@ -157,8 +157,8 @@ func parseLokiDirection(s string) (logs.Direction, error) {
 // metrics-only test wiring). Production always configures it.
 func (s *Server) requireLogQuery(w http.ResponseWriter, r *http.Request) bool {
 	if s.logQuery == nil {
-		s.log.Error("logs query engine not configured", "component", "logs_query",
-			"request_id", chimiddleware.GetReqID(r.Context()))
+		observability.Component(observability.FromContext(r.Context()), "logs_query").Error(
+			"logs query engine not configured")
 		writeLokiError(w, http.StatusInternalServerError, "logs query engine not configured")
 		return false
 	}
@@ -217,8 +217,8 @@ func parseLokiLogSelector(w http.ResponseWriter, queryStr string) (logs.LogSelec
 func (s *Server) respondLokiStreams(w http.ResponseWriter, r *http.Request, logMsg string, fetch func() ([]logs.StreamResult, error)) {
 	results, err := fetch()
 	if err != nil {
-		s.log.Error(logMsg, "component", "logs_query",
-			"request_id", chimiddleware.GetReqID(r.Context()), "err", err)
+		observability.Component(observability.FromContext(r.Context()), "logs_query").Error(
+			logMsg, "err", err)
 		writeLokiError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
@@ -319,8 +319,8 @@ func (s *Server) handleLokiQueryRange(w http.ResponseWriter, r *http.Request) {
 	if isMetric {
 		series, err := s.logQuery.EvalMetricRange(r.Context(), mq, startNs, endNs, stepNs)
 		if err != nil {
-			s.log.Error("loki metric query_range failed", "component", "logs_query",
-				"request_id", chimiddleware.GetReqID(r.Context()), "err", err)
+			observability.Component(observability.FromContext(r.Context()), "logs_query").Error(
+				"loki metric query_range failed", "err", err)
 			writeLokiError(w, http.StatusInternalServerError, "internal error")
 			return
 		}
@@ -423,8 +423,8 @@ func (s *Server) handleLokiQuery(w http.ResponseWriter, r *http.Request) {
 		case err == nil:
 			samples, evalErr := s.logQuery.EvalMetricInstant(r.Context(), mq, timeNs)
 			if evalErr != nil {
-				s.log.Error("loki metric query failed", "component", "logs_query",
-					"request_id", chimiddleware.GetReqID(r.Context()), "err", evalErr)
+				observability.Component(observability.FromContext(r.Context()), "logs_query").Error(
+					"loki metric query failed", "err", evalErr)
 				writeLokiError(w, http.StatusInternalServerError, "internal error")
 				return
 			}

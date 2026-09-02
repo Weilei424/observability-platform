@@ -6,6 +6,7 @@ import (
 	"time"
 
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
+	"github.com/masonwheeler/observability-platform/internal/observability"
 )
 
 func Logger(log *slog.Logger) func(http.Handler) http.Handler {
@@ -14,14 +15,16 @@ func Logger(log *slog.Logger) func(http.Handler) http.Handler {
 			start := time.Now()
 			ww := chimiddleware.NewWrapResponseWriter(w, r.ProtoMajor)
 
+			reqLog := log.With(slog.String("request_id", chimiddleware.GetReqID(r.Context())))
+			r = r.WithContext(observability.ContextWithLogger(r.Context(), reqLog))
+
 			next.ServeHTTP(ww, r)
 
-			log.Info("request",
+			reqLog.Info("request",
 				"method", r.Method,
 				"path", r.URL.Path,
 				"status", ww.Status(),
 				"duration", time.Since(start).String(),
-				"request_id", chimiddleware.GetReqID(r.Context()),
 			)
 		})
 	}

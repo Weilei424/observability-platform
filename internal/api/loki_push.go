@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"unicode/utf8"
 
-	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/masonwheeler/observability-platform/internal/logs"
+	"github.com/masonwheeler/observability-platform/internal/observability"
 )
 
 type lokiPushRequest struct {
@@ -166,10 +166,8 @@ func (s *Server) handleLokiPush(w http.ResponseWriter, r *http.Request) {
 
 	for i, e := range entries {
 		if err := s.logIngester.Append(e.labels, e.tsNs, e.line); err != nil {
-			s.log.Error("log ingester append failed",
-				"component", "logs_push",
-				"request_id", chimiddleware.GetReqID(r.Context()),
-				"err", err)
+			observability.Component(observability.FromContext(r.Context()), "logs_push").Error(
+				"log ingester append failed", "err", err)
 			// entries[:i] already landed; the push handler returns on the first
 			// append error rather than collecting them, so count what landed
 			// before this one plus the one failure, then stop.
