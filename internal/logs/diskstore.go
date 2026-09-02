@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/masonwheeler/observability-platform/internal/storage/fsutil"
@@ -356,6 +357,9 @@ func (s *Store) Stats() (streams, chunks int, bytes int64, err error) {
 	}
 	for _, e := range entries {
 		if e.IsDir() {
+			continue
+		}
+		if !strings.HasSuffix(e.Name(), ".chunk") {
 			continue
 		}
 		fi, ferr := e.Info()

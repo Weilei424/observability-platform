@@ -787,3 +787,77 @@ func TestStoreStatsDoesNotDoubleCountAStreamInBothHeadAndIndex(t *testing.T) {
 		t.Errorf("streams = %d, want 1; the same stream in head and index is one stream", streams)
 	}
 }
+
+func TestStoreStatsWithMissingChunksDirectory(t *testing.T) {
+	dir := t.TempDir()
+	chunksDir := filepath.Join(dir, "chunks")
+	
+	s := newTestStore(t, dir, 1<<30)
+	defer s.Close()
+	
+	// Append some lines so we have in-memory streams
+	appendLine(t, s, map[string]string{"service": "api"}, 1_000, "one")
+	appendLine(t, s, map[string]string{"service": "web"}, 2_000, "two")
+	
+	// Remove the chunks directory entirely
+	if err := os.RemoveAll(chunksDir); err != nil {
+		t.Fatalf("RemoveAll: %v", err)
+	}
+	
+	// Stats should still report in-memory streams, with bytes=0 and no error
+	streams, chunks, bytes, err := s.Stats()
+	if err != nil {
+		t.Fatalf("Stats with missing chunks dir: %v", err)
+	}
+	if streams != 2 {
+		t.Errorf("streams = %d, want 2", streams)
+	}
+	if chunks != 0 {
+		t.Errorf("chunks = %d, want 0 (no persisted chunks)", chunks)
+	}
+	if bytes != 0 {
+		t.Errorf("bytes = %d, want 0 when chunks dir missing", bytes)
+	}
+}
+
+func TestStoreStatsIgnoresOrphanedChunkTempFiles(t *testing.T) {
+	s := newTestStore(t, t.TempDir(), 1<<30)
+	defer s.Close()
+	
+	// Append and flush to create a real chunk file
+	appendLine(t, s, map[string]string{"service": "api"}, 1_000, "one")
+	if err := s.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	
+	// Get baseline byte count
+	_, chunks1, bytes1, err := s.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if chunks1 != 1 || bytes1 <= 0 {
+		t.Fatalf("baseline stats wrong: chunks=%d bytes=%d", chunks1, bytes1)
+	}
+	
+	// Create an orphaned .chunk.tmp file (simulating a crash between fsync and rename)
+	s.mu.Lock()
+	actualChunksDir := s.chunksDir
+	s.mu.Unlock()
+	
+	tmpPath := filepath.Join(actualChunksDir, "orphaned.chunk.tmp")
+	if err := os.WriteFile(tmpPath, []byte("fake chunk data with some bytes"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	
+	// Stats should NOT count the .chunk.tmp file's bytes
+	_, chunks2, bytes2, err := s.Stats()
+	if err != nil {
+		t.Fatalf("Stats with orphaned tmp: %v", err)
+	}
+	if chunks2 != 1 {
+		t.Errorf("chunks = %d, want 1 (.tmp not counted)", chunks2)
+	}
+	if bytes2 != bytes1 {
+		t.Errorf("bytes = %d, want %d (orphaned .tmp should not be counted)", bytes2, bytes1)
+	}
+}
