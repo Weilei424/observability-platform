@@ -48,7 +48,14 @@ func newPushServerWithIngester(t *testing.T, ing logs.Ingester) *api.Server {
 	mstore := metrics.NewMemoryStore()
 	engine := metrics.NewQueryEngine(mstore)
 	reg, _ := observability.NewRegistry(observability.RegistryOptions{Cardinality: mstore})
-	return api.New(cfg, log, mstore, engine, reg, ing, nil)
+	return api.New(api.Deps{
+		Config:      cfg,
+		Logger:      log,
+		Ingester:    mstore,
+		Engine:      engine,
+		Registry:    reg,
+		LogIngester: ing,
+	})
 }
 
 func postPush(t *testing.T, srv *api.Server, body string, contentType string) *httptest.ResponseRecorder {

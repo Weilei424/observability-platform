@@ -52,7 +52,15 @@ func newLokiServerAt(t *testing.T, dir string) (*api.Server, *logs.Store, func()
 	mstore := metrics.NewMemoryStore()
 	engine := metrics.NewQueryEngine(mstore)
 	reg, _ := observability.NewRegistry(observability.RegistryOptions{Cardinality: mstore})
-	return api.New(cfg, log, mstore, engine, reg, store, logs.NewQueryEngine(store)), store, closeStore
+	return api.New(api.Deps{
+		Config:      cfg,
+		Logger:      log,
+		Ingester:    mstore,
+		Engine:      engine,
+		Registry:    reg,
+		LogIngester: store,
+		LogQuery:    logs.NewQueryEngine(store),
+	}), store, closeStore
 }
 
 func pushLogs(t *testing.T, srv *api.Server, body string) {

@@ -53,7 +53,14 @@ func newLogServer(t *testing.T, dataDir, logsWALDir string) (*api.Server, *logs.
 	engine := metrics.NewQueryEngine(mstore)
 	reg, _ := observability.NewRegistry(observability.RegistryOptions{Cardinality: mstore})
 	logIngester := logs.NewWALStore(lw, logStore)
-	return api.New(cfg, log, mstore, engine, reg, logIngester, nil), logStore, lw
+	return api.New(api.Deps{
+		Config:      cfg,
+		Logger:      log,
+		Ingester:    mstore,
+		Engine:      engine,
+		Registry:    reg,
+		LogIngester: logIngester,
+	}), logStore, lw
 }
 
 // newDiskLogServer builds a server whose logs ingester is the PRODUCTION
@@ -76,7 +83,14 @@ func newDiskLogServer(t *testing.T, dataDir string) (*api.Server, *logs.Store) {
 	mstore := metrics.NewMemoryStore()
 	engine := metrics.NewQueryEngine(mstore)
 	reg, _ := observability.NewRegistry(observability.RegistryOptions{Cardinality: mstore})
-	return api.New(cfg, log, mstore, engine, reg, store, nil), store
+	return api.New(api.Deps{
+		Config:      cfg,
+		Logger:      log,
+		Ingester:    mstore,
+		Engine:      engine,
+		Registry:    reg,
+		LogIngester: store,
+	}), store
 }
 
 const pushBody = `{"streams":[{"stream":{"service":"api"},"values":[["1700000000000000000","first"],["1700000000000000001","second"]]}]}`

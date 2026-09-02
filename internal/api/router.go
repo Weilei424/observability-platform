@@ -12,11 +12,17 @@ func (s *Server) buildRouter() chi.Router {
 
 	r.Use(chimiddleware.RequestID)
 	r.Use(middleware.Logger(s.log))
+	r.Use(middleware.Metrics(s.http))
 
 	r.Get("/healthz", s.handleHealthz)
 	r.Get("/readyz", s.handleReadyz)
 
-	r.Handle("/metrics", promhttp.HandlerFor(s.reg, promhttp.HandlerOpts{}))
+	// A Deps without a Registry is normal in tests. Registering promhttp with a
+	// nil registry panics at request time, which would surface as an unrelated
+	// handler test failing.
+	if s.reg != nil {
+		r.Handle("/metrics", promhttp.HandlerFor(s.reg, promhttp.HandlerOpts{}))
+	}
 
 	r.Post("/api/v1/ingest/metrics", s.handleIngestMetrics)
 	r.Get("/api/v1/query", s.handleQuery)

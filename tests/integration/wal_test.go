@@ -55,7 +55,14 @@ func newWALServer(t *testing.T, dataDir, walDir string) (*api.Server, *wal.WAL) 
 	store := metrics.NewWALStore(w, blockStore, dataDir)
 	engine := metrics.NewQueryEngine(blockStore)
 	reg, _ := observability.NewRegistry(observability.RegistryOptions{Cardinality: blockStore})
-	return api.New(cfg, log, store, engine, reg, logs.NewMemoryStore(), nil), w
+	return api.New(api.Deps{
+		Config:      cfg,
+		Logger:      log,
+		Ingester:    store,
+		Engine:      engine,
+		Registry:    reg,
+		LogIngester: logs.NewMemoryStore(),
+	}), w
 }
 
 func TestIngestRestartQuery(t *testing.T) {

@@ -27,7 +27,14 @@ func newTestServer(t *testing.T, dataDir string) *api.Server {
 	store := metrics.NewMemoryStore()
 	engine := metrics.NewQueryEngine(store)
 	reg, _ := observability.NewRegistry(observability.RegistryOptions{Cardinality: store})
-	return api.New(cfg, log, store, engine, reg, logs.NewMemoryStore(), nil)
+	return api.New(api.Deps{
+		Config:      cfg,
+		Logger:      log,
+		Ingester:    store,
+		Engine:      engine,
+		Registry:    reg,
+		LogIngester: logs.NewMemoryStore(),
+	})
 }
 
 func TestHealthz_Returns200(t *testing.T) {
@@ -85,5 +92,27 @@ func TestReadyz_UncreatableDir_Returns503(t *testing.T) {
 	}
 	if body["reason"] == "" {
 		t.Error("body.reason should not be empty")
+	}
+}
+
+// The server must work when Deps carries neither instruments nor a registry: that
+// is how most tests construct it, and a nil dereference would surface as an
+// unrelated handler test failing rather than as a constructor problem.
+//
+// package api_test cannot read Server.http, so this asserts the behaviour that
+// depends on it: a request goes through the metrics middleware and comes back 200.
+func TestNewWithoutInstrumentsStillServesRequests(t *testing.T) {
+	store := metrics.NewMemoryStore()
+	srv := api.New(api.Deps{
+		Config:   &config.Config{HTTPAddr: ":8080", DataDir: t.TempDir(), LogLevel: "info"},
+		Logger:   slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Ingester: store,
+		Engine:   metrics.NewQueryEngine(store),
+	})
+
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("/healthz = %d, want 200 with no instruments and no registry configured", rec.Code)
 	}
 }

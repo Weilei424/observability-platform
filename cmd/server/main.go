@@ -125,7 +125,16 @@ func main() {
 		Storage:     blockStore,
 	})
 	mx := inst.Maintenance
-	srv := api.New(cfg, log, store, engine, reg, logIngester, logQuery)
+	srv := api.New(api.Deps{
+		Config:      cfg,
+		Logger:      log,
+		Ingester:    store,
+		Engine:      engine,
+		Registry:    reg,
+		LogIngester: logIngester,
+		LogQuery:    logQuery,
+		HTTP:        inst.HTTP,
+	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

@@ -27,7 +27,14 @@ func newIngestTestServer(t *testing.T) (*api.Server, *metrics.MemoryStore) {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	reg, _ := observability.NewRegistry(observability.RegistryOptions{Cardinality: store})
-	return api.New(cfg, log, store, engine, reg, logs.NewMemoryStore(), nil), store
+	return api.New(api.Deps{
+		Config:      cfg,
+		Logger:      log,
+		Ingester:    store,
+		Engine:      engine,
+		Registry:    reg,
+		LogIngester: logs.NewMemoryStore(),
+	}), store
 }
 
 func postIngest(t *testing.T, srv *api.Server, body any) *httptest.ResponseRecorder {
