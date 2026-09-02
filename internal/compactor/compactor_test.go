@@ -70,7 +70,8 @@ func testConfig() compactor.Config {
 func TestCompactor_RunOnce_FlushesCompactsAndQueryable(t *testing.T) {
 	dir := t.TempDir()
 	ws, bs := newStores(t, dir)
-	_, mx := observability.NewRegistry(bs, bs)
+	_, inst := observability.NewRegistry(observability.RegistryOptions{Cardinality: bs, Storage: bs})
+	mx := inst.Maintenance
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	c := compactor.New(ws, bs, ws, time.Now, testConfig(), mx, log)
 
@@ -108,7 +109,8 @@ func TestCompactor_RunOnce_FlushesCompactsAndQueryable(t *testing.T) {
 func TestCompactor_RunOnce_RetentionDeletesExpired(t *testing.T) {
 	dir := t.TempDir()
 	ws, bs := newStores(t, dir)
-	reg, mx := observability.NewRegistry(bs, bs)
+	reg, inst := observability.NewRegistry(observability.RegistryOptions{Cardinality: bs, Storage: bs})
+	mx := inst.Maintenance
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	ingestSealedBlock(t, ws, "m", 0) // block MaxTime 119000
@@ -131,7 +133,8 @@ func TestCompactor_RunOnce_RetentionDeletesExpired(t *testing.T) {
 func TestCompactor_CompactedDataSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
 	ws, bs := newStores(t, dir)
-	_, mx := observability.NewRegistry(bs, bs)
+	_, inst := observability.NewRegistry(observability.RegistryOptions{Cardinality: bs, Storage: bs})
+	mx := inst.Maintenance
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	c := compactor.New(ws, bs, ws, time.Now, testConfig(), mx, log)
 
@@ -166,7 +169,8 @@ func TestCompactor_CompactedDataSurvivesRestart(t *testing.T) {
 func TestCompactor_RunOnce_FlushesOnSealedChunkThreshold(t *testing.T) {
 	dir := t.TempDir()
 	ws, bs := newStores(t, dir)
-	_, mx := observability.NewRegistry(bs, bs)
+	_, inst := observability.NewRegistry(observability.RegistryOptions{Cardinality: bs, Storage: bs})
+	mx := inst.Maintenance
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	cfg := testConfig()
@@ -193,7 +197,8 @@ func TestCompactor_RunOnce_FlushesOnSealedChunkThreshold(t *testing.T) {
 func TestCompactor_RunOnce_FlushesOnWALBytesThreshold(t *testing.T) {
 	dir := t.TempDir()
 	ws, bs := newStores(t, dir)
-	_, mx := observability.NewRegistry(bs, bs)
+	_, inst := observability.NewRegistry(observability.RegistryOptions{Cardinality: bs, Storage: bs})
+	mx := inst.Maintenance
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	cfg := testConfig()
@@ -214,7 +219,8 @@ func TestCompactor_RunOnce_FlushesOnWALBytesThreshold(t *testing.T) {
 func TestCompactor_RunOnce_NoOpFlushNotCounted(t *testing.T) {
 	dir := t.TempDir()
 	ws, bs := newStores(t, dir)
-	reg, mx := observability.NewRegistry(bs, bs)
+	reg, inst := observability.NewRegistry(observability.RegistryOptions{Cardinality: bs, Storage: bs})
+	mx := inst.Maintenance
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	c := compactor.New(ws, bs, ws, time.Now, testConfig(), mx, log) // FlushInterval 0 → always due
 
@@ -238,7 +244,8 @@ func TestCompactor_RunOnce_NoOpFlushNotCounted(t *testing.T) {
 func TestCompactor_RunOnce_MetricsReflectMaintenance(t *testing.T) {
 	dir := t.TempDir()
 	ws, bs := newStores(t, dir)
-	reg, mx := observability.NewRegistry(bs, bs)
+	reg, inst := observability.NewRegistry(observability.RegistryOptions{Cardinality: bs, Storage: bs})
+	mx := inst.Maintenance
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	c := compactor.New(ws, bs, ws, time.Now, testConfig(), mx, log) // Retention 0
 
