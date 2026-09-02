@@ -54,7 +54,7 @@ func newWALServer(t *testing.T, dataDir, walDir string) (*api.Server, *wal.WAL) 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	store := metrics.NewWALStore(w, blockStore, dataDir)
 	engine := metrics.NewQueryEngine(blockStore)
-	reg, _ := observability.NewRegistry(blockStore, nil)
+	reg, _ := observability.NewRegistry(observability.RegistryOptions{Cardinality: blockStore})
 	return api.New(cfg, log, store, engine, reg, logs.NewMemoryStore(), nil), w
 }
 
