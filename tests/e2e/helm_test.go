@@ -26,9 +26,10 @@ import (
 )
 
 const (
-	backendChart   = "../../deployments/helm/backend"
-	grafanaChart   = "../../deployments/helm/grafana"
-	producersChart = "../../deployments/helm/producers"
+	backendChart    = "../../deployments/helm/backend"
+	grafanaChart    = "../../deployments/helm/grafana"
+	producersChart  = "../../deployments/helm/producers"
+	prometheusChart = "../../deployments/helm/prometheus"
 
 	routerPath = "../../internal/api/router.go"
 	configPath = "../../internal/config/config.go"
@@ -349,6 +350,154 @@ func splitBackendURL(url string) (host string, port int, ok bool) {
 		n = n*10 + int(r-'0')
 	}
 	return h, n, true
+}
+
+// The cross-chart contract: Grafana's internals datasource URL names a Service
+// the PROMETHEUS chart must create. Helm cannot check across charts, so this
+// renders both and compares. Without it, a rename in either chart is silent until
+// someone opens the dashboard in a live cluster.
+func TestGrafanaInternalsURLResolvesToThePrometheusService(t *testing.T) {
+	grafanaValues := renderValues(t, grafanaChart)
+	internals, ok := grafanaValues["internals"].(map[string]any)
+	if !ok {
+		t.Fatal("grafana values have no internals section")
+	}
+	rawURL, _ := internals["url"].(string)
+	host, port := hostPortFromURL(t, rawURL)
+
+	objs := renderChart(t, prometheusChart)
+	svc := findObject(t, objs, "Service", host)
+	if !servicePortExists(svc, port) {
+		t.Errorf("grafana internals.url points at %s:%s, but the prometheus chart's Service exposes no such port", host, port)
+	}
+}
+
+// The scrape target inside the cluster must name the BACKEND chart's Service, not
+// localhost and not the compose service name.
+func TestPrometheusChartScrapesTheBackendService(t *testing.T) {
+	promValues := renderValues(t, prometheusChart)
+	backend, ok := promValues["backend"].(map[string]any)
+	if !ok {
+		t.Fatal("prometheus values have no backend section")
+	}
+	target, _ := backend["url"].(string)
+	host, port := hostPortFromURL(t, target)
+
+	backendObjs := renderChart(t, backendChart)
+	svc := findObject(t, backendObjs, "Service", host)
+	if !servicePortExists(svc, port) {
+		t.Errorf("prometheus scrapes %s:%s, which is not a port on the backend chart's Service", host, port)
+	}
+
+	// And the rendered ConfigMap must actually contain that target — a values key
+	// nothing templates is a value that does nothing.
+	promObjs := renderChart(t, prometheusChart)
+	cm := findObject(t, promObjs, "ConfigMap", "")
+	if !strings.Contains(rawOf(t, cm), host+":"+port) {
+		t.Errorf("rendered scrape ConfigMap does not contain the target %s:%s", host, port)
+	}
+}
+
+func TestPrometheusChartLints(t *testing.T) {
+	runHelm(t, "lint", prometheusChart)
+}
+
+// renderValues returns a chart's default values (values.yaml), decoded as a
+// nested map. It shells out to `helm show values`, which reads a chart's
+// values without rendering any templates — the right tool for a values-only
+// claim like a cross-chart URL, where rendering would need answers (like
+// grafana's admin password) that this check has no reason to supply.
+func renderValues(t *testing.T, chart string) map[string]any {
+	t.Helper()
+	helmAvailable(t)
+
+	out, err := exec.Command("helm", "show", "values", chart).CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm show values %s failed: %v\n%s", chart, err, out)
+	}
+	var values map[string]any
+	if err := yaml.Unmarshal(out, &values); err != nil {
+		t.Fatalf("%s: values.yaml is not valid YAML: %v", chart, err)
+	}
+	return values
+}
+
+// renderChart is render, under the name the newer cross-chart tests use.
+// Kept as a thin alias so both spellings in this file exercise the same
+// implementation rather than drifting into two ways to shell out to helm.
+func renderChart(t *testing.T, chart string, setArgs ...string) []k8sObject {
+	return render(t, chart, setArgs...)
+}
+
+// hostPortFromURL parses http://host:port into its parts, failing the test
+// outright on a malformed URL — every caller needs both values to proceed, so
+// returning zero values here would only fail more confusingly one line later.
+func hostPortFromURL(t *testing.T, rawURL string) (host, port string) {
+	t.Helper()
+	h, p, ok := splitBackendURL(rawURL)
+	if !ok {
+		t.Fatalf("%q is not an http://host:port URL", rawURL)
+	}
+	return h, fmt.Sprintf("%d", p)
+}
+
+// findObject returns the rendered object of the given kind and name, failing
+// the test if none matches. An empty name matches by kind alone, for a caller
+// that only cares that exactly one object of that kind exists (a chart's
+// single ConfigMap) and has no fixed name to assert as part of the contract.
+func findObject(t *testing.T, objs []k8sObject, kind, name string) *k8sObject {
+	t.Helper()
+	for i := range objs {
+		if objs[i].Kind != kind {
+			continue
+		}
+		if name != "" && objs[i].Metadata.Name != name {
+			continue
+		}
+		return &objs[i]
+	}
+	t.Fatalf("no rendered %s named %q found", kind, name)
+	return nil
+}
+
+// servicePortExists reports whether a rendered Service exposes the given
+// port. Compared as text because the port arrives as a string parsed out of a
+// URL, not as a typed number.
+func servicePortExists(svc *k8sObject, port string) bool {
+	for _, p := range svc.Spec.Ports {
+		if fmt.Sprintf("%d", p.Port) == port {
+			return true
+		}
+	}
+	return false
+}
+
+// rawOf returns every string value in an object's Data (a ConfigMap's or
+// Secret's payload) joined into one blob, so a substring check does not need
+// to hardcode which data key holds the content it is looking for.
+func rawOf(t *testing.T, o *k8sObject) string {
+	t.Helper()
+	if o == nil {
+		t.Fatal("rawOf: nil object")
+	}
+	var b strings.Builder
+	for _, v := range o.Data {
+		b.WriteString(v)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// runHelm runs `helm <args...>` and fails the test on a non-zero exit,
+// printing the combined output so a failure shows what helm actually said.
+func runHelm(t *testing.T, args ...string) string {
+	t.Helper()
+	helmAvailable(t)
+	out, err := exec.Command("helm", args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return string(out)
 }
 
 // TestBackendProbePathsExist checks every probe against the real router.
