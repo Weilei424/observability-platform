@@ -1,0 +1,6 @@
+apiVersion: v2
+name: observability-platform-prometheus
+description: Prometheus scraping the observability backend's own /metrics for the platform self-observability dashboard
+type: application
+version: 0.1.0
+appVersion: "2.53.0"
