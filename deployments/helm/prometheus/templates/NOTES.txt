@@ -1,0 +1,9 @@
+Prometheus is scraping the observability backend at {{ .Values.backend.url }}/metrics.
+
+Check the scrape target:
+  kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "prometheus.name" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  open http://localhost:{{ .Values.service.port }}/targets
+
+The "Observability Platform Internals" dashboard in Grafana reads from this
+instance through the obs-internals datasource. If its panels are empty, check
+the target above first.
