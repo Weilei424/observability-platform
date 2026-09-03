@@ -637,7 +637,7 @@ backend's own query API, so every internal metric was unreachable from any dashb
 **Deployment**
 - [x] `observability/prometheus/prometheus.yml` scrape config
 - [x] `prometheus` service in Docker Compose, pinned image, health-gated
-- [ ] `deployments/helm/prometheus` chart — Deployment, Service, scrape ConfigMap, emptyDir storage
+- [x] `deployments/helm/prometheus` chart — Deployment, Service, scrape ConfigMap, emptyDir storage
 - [x] Internals Grafana datasource (`obs-internals`) in both the Compose datasource dir and the Helm ConfigMap
 
 **Dashboard**
@@ -646,7 +646,7 @@ backend's own query API, so every internal metric was unreachable from any dashb
 
 **Verification**
 - [x] Static: internals datasource and dashboard pinned; every metric the dashboard names checked against what the registry actually exposes
-- [ ] Helm: new chart renders; Grafana's internals URL resolves to a Service the Prometheus chart creates
+- [x] Helm: new chart renders; Grafana's internals URL resolves to a Service the Prometheus chart creates
 - [ ] Compose: `up == 1` **and** a panel query through Grafana returns numeric data — `up` alone passes on a scrape returning zero series
 - [ ] Kind: same panel assertion in-cluster
 - [ ] Verify: platform dashboard shows ingest/query/storage health
