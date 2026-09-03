@@ -1,11 +1,12 @@
 # Helm Charts
 
-Three charts, installed separately rather than as one umbrella chart, because they scale
+Four charts, installed separately rather than as one umbrella chart, because they scale
 and fail independently: the backend is stateful and singular, Grafana is stateless and
-singular, and the producers are optional demo traffic you might want to disable or scale
-without touching either of the other two. See
-[`docs/runbooks/kubernetes-demo.md`](../../docs/runbooks/kubernetes-demo.md) for the
-install walkthrough; this file is the values reference.
+singular, the producers are optional demo traffic you might want to disable or scale
+without touching either of the other two, and Prometheus scrapes the backend's own
+`/metrics` so the self-observability dashboard has something to read in the Kubernetes
+demo. See [`docs/runbooks/kubernetes-demo.md`](../../docs/runbooks/kubernetes-demo.md)
+for the install walkthrough; this file is the values reference.
 
 ## Cross-chart contract
 
@@ -21,6 +22,14 @@ Helm never checks a claim one chart makes about another.
 `tests/e2e/helm_test.go`'s `TestCrossChartBackendURLResolves` is what actually enforces
 this: it renders all three charts and fails if any `backend.url` doesn't resolve to a
 Service name and port the backend chart's own rendered output defines.
+
+The same pattern applies one level over: the grafana chart's `internals.url` defaults to
+`http://observability-prometheus:9090`, a claim about the Service the **prometheus**
+chart creates via its own pinned `fullnameOverride`. `TestGrafanaInternalsURLResolvesToThePrometheusService`
+enforces that direction, and `TestPrometheusChartScrapesTheBackendService` enforces the
+prometheus chart's own `backend.url` the same way `TestCrossChartBackendURLResolves` does
+for grafana and producers — including checking that the rendered scrape ConfigMap
+actually contains the resolved target, not just that the value parses.
 
 ## `backend` chart
 
@@ -134,14 +143,43 @@ three empty dashboards.
 | `resources.requests.memory` | `64Mi` | |
 | `resources.limits.memory` | `128Mi` | |
 
+## `prometheus` chart
+
+`deployments/helm/prometheus/` — a single-replica Deployment running upstream
+`prom/prometheus`, scraping only the backend's own `/metrics`. It exists so the
+"Observability Platform Internals" dashboard has a datasource to read in the Kubernetes
+demo the same way the Compose `prometheus` service already gives it one; it is not a
+general-purpose monitoring stack.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `fullnameOverride` | `observability-prometheus` | Pinned Service/Deployment name. The grafana chart's `internals.url` depends on this exact value — see Cross-chart contract above. |
+| `image.repository` | `prom/prometheus` | Upstream Prometheus image. |
+| `image.tag` | `v2.53.0` | Pinned, matching the Compose demo's Prometheus version. |
+| `image.pullPolicy` | `IfNotPresent` | |
+| `service.port` | `9090` | Prometheus HTTP port. Must match the port half of the grafana chart's `internals.url`. |
+| `backend.url` | `http://observability-backend:8080` | The scrape target. Same cross-chart claim as the grafana and producers charts' `backend.url` — must resolve to the backend chart's Service; see Cross-chart contract above. The ConfigMap builds the scrape target with `trimPrefix "http://" .Values.backend.url`, so the rendered target is a bare `host:port` — Prometheus rejects a `static_configs` target that still carries a URL scheme. |
+| `scrapeInterval` | `15s` | Matches the Compose Prometheus's `global.scrape_interval`. |
+| `retention` | `24h` | Passed straight through to `--storage.tsdb.retention.time`. Only matters relative to the emptyDir below — data this Prometheus holds does not survive a pod reschedule regardless of what this says. |
+| `resources.requests.cpu` | `100m` | |
+| `resources.requests.memory` | `256Mi` | |
+| `resources.limits.memory` | `1Gi` | |
+
+Storage is an `emptyDir`, deliberately not a PVC: this chart exists to make the
+self-observability dashboard render in the Kubernetes demo, not to ship a production
+Prometheus. Every sample is lost when the pod is rescheduled. If you want internals
+metrics to survive that, run a real Prometheus (e.g. `kube-prometheus-stack`) and point
+it at the backend's `/metrics` — the endpoint this chart scrapes is the same one a
+production Prometheus would use.
+
 ## Static validation
 
 `tests/e2e/helm_test.go` runs in plain `go test ./...` — no cluster required — and skips
 itself with a clear message if `helm` isn't on `PATH`. It covers `helm lint` for all
-three charts, the cross-chart URL check described above, that every rendered probe path
-is a real route in `internal/api/router.go`, that every backend ConfigMap key has a
-matching config default, and that rendering Grafana without a password fails as
-designed.
+four charts, the cross-chart URL checks described above (backend, and the internals/
+prometheus pair), that every rendered probe path is a real route in
+`internal/api/router.go`, that every backend ConfigMap key has a matching config
+default, and that rendering Grafana without a password fails as designed.
 
 `tests/e2e/kind_smoke.sh` is the cluster-dependent counterpart: it builds and loads the
 three images into a real `kind` cluster, installs all three charts in the documented
