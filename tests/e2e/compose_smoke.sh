@@ -3,7 +3,10 @@
 # Real-stack test: brings up the Docker Compose demo and drives it through
 # Grafana's own HTTP API, not the backend's. Covers both halves of the demo —
 # the Loki datasource, logs dashboard, and storage path from Phase 4.5, and the
-# Prometheus datasource plus both metric dashboards from Phase 5.1.
+# Prometheus datasource plus both metric dashboards from Phase 5.1 — plus the
+# platform's own self-observability path from Phase 5.3: the real Prometheus
+# that scrapes the backend's /metrics, and the internals panel queries Grafana
+# serves from it.
 #
 # The other two checks in `make smoke-logs` deliberately stop short of this.
 # tests/e2e/provisioning_test.go reads the provisioning files without starting
@@ -32,6 +35,7 @@ COMPOSE_FILE="$REPO_ROOT/deployments/docker/docker-compose.yml"
 # volumes of a stack someone started with `make local-up`.
 PROJECT="${OBS_COMPOSE_PROJECT:-obs-compose-e2e}"
 GRAFANA="${GRAFANA_ADDR:-http://localhost:3000}"
+PROMETHEUS="${PROMETHEUS_ADDR:-http://localhost:9090}"
 BACKEND="${BACKEND_ADDR:-http://localhost:8080}"
 GRAFANA_AUTH="${GRAFANA_AUTH:-admin:admin}"
 KEEP_UP="${OBS_COMPOSE_KEEP_UP:-0}"
@@ -114,6 +118,17 @@ promquery() {
     curl -s "${CURL_TIMEOUTS[@]}" -u "$GRAFANA_AUTH" -H 'Content-Type: application/json' \
         -X POST "$GRAFANA/api/ds/query" \
         -d "{\"queries\":[{\"refId\":\"A\",\"datasource\":{\"type\":\"prometheus\",\"uid\":\"obs-prometheus\"},\"expr\":\"$1\",\"range\":true,\"intervalMs\":5000,\"maxDataPoints\":100}],\"from\":\"now-5m\",\"to\":\"now\"}"
+}
+
+# internalsquery <expr> — one panel query against the INTERNALS datasource (the
+# real Prometheus), as the self-observability dashboard issues it. Separate from
+# promquery because the uid differs and pointing this at obs-prometheus would
+# query the backend's own TSDB, which holds no obs_* series and returns an empty
+# frame that looks like a broken scrape.
+internalsquery() {
+    curl -s "${CURL_TIMEOUTS[@]}" -u "$GRAFANA_AUTH" -H 'Content-Type: application/json' \
+        -X POST "$GRAFANA/api/ds/query" \
+        -d "{\"queries\":[{\"refId\":\"A\",\"datasource\":{\"type\":\"prometheus\",\"uid\":\"obs-internals\"},\"expr\":\"$1\",\"range\":true,\"intervalMs\":15000,\"maxDataPoints\":100}],\"from\":\"now-15m\",\"to\":\"now\"}"
 }
 
 # numeric_columns <body> — how many non-empty all-numeric arrays the dataframe
@@ -199,6 +214,11 @@ grafana_up()     { curl -sf "${CURL_TIMEOUTS[@]}" -u "$GRAFANA_AUTH" "$GRAFANA/a
 datasource_ok()  { gapi /api/datasources/uid/obs-loki/health | grep -q '"status":"OK"'; }
 sample_app_up()  { gapi /api/datasources/uid/obs-loki/resources/label/service/values | grep -q '"worker"'; }
 prom_datasource_ok()   { gapi /api/datasources/uid/obs-prometheus/health | grep -q '"status":"OK"'; }
+# The self-observability Prometheus (Phase 5.3): a separate service that scrapes
+# the backend's own /metrics. Distinct from prom_datasource_ok above, which
+# proves Grafana reaches the backend's Prometheus-compatible query API, not this
+# scraper.
+prometheus_healthy() { curl -sf "${CURL_TIMEOUTS[@]}" "$PROMETHEUS/-/healthy" >/dev/null 2>&1; }
 
 # A present-but-empty dataframe would satisfy a substring check on "values" —
 # exactly what the numeric_columns comment above calls out — so this waits for
@@ -244,6 +264,9 @@ log_pass "compose up --build returned success"
 echo ""
 echo "-- Waiting for readiness --"
 wait_for "Grafana is up" "$READY_TIMEOUT" grafana_up
+# The self-observability Prometheus (Phase 5.3), scraping the backend's own
+# /metrics — a separate service from the backend-as-datasource checks below.
+wait_for "Prometheus is up" "$READY_TIMEOUT" prometheus_healthy
 # The datasource health check is Grafana's "Save & test" button: it proves
 # Grafana resolves http://backend:8080 over the compose network and that the
 # backend answers the Loki health query.
@@ -479,6 +502,66 @@ BODY=$(promquery 'sum by (method)(rate(sample_app_requests_total[1m]))')
 check_absent "sample-app rate panel — no datasource error" "$BODY" '"error":"'
 BODY=$(promquery 'sum by (method)(rate(http_requests_total[1m]))')
 check_absent "metrics dashboard rate panel — no datasource error" "$BODY" '"error":"'
+
+# ---- Self-observability (Phase 5.3) ---------------------------------
+echo ""
+echo "-- Platform self-observability --"
+
+# wait_for_scrape <timeout-seconds> — polls until Prometheus reports the backend
+# target up. A fresh Prometheus has not scraped yet, so asserting immediately
+# after startup fails on timing rather than on anything real.
+wait_for_scrape() {
+    local timeout="$1" start=$SECONDS body
+    while [ $((SECONDS - start)) -lt "$timeout" ]; do
+        body="$(curl -s "${CURL_TIMEOUTS[@]}" "$PROMETHEUS/api/v1/query?query=up%7Bjob%3D%22observability-platform-backend%22%7D" 2>/dev/null)"
+        if [ "$(printf '%s' "$body" | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null)" = "1" ]; then
+            log_pass "Prometheus scraped the backend ($((SECONDS - start))s)"
+            return 0
+        fi
+        sleep 2
+    done
+    log_fail "Prometheus never reported the backend target up within ${timeout}s"
+    return 1
+}
+
+# The scrape interval is 15s, so 90s allows several attempts without making a
+# real failure take minutes to surface.
+wait_for_scrape 90
+
+# Prometheus must report the backend target as up. This is necessary but NOT
+# sufficient: a scrape that connects and returns zero series still reports up: 1,
+# which is why the panel queries below exist.
+up_body="$(curl -s "${CURL_TIMEOUTS[@]}" "$PROMETHEUS/api/v1/query?query=up%7Bjob%3D%22observability-platform-backend%22%7D")"
+if [ "$(printf '%s' "$up_body" | jq -r '.data.result[0].value[1] // "0"')" = "1" ]; then
+    log_pass "Prometheus reports the backend scrape target up"
+else
+    log_fail "Prometheus does not report the backend target up: $up_body"
+fi
+
+# The real assertion: samples actually reached Prometheus and Grafana can read
+# them back through the internals datasource, which is exactly what a dashboard
+# panel does. One scrape is not always enough to check just once: with a
+# single sample on the series, a range query's evaluation grid can land just
+# past it and come back empty until a second scrape gives it something to
+# align to (confirmed by hand: the identical query against obs-internals came
+# back with an empty frame at ~10s of Prometheus uptime and a real one at
+# ~30s, while Prometheus's own instant-query API had the sample the whole
+# time) — so this polls with a deadline too, the same rule wait_for_scrape
+# follows, rather than trusting a single shot right after up flips to 1.
+for expr in 'obs_active_series' 'sum(rate(obs_http_requests_total[1m]))' 'obs_wal_bytes'; do
+    body="" expr_start=$SECONDS
+    while [ $((SECONDS - expr_start)) -lt 45 ]; do
+        body="$(internalsquery "$expr")"
+        [ "$(numeric_columns "$body")" -ge 2 ] && break
+        sleep 3
+    done
+    cols="$(numeric_columns "$body")"
+    if [ "${cols:-0}" -ge 2 ]; then
+        log_pass "internals panel query returned data: $expr"
+    else
+        log_fail "internals panel query returned no numeric data: $expr — $body"
+    fi
+done
 
 # ---- Storage path: chunks and restart readback ----------------------
 echo ""
