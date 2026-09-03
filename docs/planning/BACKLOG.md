@@ -638,14 +638,14 @@ backend's own query API, so every internal metric was unreachable from any dashb
 - [x] `observability/prometheus/prometheus.yml` scrape config
 - [x] `prometheus` service in Docker Compose, pinned image, health-gated
 - [ ] `deployments/helm/prometheus` chart — Deployment, Service, scrape ConfigMap, emptyDir storage
-- [ ] Internals Grafana datasource (`obs-internals`) in both the Compose datasource dir and the Helm ConfigMap
+- [x] Internals Grafana datasource (`obs-internals`) in both the Compose datasource dir and the Helm ConfigMap
 
 **Dashboard**
-- [ ] `observability/grafana/dashboards/self-observability.json` (uid `obs-self-v1`) — ingest, query, storage, maintenance rows
-- [ ] Make its exemption from the PromQL-subset rule explicit, with a guard that the exempt and enforced lists never overlap
+- [x] `observability/grafana/dashboards/self-observability.json` (uid `obs-self-v1`) — ingest, query, storage, maintenance rows
+- [x] Make its exemption from the PromQL-subset rule explicit, with a guard that the exempt and enforced lists never overlap
 
 **Verification**
-- [ ] Static: internals datasource and dashboard pinned; every metric the dashboard names checked against what the registry actually exposes
+- [x] Static: internals datasource and dashboard pinned; every metric the dashboard names checked against what the registry actually exposes
 - [ ] Helm: new chart renders; Grafana's internals URL resolves to a Service the Prometheus chart creates
 - [ ] Compose: `up == 1` **and** a panel query through Grafana returns numeric data — `up` alone passes on a scrape returning zero series
 - [ ] Kind: same panel assertion in-cluster
