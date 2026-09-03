@@ -635,8 +635,8 @@ backend's own query API, so every internal metric was unreachable from any dashb
 - [x] `observability.Component` and request-scoped loggers; migrate the 9 ad-hoc `component` call sites onto a fixed name set
 
 **Deployment**
-- [ ] `observability/prometheus/prometheus.yml` scrape config
-- [ ] `prometheus` service in Docker Compose, pinned image, health-gated
+- [x] `observability/prometheus/prometheus.yml` scrape config
+- [x] `prometheus` service in Docker Compose, pinned image, health-gated
 - [ ] `deployments/helm/prometheus` chart — Deployment, Service, scrape ConfigMap, emptyDir storage
 - [ ] Internals Grafana datasource (`obs-internals`) in both the Compose datasource dir and the Helm ConfigMap
 
