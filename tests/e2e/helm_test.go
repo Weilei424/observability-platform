@@ -232,23 +232,34 @@ func TestCrossChartBackendURLResolves(t *testing.T) {
 		if o.Kind != "ConfigMap" {
 			continue
 		}
-		ds, ok := o.Data["datasources.yaml"]
+		raw, ok := o.Data["datasources.yaml"]
 		if !ok {
 			continue
 		}
-		// Both datasources (prometheus and loki) carry a url. Keying by index
-		// rather than a fixed string checks each one; a single key would let a
-		// later entry overwrite an earlier broken one.
+		var parsed datasourceFile
+		if err := yaml.Unmarshal([]byte(raw), &parsed); err != nil {
+			t.Fatalf("grafana ConfigMap datasources.yaml is not valid YAML: %v", err)
+		}
+		// Exactly the two datasources (prometheus and loki) that point at the
+		// BACKEND chart. Keying by index rather than a fixed string checks each
+		// one; a single key would let a later entry overwrite an earlier broken
+		// one.
+		//
+		// The internals datasource is deliberately excluded: its URL names a
+		// Service the PROMETHEUS chart owns, not the backend, so it is not a
+		// claim this test can check against backend Services below.
+		// TestHelmGrafanaTemplatesTheInternalsDatasource in
+		// provisioning_internals_test.go covers its presence instead.
 		n := 0
-		for _, line := range strings.Split(ds, "\n") {
-			line = strings.TrimSpace(line)
-			if after, found := strings.CutPrefix(line, "url:"); found {
-				n++
-				urls[fmt.Sprintf("grafana datasource #%d", n)] = strings.TrimSpace(after)
+		for _, d := range parsed.Datasources {
+			if d.Name == internalsDatasourceName {
+				continue
 			}
+			n++
+			urls[fmt.Sprintf("grafana datasource #%d", n)] = d.URL
 		}
 		if n != 2 {
-			t.Errorf("grafana datasources.yaml has %d url entries, want 2 (prometheus and loki)", n)
+			t.Errorf("grafana datasources.yaml has %d backend-facing datasources, want 2 (prometheus and loki)", n)
 		}
 	}
 	for _, o := range render(t, producersChart) {

@@ -1,0 +1,15 @@
+apiVersion: 1
+
+# The platform's OWN telemetry, scraped by the prometheus service — not the
+# backend's TSDB. The uid is referenced by self-observability.json and is not free
+# to change.
+datasources:
+  - name: observability-platform-internals
+    type: prometheus
+    uid: obs-internals
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: false
+    editable: false
+    jsonData:
+      timeInterval: "15s"

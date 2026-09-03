@@ -201,12 +201,14 @@ func TestLokiDatasourceURLMatchesComposeBackend(t *testing.T) {
 	datasourceURLMatchesComposeBackend(t, lokiDatasourcePath)
 }
 
-// datasourceURLMatchesComposeBackend is the shared body of
-// TestLokiDatasourceURLMatchesComposeBackend and
-// TestPrometheusDatasourceURLMatchesComposeBackend. Both provisioning files
-// point at the same compose backend and need the same URL-vs-compose
-// cross-check; they differ only in which datasource file they read.
-func datasourceURLMatchesComposeBackend(t *testing.T, datasourcePath string) {
+// datasourceURLMatchesComposeService is the shared body of
+// TestLokiDatasourceURLMatchesComposeBackend,
+// TestPrometheusDatasourceURLMatchesComposeBackend, and
+// TestInternalsDatasourceURLMatchesComposePrometheus. Every provisioning file
+// points at some compose service and needs the same URL-vs-compose
+// cross-check; they differ only in which datasource file they read and which
+// service name the URL must resolve to.
+func datasourceURLMatchesComposeService(t *testing.T, datasourcePath, wantService string) {
 	t.Helper()
 	ds := loadDatasource(t, datasourcePath).Datasources[0]
 
@@ -234,8 +236,8 @@ func datasourceURLMatchesComposeBackend(t *testing.T, datasourcePath string) {
 		t.Fatalf("%s is not valid YAML: %v", composePath, err)
 	}
 
-	if host != backendComposeName {
-		t.Errorf("url host = %q, want the compose service name %q", host, backendComposeName)
+	if host != wantService {
+		t.Errorf("url host = %q, want the compose service name %q", host, wantService)
 	}
 	svc, ok := compose.Services[host]
 	if !ok {
@@ -253,6 +255,13 @@ func datasourceURLMatchesComposeBackend(t *testing.T, datasourcePath string) {
 	if !slices.Contains(containerPorts, port) {
 		t.Errorf("url port %q is not a container port of compose service %q (container ports: %v)", port, host, containerPorts)
 	}
+}
+
+// datasourceURLMatchesComposeBackend is the backend-datasource case of
+// datasourceURLMatchesComposeService.
+func datasourceURLMatchesComposeBackend(t *testing.T, datasourcePath string) {
+	t.Helper()
+	datasourceURLMatchesComposeService(t, datasourcePath, backendComposeName)
 }
 
 // containerPort returns the container side of one compose ports entry, for both

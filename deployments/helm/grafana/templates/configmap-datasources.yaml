@@ -8,7 +8,7 @@ data:
   # Templated rather than copied from observability/grafana/datasources/: the
   # backend URL is the one part of Grafana provisioning that differs between
   # Compose and Kubernetes. The uids are NOT free to change — the provisioned
-  # dashboards reference obs-prometheus and obs-loki by uid.
+  # dashboards reference obs-prometheus, obs-loki, and obs-internals by uid.
   datasources.yaml: |
     apiVersion: 1
     datasources:
@@ -30,3 +30,12 @@ data:
         editable: false
         jsonData:
           maxLines: 1000
+      - name: observability-platform-internals
+        type: prometheus
+        uid: obs-internals
+        access: proxy
+        url: {{ .Values.internals.url }}
+        isDefault: false
+        editable: false
+        jsonData:
+          timeInterval: "15s"

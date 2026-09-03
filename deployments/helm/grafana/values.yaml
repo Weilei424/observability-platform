@@ -14,6 +14,12 @@ backend:
   # does not resolve to a Service the backend chart actually creates.
   url: http://observability-backend:8080
 
+internals:
+  # Like backend.url, this is a claim about a Service another chart owns — the
+  # prometheus chart. tests/e2e/helm_test.go renders both and fails if this URL
+  # does not resolve to a Service that chart actually creates.
+  url: http://observability-prometheus:9090
+
 dashboards:
   # Created by the operator, not by this chart: Helm can only read files inside
   # its own chart directory, and copying the dashboards in would fork them from
