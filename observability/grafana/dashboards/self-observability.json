@@ -97,9 +97,15 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "obs-internals" },
-          "expr": "sum by (reason)(rate(obs_samples_rejected_total[1m]) or rate(obs_log_lines_rejected_total[1m]))",
-          "legendFormat": "{{reason}}",
+          "expr": "sum by (reason)(rate(obs_samples_rejected_total[1m]))",
+          "legendFormat": "samples {{reason}}",
           "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "obs-internals" },
+          "expr": "sum by (reason)(rate(obs_log_lines_rejected_total[1m]))",
+          "legendFormat": "logs {{reason}}",
+          "refId": "B"
         }
       ],
       "title": "Ingest Rejections by Reason",
