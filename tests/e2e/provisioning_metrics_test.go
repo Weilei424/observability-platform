@@ -36,8 +36,21 @@ const (
 	sampleAppDashboardTitle = "Observability Platform Sample App"
 )
 
-// metricDashboardPaths is every dashboard driven by the Prometheus datasource.
+// metricDashboardPaths is every dashboard driven by the BACKEND's Prometheus
+// datasource (obs-prometheus). Their expressions must stay inside the PromQL
+// subset this backend implements.
 var metricDashboardPaths = []string{metricsDashboardPath, sampleAppDashboardPath}
+
+// internalsDashboardPaths is every dashboard driven by the real Prometheus
+// (obs-internals). These are DELIBERATELY exempt from the subset rule below:
+// they query Prometheus itself, so histogram_quantile and binary operations are
+// correct there and would be wrong to reject.
+//
+// Kept as an explicit list rather than by simply omitting the dashboard, so that
+// the exemption reads as a decision. An unexplained omission invites the next
+// person either to "fix" it by adding the dashboard back — breaking the suite —
+// or to loosen the subset rule for the dashboards that still need it.
+var internalsDashboardPaths = []string{internalsDashboardPath}
 
 // TestPrometheusDatasourceProvisioning pins the fields Grafana and the runbook
 // both depend on: the name the runbook tells you to click, the uid every target
@@ -152,6 +165,12 @@ func TestMetricDashboardTargetsUseTheProvisionedDatasource(t *testing.T) {
 // expression through the backend's own parser. An unsupported function or a
 // binary operation returns 400 at query time; this fails at build time instead.
 func TestMetricDashboardQueriesStayInsideTheSupportedSubset(t *testing.T) {
+	for _, exempt := range internalsDashboardPaths {
+		if slices.Contains(metricDashboardPaths, exempt) {
+			t.Fatalf("%s is in both metricDashboardPaths and internalsDashboardPaths; the subset rule would be enforced on a dashboard that is exempt from it", exempt)
+		}
+	}
+
 	for _, path := range metricDashboardPaths {
 		for _, p := range loadDashboard(t, path).Panels {
 			for _, tgt := range p.Targets {
