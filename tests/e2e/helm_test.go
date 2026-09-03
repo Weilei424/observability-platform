@@ -370,6 +370,9 @@ func TestGrafanaInternalsURLResolvesToThePrometheusService(t *testing.T) {
 	if !servicePortExists(svc, port) {
 		t.Errorf("grafana internals.url points at %s:%s, but the prometheus chart's Service exposes no such port", host, port)
 	}
+	if matches, detail := serviceSelectsPodTemplate(t, objs, svc); !matches {
+		t.Errorf("grafana internals.url points at %s:%s, but %s", host, port, detail)
+	}
 }
 
 // The scrape target inside the cluster must name the BACKEND chart's Service, not
@@ -387,6 +390,9 @@ func TestPrometheusChartScrapesTheBackendService(t *testing.T) {
 	svc := findObject(t, backendObjs, "Service", host)
 	if !servicePortExists(svc, port) {
 		t.Errorf("prometheus scrapes %s:%s, which is not a port on the backend chart's Service", host, port)
+	}
+	if matches, detail := serviceSelectsPodTemplate(t, backendObjs, svc); !matches {
+		t.Errorf("prometheus scrapes %s:%s, but %s", host, port, detail)
 	}
 
 	// And the rendered ConfigMap must actually contain that target — a values key
@@ -470,6 +476,51 @@ func servicePortExists(svc *k8sObject, port string) bool {
 		}
 	}
 	return false
+}
+
+// serviceSelectsPodTemplate reports whether a rendered Service's selector is
+// satisfied by the pod template labels of whichever Deployment or
+// StatefulSet is rendered alongside it in objs, plus a detail string the
+// caller can fold into its own failure message.
+//
+// A Service can name the right port and still route to nothing: Kubernetes
+// creates it with zero Endpoints if its selector does not actually match the
+// pods the chart creates (a typo'd label, or a selector that drifted from
+// the pod template), and every request through it fails silently — helm
+// lint and a port-only check both pass regardless.
+// TestCrossChartBackendURLResolves established this check inline for the
+// backend chart's Services; this is the shared version so the newer
+// prometheus/grafana cross-chart tests do not duplicate that loop.
+func serviceSelectsPodTemplate(t *testing.T, objs []k8sObject, svc *k8sObject) (ok bool, detail string) {
+	t.Helper()
+
+	sel := map[string]string{}
+	for k, v := range svc.Spec.Selector {
+		if s, ok := v.(string); ok {
+			sel[k] = s
+		}
+	}
+	if len(sel) == 0 {
+		return false, fmt.Sprintf("Service %q has no pod selector; it would have no Endpoints", svc.Metadata.Name)
+	}
+
+	var podLabels map[string]string
+	for _, o := range objs {
+		if o.Kind == "Deployment" || o.Kind == "StatefulSet" {
+			podLabels = o.Spec.Template.Metadata.Labels
+			break
+		}
+	}
+	if len(podLabels) == 0 {
+		return false, fmt.Sprintf("no Deployment or StatefulSet with pod template labels was rendered alongside Service %q", svc.Metadata.Name)
+	}
+
+	for k, v := range sel {
+		if podLabels[k] != v {
+			return false, fmt.Sprintf("Service %q selector %v is not satisfied by pod template labels %v (key %q wants %q, pod has %q); it would have no Endpoints", svc.Metadata.Name, sel, podLabels, k, v, podLabels[k])
+		}
+	}
+	return true, ""
 }
 
 // rawOf returns every string value in an object's Data (a ConfigMap's or
