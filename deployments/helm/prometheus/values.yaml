@@ -1,0 +1,31 @@
+fullnameOverride: observability-prometheus
+
+image:
+  repository: prom/prometheus
+  tag: "v2.53.0"
+  pullPolicy: IfNotPresent
+
+service:
+  port: 9090
+
+backend:
+  # The scrape target. This is a claim about a Service the BACKEND chart owns —
+  # Helm cannot check it across charts. tests/e2e/helm_test.go renders both and
+  # fails if this URL does not resolve to a Service the backend chart creates.
+  url: http://observability-backend:8080
+
+scrapeInterval: 15s
+
+# Demo telemetry on an emptyDir, deliberately: this chart is here so the
+# self-observability dashboard works in the Kubernetes demo, not to ship a
+# production Prometheus. Metrics are lost when the pod is rescheduled. If you
+# want them kept, run a real Prometheus (kube-prometheus-stack) and point it at
+# the backend's /metrics — the endpoint is the same.
+retention: 24h
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 1Gi
