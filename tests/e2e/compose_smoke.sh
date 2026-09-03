@@ -62,7 +62,7 @@ RUN_ID="run$(date +%s%N | tr 0-9 a-j)"
 # The expected running set. Every service is asserted on its own data elsewhere
 # in this run, but a producer can also exit between assertions, so the exact set
 # is checked after startup and again at the end.
-EXPECTED_SERVICES="backend grafana load-generator sample-app"
+EXPECTED_SERVICES="backend grafana load-generator prometheus sample-app"
 
 # dc runs a compose command with a bound generous enough for an image build.
 dc() { timeout "${DC_TIMEOUT:-1800}" docker compose -p "$PROJECT" -f "$COMPOSE_FILE" "$@"; }

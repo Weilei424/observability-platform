@@ -31,6 +31,32 @@ services:
       retries: 12
       start_period: 5s
 
+  prometheus:
+    restart: unless-stopped
+    image: prom/prometheus:v2.53.0
+    ports:
+      - "9090:9090"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # Demo telemetry, not an archive. A day is enough to show a trend and keeps
+      # the volume small enough that `make local-reset` stays fast.
+      - --storage.tsdb.retention.time=24h
+    volumes:
+      - ../../observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - obs-prometheus-data:/prometheus
+    depends_on:
+      backend:
+        condition: service_healthy
+    # Unlike the distroless backend image, prom/prometheus ships busybox, so wget
+    # is available for the probe.
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
   grafana:
     restart: unless-stopped
     image: grafana/grafana:11.1.0
@@ -70,3 +96,4 @@ services:
 volumes:
   obs-data:
   obs-grafana-data:
+  obs-prometheus-data:

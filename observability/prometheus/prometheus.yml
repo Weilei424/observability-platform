@@ -1,0 +1,17 @@
+# Scrape config for the platform's OWN telemetry.
+#
+# This Prometheus stores metrics ABOUT the backend. The backend's own TSDB, which
+# Grafana reaches through the obs-prometheus datasource, stores what the sample app
+# and load generator push. Keeping them apart is the point: telemetry that shares
+# storage with the workload it observes goes blind exactly when that storage breaks.
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+
+scrape_configs:
+  - job_name: observability-platform-backend
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["backend:8080"]
+        labels:
+          service: observability-platform

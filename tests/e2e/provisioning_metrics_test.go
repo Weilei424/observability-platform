@@ -12,6 +12,7 @@ package e2e_test
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -22,6 +23,7 @@ import (
 
 const (
 	promDatasourcePath     = "../../observability/grafana/datasources/prometheus.yml"
+	promScrapeConfigPath   = "../../observability/prometheus/prometheus.yml"
 	metricsDashboardPath   = "../../observability/grafana/dashboards/metrics.json"
 	sampleAppDashboardPath = "../../observability/grafana/dashboards/sample-app.json"
 
@@ -221,5 +223,153 @@ func TestComposeGatesProducersOnBackendHealth(t *testing.T) {
 		if dep.Condition != "service_healthy" {
 			t.Errorf("%s depends_on %s condition = %q, want \"service_healthy\"", producer, backendComposeName, dep.Condition)
 		}
+	}
+}
+
+// TestComposePrometheusScrapesTheBackend ties the scrape config to the compose
+// topology. A job pointed at a host that is not a compose service resolves to
+// nothing, and the only symptom is an empty dashboard.
+func TestComposePrometheusScrapesTheBackend(t *testing.T) {
+	b, err := os.ReadFile(filepath.FromSlash(promScrapeConfigPath))
+	if err != nil {
+		t.Fatalf("read %s: %v", promScrapeConfigPath, err)
+	}
+	var cfg struct {
+		Global struct {
+			ScrapeInterval string `yaml:"scrape_interval"`
+		} `yaml:"global"`
+		ScrapeConfigs []struct {
+			JobName       string `yaml:"job_name"`
+			MetricsPath   string `yaml:"metrics_path"`
+			StaticConfigs []struct {
+				Targets []string `yaml:"targets"`
+			} `yaml:"static_configs"`
+		} `yaml:"scrape_configs"`
+	}
+	if err := yaml.Unmarshal(b, &cfg); err != nil {
+		t.Fatalf("%s is not valid YAML — Prometheus would exit at startup: %v", promScrapeConfigPath, err)
+	}
+	if len(cfg.ScrapeConfigs) != 1 {
+		t.Fatalf("scrape_configs has %d jobs, want exactly 1", len(cfg.ScrapeConfigs))
+	}
+	job := cfg.ScrapeConfigs[0]
+	if job.MetricsPath != "" && job.MetricsPath != "/metrics" {
+		t.Errorf("metrics_path = %q, want \"/metrics\" or unset", job.MetricsPath)
+	}
+	if len(job.StaticConfigs) != 1 || len(job.StaticConfigs[0].Targets) != 1 {
+		t.Fatalf("want exactly one static target, got %+v", job.StaticConfigs)
+	}
+	target := job.StaticConfigs[0].Targets[0]
+	host, port, found := strings.Cut(target, ":")
+	if !found {
+		t.Fatalf("target %q is not host:port", target)
+	}
+	if host != backendComposeName {
+		t.Errorf("scrape target host = %q, want the compose service %q", host, backendComposeName)
+	}
+	assertComposeServiceExposesPort(t, host, port)
+}
+
+// TestComposeRunsPrometheus pins the service itself: image, config mount, and the
+// health gate the smoke test waits on.
+func TestComposeRunsPrometheus(t *testing.T) {
+	svc := loadComposeService(t, "prometheus")
+	if svc.Image == "" {
+		t.Error("prometheus service has no image")
+	}
+	if !strings.Contains(svc.Image, ":") || strings.HasSuffix(svc.Image, ":latest") {
+		t.Errorf("image = %q, want an explicitly pinned tag", svc.Image)
+	}
+	if len(svc.Healthcheck.Test) == 0 {
+		t.Error("prometheus declares no healthcheck; compose_smoke.sh gates on it")
+	}
+	if dep, ok := svc.DependsOn[backendComposeName]; !ok || dep.Condition != "service_healthy" {
+		t.Errorf("prometheus must depend on %s being healthy, got %+v", backendComposeName, svc.DependsOn)
+	}
+}
+
+// loadComposeService reads the docker-compose.yml and returns the service with
+// the given name, including Image, Healthcheck.Test, DependsOn, and Ports.
+func loadComposeService(t *testing.T, name string) struct {
+	Image       string
+	Ports       []string
+	Healthcheck struct {
+		Test []string
+	}
+	DependsOn map[string]struct {
+		Condition string
+	}
+} {
+	t.Helper()
+	b, err := os.ReadFile(filepath.FromSlash(composePath))
+	if err != nil {
+		t.Fatalf("read %s: %v", composePath, err)
+	}
+	var compose struct {
+		Services map[string]struct {
+			Image       string `yaml:"image"`
+			Ports       []any  `yaml:"ports"`
+			Healthcheck struct {
+				Test []string `yaml:"test"`
+			} `yaml:"healthcheck"`
+			DependsOn map[string]struct {
+				Condition string `yaml:"condition"`
+			} `yaml:"depends_on"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(b, &compose); err != nil {
+		t.Fatalf("%s is not valid YAML: %v", composePath, err)
+	}
+
+	svc, ok := compose.Services[name]
+	if !ok {
+		t.Fatalf("%s has no %q service", composePath, name)
+	}
+
+	var ports []string
+	for _, p := range svc.Ports {
+		ports = append(ports, containerPort(p))
+	}
+
+	// Convert DependsOn to remove yaml tags
+	dependsOn := make(map[string]struct {
+		Condition string
+	})
+	for k, v := range svc.DependsOn {
+		dependsOn[k] = struct {
+			Condition string
+		}{
+			Condition: v.Condition,
+		}
+	}
+
+	return struct {
+		Image       string
+		Ports       []string
+		Healthcheck struct {
+			Test []string
+		}
+		DependsOn map[string]struct {
+			Condition string
+		}
+	}{
+		Image: svc.Image,
+		Ports: ports,
+		Healthcheck: struct {
+			Test []string
+		}{
+			Test: svc.Healthcheck.Test,
+		},
+		DependsOn: dependsOn,
+	}
+}
+
+// assertComposeServiceExposesPort checks that the given service exposes the
+// given port.
+func assertComposeServiceExposesPort(t *testing.T, service, port string) {
+	t.Helper()
+	svc := loadComposeService(t, service)
+	if !slices.Contains(svc.Ports, port) {
+		t.Errorf("compose service %q does not expose port %q (exposed ports: %v)", service, port, svc.Ports)
 	}
 }
