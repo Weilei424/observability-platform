@@ -588,20 +588,70 @@ The backend itself must emit:
 - Component names on relevant log lines.
 - `/metrics` endpoint for internal service metrics.
 
-Required internal metric categories:
+### Internal Metrics
 
-- Ingestion request rate.
-- Ingestion error rate.
-- Samples ingested per second.
-- Log lines ingested per second.
-- Query latency p50/p95/p99.
-- WAL segment count and size.
-- Metrics block count.
-- Log chunk count.
-- Compaction duration.
-- Retention deletion count.
-- Active series count.
-- Active stream count.
+The backend exposes the following metrics at `/metrics`, scraped by a separate Prometheus instance (not the backend's own TSDB). All metrics are prefixed `obs_` and use Prometheus naming conventions.
+
+**Cardinality:**
+- `obs_active_series` — active series in the backend's TSDB
+- `obs_label_names_total` — distinct label names
+- `obs_label_pairs_total` — distinct label name=value pairs
+
+**Storage:**
+- `obs_blocks_total` — persisted metric blocks
+- `obs_blocks_bytes` — total metric block size in bytes
+- `obs_wal_bytes{wal="metrics"}` — metrics WAL size in bytes
+- `obs_wal_segments{wal="metrics"}` — metrics WAL segment count
+- `obs_log_streams_total` — distinct log streams
+- `obs_log_chunks_total` — persisted log chunk files
+- `obs_log_chunk_bytes` — total log chunk size in bytes
+
+**Ingestion:**
+- `obs_samples_ingested_total` — accepted metric samples
+- `obs_samples_rejected_total{reason}` — rejected samples (closed-set reason labels)
+- `obs_log_lines_ingested_total` — accepted log lines
+- `obs_log_lines_rejected_total{reason}` — rejected log lines
+
+**Queries:**
+- `obs_http_requests_total{route,method,status}` — HTTP requests (route is chi pattern, never raw path; status is 1xx/2xx/3xx/4xx/5xx)
+- `obs_http_request_duration_seconds{route,method}` — request latency histogram
+
+**Maintenance:**
+- `obs_compactions_total` — completed block compactions
+- `obs_compaction_failures_total` — failed compactions
+- `obs_compaction_duration_seconds` — compaction duration histogram
+- `obs_retention_deleted_blocks_total` — blocks deleted by retention
+- `obs_flushes_total` — successful head flushes
+- `obs_flush_failures_total` — failed flushes
+
+**Errors:**
+- `obs_collector_errors_total{collector}` — scrape-time collector failures
+
+### Architectural Decisions
+
+#### Separate Prometheus for Platform Telemetry
+
+Platform telemetry (metrics **about** the backend) is stored by a separate Prometheus instance, not by the backend's own TSDB. This separation prevents shared-fate failures: if the backend's metrics storage becomes unavailable, the platform's self-observability signals remain queryable and can diagnose the problem. The shared-fate scenario (using the same TSDB) creates a blind spot exactly when it matters most. The cardinality cost is also lower: the backend's TSDB holds workload metrics from the sample app and load generator (hundreds of series); the platform Prometheus holds only backend internals (tens of series) and stores them for 24 hours.
+
+#### Collector Error Policy
+
+A failed collector read (e.g., WAL directory permissions error) emits **a gap plus an incremented `obs_collector_errors_total` counter, never a zero.** A zero in a storage gauge means the size was measured and is truly zero; a gap means the read failed. This distinction is critical for correct dashboard interpretation: if a storage panel suddenly goes from 100MB to zero, the operator needs to know whether the backend shed storage (zero) or whether a permissions issue caused the collector to fail (gap). Using `prometheus.NewInvalidMetric` was rejected because it causes the entire `/metrics` scrape to return HTTP 500, blanking all panels and hiding other metrics that scraped successfully.
+
+#### Route Label Rule
+
+HTTP request metrics (`obs_http_requests_total`, `obs_http_request_duration_seconds`) are labeled by chi **route pattern**, never by the raw resolved path. Examples: `/api/v1/query`, `/loki/api/v1/push`, `<unmatched>` for 404s. This prevents unbounded cardinality — a malicious client requesting `/api/v1/query?a=1&b=2&c=3...` would not create infinite metric series.
+
+#### Component Name Set
+
+Request-scoped loggers carry a fixed `component` name. The allowed set is: `api`, `ingester`, `query_engine`, `wal`, `block_store`, `compactor`, `logs_ingester`, `logs_store`. Each component name appears at most once per log line. This constraint is enforced by internal logging helpers and enables reliable filtering and attribution in operational logs.
+
+#### Datasource UIDs
+
+Three Grafana datasources with pinned UIDs:
+
+- `obs-prometheus`: Prometheus datasource at `http://backend:8080` (the backend's own TSDB; workload metrics)
+- `obs-loki`: Loki datasource at `http://backend:8080` (the backend's log endpoints)
+- `obs-internals`: Prometheus datasource at the platform Prometheus URL (the separate internals Prometheus; backend self-observability)
 
 ---
 

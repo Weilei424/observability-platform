@@ -652,9 +652,9 @@ backend's own query API, so every internal metric was unreachable from any dashb
 - [ ] Verify: platform dashboard shows ingest/query/storage health
 
 **Docs**
-- [ ] `docs/runbooks/self-observability.md` — both runtimes, the two-Prometheus-datasource distinction, troubleshooting
-- [ ] `README.md` — self-observability section and port 9090
-- [ ] `docs/planning/ARCHITECTURE_NOTES.md` — separate-store decision, collector error policy, route-label rule, component name set, datasource uids
+- [x] `docs/runbooks/self-observability.md` — both runtimes, the two-Prometheus-datasource distinction, troubleshooting
+- [x] `README.md` — self-observability section and port 9090
+- [x] `docs/planning/ARCHITECTURE_NOTES.md` — separate-store decision, collector error policy, route-label rule, component name set, datasource uids
 
 ### Phase 5.4 — Documentation and Demo Runbook
 - [ ] Add architecture diagram for metrics path

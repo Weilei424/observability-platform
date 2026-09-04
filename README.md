@@ -58,6 +58,18 @@ two simulated workloads never mix in one panel.
 
 The provisioned **Observability Platform Logs** dashboard and Grafana Explore show live log streams from the sample app; see [`docs/runbooks/grafana-logs-demo.md`](docs/runbooks/grafana-logs-demo.md).
 
+### Platform Self-Observability
+
+The provisioned **Observability Platform Internals** dashboard shows metrics about the backend itself — ingestion rate, query latency, storage state, and compaction progress. It reaches these through a separate Prometheus instance (port 9090) that scrapes the backend's `/metrics` endpoint, ensuring backend telemetry is independent of the workload metrics storage.
+
+```bash
+make local-up
+# Then Grafana → Dashboards → Observability Platform Internals
+# Or check Prometheus directly at http://localhost:9090
+```
+
+See [`docs/runbooks/self-observability.md`](docs/runbooks/self-observability.md) for the full runbook and troubleshooting guide.
+
 ## Kubernetes
 
 The Compose demo above remains the fastest way to see the project work; Kubernetes is
