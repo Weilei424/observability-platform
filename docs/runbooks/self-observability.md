@@ -196,14 +196,14 @@ rate(obs_collector_errors_total[1m])
 ```
 
 If it's climbing, the collector cannot read its directory:
-- Compose: check backend file permissions in `data/logs/` and `data/metrics/wal/`
+- Compose: check backend logs (`make local-logs`) for the exact permission error. The backend's data lives in the `obs-data` Docker volume at container path `/data/logs/` and `/data/metrics/wal/`.
 - Kubernetes: check PVC mount and pod logs
 
 ### Collector Error Climbing
 
 If `obs_collector_errors_total` is climbing:
-- **WAL collector (`collector="wal"`)**: Cannot read WAL segment files. Check filesystem permissions on `data/metrics/wal/`.
-- **Logs collector (`collector="logs"`)**: Cannot read logs directory. Check permissions on `data/logs/` (Compose) or PVC mount (Kubernetes).
+- **WAL collector (`collector="wal"`)**: Cannot read WAL segment files. Check backend logs for the error. In Compose, verify the `obs-data` volume exists and the backend has read access to `/data/metrics/wal/` inside the container.
+- **Logs collector (`collector="logs"`)**: Cannot read logs directory. In Compose, check backend logs and verify the `obs-data` volume exists and the backend has read access to `/data/logs/` inside the container. In Kubernetes, check the PVC mount and pod logs.
 
 Both collectors emit a gap for that scrape and increment the error counter, never emitting a zero. This prevents a full-storage outage from appearing as "the metrics backend has zero storage" on the dashboard — the gap is the tell.
 
