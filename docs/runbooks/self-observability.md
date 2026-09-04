@@ -227,9 +227,9 @@ All `obs_*` metrics exposed by the backend (scraped by the internals Prometheus)
 
 **Ingestion:**
 - `obs_samples_ingested_total` — total metric samples accepted
-- `obs_samples_rejected_total{reason}` — samples rejected (reasons: `name`, `timestamp`, `value`, `labels`, `other`)
+- `obs_samples_rejected_total{reason}` — samples rejected (reasons: `name`, `timestamp`, `value`, `labels`, `other`, `append`). The first five are validation errors (client sent invalid data); `append` means the data passed validation but the write to storage failed — a durability signal, not a client error.
 - `obs_log_lines_ingested_total` — total log lines accepted
-- `obs_log_lines_rejected_total{reason}` — log lines rejected (reasons: `values`, `timestamp`, `line`, `labels`, `other`)
+- `obs_log_lines_rejected_total{reason}` — log lines rejected (reasons: `values`, `timestamp`, `line`, `labels`, `other`, `append`). The first five are validation errors; `append` means the write to storage failed.
 
 **Queries:**
 - `obs_http_requests_total{route,method,status}` — HTTP requests by route pattern, method, and status
