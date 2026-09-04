@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 #
-# Cluster test: deploys all three charts into a kind cluster and exercises the
+# Cluster test: deploys all four charts into a kind cluster and exercises the
 # Phase 5.2 DoD — helm install works, data survives a pod restart, and Grafana
-# can query the backend from inside the cluster.
+# can query the backend from inside the cluster — plus the Phase 5.3 DoD, that
+# Prometheus scrapes the backend and Grafana serves a real internals panel
+# query from it.
 #
 # tests/e2e/helm_test.go validates the charts without a cluster. It cannot see
 # whether the images actually start, whether the PVC binds, whether the probes
@@ -116,7 +118,7 @@ teardown() {
         echo ""
         echo "-- Events --"
         kubectl get events -n "$NS" --sort-by=.lastTimestamp 2>&1 | tail -25
-        for app in observability-backend observability-grafana observability-producers-sample-app observability-producers-load-generator; do
+        for app in observability-backend observability-grafana observability-prometheus observability-producers-sample-app observability-producers-load-generator; do
             echo ""
             echo "-- Logs: $app --"
             kubectl logs -n "$NS" -l "app.kubernetes.io/name=$app" --tail=40 2>&1 | tail -40
@@ -185,6 +187,25 @@ if [ "$(kubectl get pvc -n "$NS" -o jsonpath='{.items[0].status.phase}' 2>/dev/n
     log_pass "PersistentVolumeClaim is Bound"
 else
     log_fail "PVC did not bind: $(kubectl get pvc -n "$NS" 2>&1 | tail -3)"
+fi
+
+echo ""
+echo "-- helm install prometheus --"
+# The self-observability Prometheus (Phase 5.3): scrapes the backend's own
+# /metrics. Installed before Grafana because Grafana's provisioned obs-internals
+# datasource references this chart's Service by name, which keeps provisioning
+# valid on Grafana's first start.
+if helm upgrade --install obs-prometheus "$REPO_ROOT/deployments/helm/prometheus" \
+        --namespace "$NS" --create-namespace --wait --timeout "$ROLLOUT_TIMEOUT"; then
+    log_pass "helm install deploys prometheus"
+else
+    log_fail "helm install prometheus failed"
+fi
+
+if kubectl rollout status deployment/observability-prometheus -n "$NS" --timeout="$ROLLOUT_TIMEOUT"; then
+    log_pass "prometheus Deployment rolled out"
+else
+    log_fail "prometheus Deployment did not roll out"
 fi
 
 echo ""
@@ -424,6 +445,61 @@ else
     else
         log_fail "Grafana query returned no numeric samples for k8s_e2e_marker (cols=${COLS:-0}); body: $DSQ"
     fi
+fi
+
+# ---- Self-observability (Phase 5.3) ---------------------------------
+echo ""
+echo "-- Platform self-observability --"
+
+# One self-observability panel query, through Grafana, against the internals
+# datasource — the same path a dashboard panel takes. A freshly installed
+# Prometheus has not scraped yet, so this polls rather than asserting once.
+internals_panel_has_data() {
+    local body cols
+    body="$(curl -s --max-time 10 -u "admin:e2e-only" -H 'Content-Type: application/json' \
+        -X POST "http://localhost:13000/api/ds/query" \
+        -d '{"queries":[{"refId":"A","datasource":{"type":"prometheus","uid":"obs-internals"},"expr":"obs_active_series","range":true,"intervalMs":15000,"maxDataPoints":100}],"from":"now-15m","to":"now"}' 2>/dev/null)"
+    cols="$(numeric_columns "$body")"
+    [ "${cols:-0}" -ge 2 ]
+}
+
+start=$SECONDS
+while [ $((SECONDS - start)) -lt 120 ]; do
+    if internals_panel_has_data; then
+        log_pass "Grafana served an internals panel query in-cluster ($((SECONDS - start))s)"
+        break
+    fi
+    sleep 5
+done
+if [ $((SECONDS - start)) -ge 120 ]; then
+    log_fail "internals panel query returned no numeric data within 120s"
+fi
+kill "$PF_PID" 2>/dev/null; PF_PID=""
+
+# The "up" half of the claim: necessary but not sufficient on its own (a scrape
+# that connects and returns zero series still reports up: 1), which is why the
+# panel query above is the assertion that actually matters here. Checked
+# through a dedicated port-forward straight to the in-cluster Prometheus,
+# mirroring compose_smoke.sh's up check against its own Prometheus service.
+kubectl port-forward -n "$NS" svc/observability-prometheus 19090:9090 >/dev/null 2>&1 &
+PF_PID=$!
+wait_for_port "prometheus port-forward is ready" 30 "http://localhost:19090/-/healthy"
+
+prometheus_target_up() {
+    local body
+    body="$(curl -s --max-time 10 "http://localhost:19090/api/v1/query?query=up%7Bjob%3D%22observability-platform-backend%22%7D" 2>/dev/null)"
+    [ "$(printf '%s' "$body" | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null)" = "1" ]
+}
+start=$SECONDS
+while [ $((SECONDS - start)) -lt 90 ]; do
+    if prometheus_target_up; then
+        log_pass "in-cluster Prometheus reports the backend scrape target up ($((SECONDS - start))s)"
+        break
+    fi
+    sleep 2
+done
+if [ $((SECONDS - start)) -ge 90 ]; then
+    log_fail "in-cluster Prometheus never reported the backend target up within 90s"
 fi
 kill "$PF_PID" 2>/dev/null; PF_PID=""
 
