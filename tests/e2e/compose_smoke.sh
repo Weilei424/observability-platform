@@ -283,8 +283,8 @@ wait_for "sample-app is pushing metrics" "$READY_TIMEOUT" sample_app_metrics_up
 wait_for "sample-app is pushing streams" "$READY_TIMEOUT" sample_app_up
 
 # `compose up` returning success only means the containers were created. This is
-# the first point where all four are expected to be up and stable.
-check_services "all four services running after startup"
+# the first point where all five are expected to be up and stable.
+check_services "all five services running after startup"
 
 # ---- Provisioning, as Grafana loaded it -----------------------------
 echo ""
@@ -639,7 +639,7 @@ wait_for "sample-app timestamps advance (new rows after the restart)" 60 sample_
 
 # The demo's other producer writes metrics, not logs, so nothing above would
 # notice it dying; and any service can exit between startup and here.
-check_services "all four services still running at the end"
+check_services "all five services still running at the end"
 
 # ---- Summary --------------------------------------------------------
 echo ""
