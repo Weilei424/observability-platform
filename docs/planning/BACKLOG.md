@@ -647,8 +647,8 @@ backend's own query API, so every internal metric was unreachable from any dashb
 **Verification**
 - [x] Static: internals datasource and dashboard pinned; every metric the dashboard names checked against what the registry actually exposes
 - [x] Helm: new chart renders; Grafana's internals URL resolves to a Service the Prometheus chart creates
-- [ ] Compose: `up == 1` **and** a panel query through Grafana returns numeric data — `up` alone passes on a scrape returning zero series
-- [ ] Kind: same panel assertion in-cluster
+- [x] Compose: `up == 1` **and** a panel query through Grafana returns numeric data — `up` alone passes on a scrape returning zero series
+- [ ] Kind: same panel assertion in-cluster — assertions written (`f7e0baa`) but **not yet observed passing**: `kind create cluster` cannot start kubelet on this host because its Docker runs cgroup v1, and kind's node images need cgroup v2. Closes on the CI `helm-k8s-e2e` job (ubuntu-latest), not locally
 - [ ] Verify: platform dashboard shows ingest/query/storage health
 
 **Docs**
