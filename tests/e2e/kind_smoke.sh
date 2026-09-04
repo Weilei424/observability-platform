@@ -463,17 +463,21 @@ internals_panel_has_data() {
     [ "${cols:-0}" -ge 2 ]
 }
 
+# The success flag, rather than a post-loop elapsed-time check, is what decides
+# the verdict: the winning attempt's own curl can push the clock past the
+# deadline, and an elapsed-time recheck would then log a FAIL alongside the PASS
+# it just logged — corrupting $FAIL and the exit code on a run that passed.
+panel_ok=0
 start=$SECONDS
 while [ $((SECONDS - start)) -lt 120 ]; do
     if internals_panel_has_data; then
         log_pass "Grafana served an internals panel query in-cluster ($((SECONDS - start))s)"
+        panel_ok=1
         break
     fi
     sleep 5
 done
-if [ $((SECONDS - start)) -ge 120 ]; then
-    log_fail "internals panel query returned no numeric data within 120s"
-fi
+[ "$panel_ok" -eq 1 ] || log_fail "internals panel query returned no numeric data within 120s"
 kill "$PF_PID" 2>/dev/null; PF_PID=""
 
 # The "up" half of the claim: necessary but not sufficient on its own (a scrape
@@ -490,17 +494,18 @@ prometheus_target_up() {
     body="$(curl -s --max-time 10 "http://localhost:19090/api/v1/query?query=up%7Bjob%3D%22observability-platform-backend%22%7D" 2>/dev/null)"
     [ "$(printf '%s' "$body" | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null)" = "1" ]
 }
+# Same success-flag rule as the panel loop above.
+target_ok=0
 start=$SECONDS
 while [ $((SECONDS - start)) -lt 90 ]; do
     if prometheus_target_up; then
         log_pass "in-cluster Prometheus reports the backend scrape target up ($((SECONDS - start))s)"
+        target_ok=1
         break
     fi
     sleep 2
 done
-if [ $((SECONDS - start)) -ge 90 ]; then
-    log_fail "in-cluster Prometheus never reported the backend target up within 90s"
-fi
+[ "$target_ok" -eq 1 ] || log_fail "in-cluster Prometheus never reported the backend target up within 90s"
 kill "$PF_PID" 2>/dev/null; PF_PID=""
 
 echo ""
