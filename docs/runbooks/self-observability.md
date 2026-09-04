@@ -21,7 +21,7 @@ Grafana has three datasources, and the distinction matters:
 | Datasource | UID | Backend URL | Stores | Grafana default |
 |---|---|---|---|---|
 | **observability-platform** | `obs-prometheus` | `http://backend:8080` | Demo workload metrics (load generator, sample app) | Yes |
-| **observability-platform-internals** | `obs-internals` | `http://prometheus:9090` (Compose) or `http://prometheus-service:9090` (K8s) | Backend's own metrics (ingestion, queries, storage, compaction) | No |
+| **observability-platform-internals** | `obs-internals` | `http://prometheus:9090` (Compose) or `http://observability-prometheus:9090` (K8s) | Backend's own metrics (ingestion, queries, storage, compaction) | No |
 | **observability-platform-logs** | `obs-loki` | `http://backend:8080` | Demo workload logs | No |
 
 The self-observability dashboard always uses `obs-internals`. A panel on the wrong datasource returns "No data" while testing healthy.
@@ -97,12 +97,23 @@ helm install observability-backend deployments/helm/backend
 helm install observability-prometheus deployments/helm/prometheus
 ```
 
-**3. Grafana:**
+**3. Grafana dashboards ConfigMap** (required, done once per cluster):
 ```bash
-helm install observability-grafana deployments/helm/grafana
+kubectl create configmap grafana-dashboards \
+  --from-file=observability/grafana/dashboards/
 ```
 
-**4. Producers (load generator and sample app):**
+The Grafana chart mounts this ConfigMap non-optionally. Without this step, the Grafana pod stays in `ContainerCreating` state. The ConfigMap name defaults to `grafana-dashboards` and must match the chart's `dashboards.configMapName` value.
+
+**4. Grafana:**
+```bash
+helm install observability-grafana deployments/helm/grafana \
+  --set admin.password=<your-password>
+```
+
+The chart does not ship a default admin password; supply one with `--set admin.password=...` or use an existing Secret with `--set admin.existingSecret=<secret-name>` (the Secret must have an `admin-password` key).
+
+**5. Producers (load generator and sample app):**
 ```bash
 helm install observability-producers deployments/helm/producers
 ```
@@ -160,7 +171,7 @@ helm uninstall observability-backend observability-prometheus observability-graf
 
 2. **Check the metric exists at the source:**
    - Backend Compose: `curl http://localhost:8080/metrics | grep <metric_name>`
-   - Backend Kubernetes: `kubectl exec pod/observability-backend-0 -it -- /server -check-metrics | grep <metric_name>`
+   - Backend Kubernetes: Port-forward the backend (`kubectl port-forward pod/observability-backend-0 8080:8080`), then `curl http://localhost:8080/metrics | grep <metric_name>`
    - If the metric is not listed, the corresponding collector has not been invoked yet or has failed
 
 3. **Check the datasource UID:**
@@ -216,9 +227,9 @@ All `obs_*` metrics exposed by the backend (scraped by the internals Prometheus)
 
 **Ingestion:**
 - `obs_samples_ingested_total` — total metric samples accepted
-- `obs_samples_rejected_total{reason}` — samples rejected (reasons: bad_timestamp, duplicate, invalid_value, etc.)
+- `obs_samples_rejected_total{reason}` — samples rejected (reasons: `name`, `timestamp`, `value`, `labels`, `other`)
 - `obs_log_lines_ingested_total` — total log lines accepted
-- `obs_log_lines_rejected_total{reason}` — log lines rejected
+- `obs_log_lines_rejected_total{reason}` — log lines rejected (reasons: `values`, `timestamp`, `line`, `labels`, `other`)
 
 **Queries:**
 - `obs_http_requests_total{route,method,status}` — HTTP requests by route pattern, method, and status
