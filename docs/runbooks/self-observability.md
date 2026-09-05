@@ -130,7 +130,7 @@ Port-forward Grafana:
 kubectl port-forward svc/observability-grafana 3000:3000
 ```
 
-Then open `http://localhost:3000` (admin / admin).
+Then open `http://localhost:3000` and log in as `admin` with the password you set in step 4 above.
 
 Port-forward the internals Prometheus:
 ```bash
@@ -189,7 +189,7 @@ Look for the `observability-platform-backend` job. If State is RED or Last Scrap
 
 ### Storage Panels Show Gaps Instead of Zero
 
-If `obs_blocks_bytes`, `obs_log_chunk_bytes`, or WAL size panels show gaps (no data points), the collector read failed. This is by design — **a gap means the read failed, a zero means the size is truly zero.** Check `obs_collector_errors_total{collector="logs"}` or `collector="wal"` to confirm:
+If `obs_log_chunk_bytes` or WAL size panels show gaps (no data points), the collector read failed. This is by design — **a gap means the read failed, a zero means the size is truly zero.** (`obs_blocks_bytes` does not participate in this: an unreadable block directory reports a zero size, not a gap.) Check `obs_collector_errors_total{collector="logs"}` or `collector="wal"` to confirm:
 
 ```
 rate(obs_collector_errors_total[1m])
