@@ -16,7 +16,19 @@ import (
 // list because the list had already reached seven same-shaped pointers, where a
 // caller can transpose two arguments and still compile.
 type Deps struct {
-	Config      *config.Config
+	Config *config.Config
+
+	// Logger must NOT already carry a "component" attribute (for example via
+	// observability.Component(log, "...")). The request middleware (see
+	// internal/api/middleware.Logger) derives the request-scoped context
+	// logger from exactly this value, and handlers add their own component on
+	// top of that with observability.Component(observability.FromContext(ctx),
+	// "<subsystem>"). slog does not deduplicate attributes added by separate
+	// With calls, so a Logger that already has "component" set produces TWO
+	// "component" keys on every handler log line instead of one, and the
+	// field stops working as a grouping key. Pass the plain, component-free
+	// logger here; "component" should only ever be added by the access-log
+	// line and by each handler's own subsystem tag.
 	Logger      *slog.Logger
 	Ingester    metrics.Ingester
 	Engine      *metrics.QueryEngine
