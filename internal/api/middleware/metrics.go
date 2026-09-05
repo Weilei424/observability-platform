@@ -17,6 +17,14 @@ func Metrics(m *observability.HTTPMetrics) func(http.Handler) http.Handler {
 			start := time.Now()
 			ww := chimiddleware.NewWrapResponseWriter(w, r.ProtoMajor)
 
+			// completed is set only once next.ServeHTTP returns normally. A
+			// panicking handler never reaches that statement, so the defer below
+			// can tell "handler returned without writing a header" (completed,
+			// status 0 -> 200) apart from "handler panicked" (not completed ->
+			// 500) -- a distinction the wrapped writer's Status() cannot make on
+			// its own, since both cases report 0.
+			var completed bool
+
 			// Deferred so a panicking handler is still observed: a plain
 			// post-call statement never runs once next.ServeHTTP panics, and the
 			// request would vanish from telemetry entirely — no count, no
@@ -30,12 +38,18 @@ func Metrics(m *observability.HTTPMetrics) func(http.Handler) http.Handler {
 					route = rctx.RoutePattern()
 				}
 
-				// A handler that returns without calling WriteHeader still sends
-				// 200; the wrapper reports 0 for that, and "0" is not a status
-				// code. A handler that panics before calling WriteHeader is
-				// indistinguishable from this case and is recorded the same way.
 				status := ww.Status()
-				if status == 0 {
+				switch {
+				case !completed:
+					// The handler panicked. Recording this as 200 would be worse
+					// than not recording it at all: it hides the panic inside a
+					// "success" series and a 5xx-based alert or dashboard
+					// expression would never see it.
+					status = http.StatusInternalServerError
+				case status == 0:
+					// A handler that returns without calling WriteHeader still
+					// sends 200; the wrapper reports 0 for that, and "0" is not a
+					// status code.
 					status = http.StatusOK
 				}
 
@@ -43,6 +57,7 @@ func Metrics(m *observability.HTTPMetrics) func(http.Handler) http.Handler {
 			}()
 
 			next.ServeHTTP(ww, r)
+			completed = true
 		})
 	}
 }
