@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"net/http"
 	"strconv"
 	"time"
 
@@ -11,6 +12,29 @@ import (
 // has no route pattern, and recording the raw URL path instead would let anyone
 // grow the registry by requesting nonexistent paths.
 const UnmatchedRoute = "<unmatched>"
+
+// UnknownMethod is the method label for a request whose HTTP method is not one
+// of the nine standard methods in standardHTTPMethods below. net/http accepts
+// any RFC 7230 token as a method, and chi only classifies one as invalid from
+// inside ServeHTTP — after this middleware would already have recorded it — so
+// an unrecognized method must collapse to a sentinel here, the same way an
+// unmatched route collapses to UnmatchedRoute, or a client sending arbitrary
+// method strings could grow the registry without bound.
+const UnknownMethod = "<unknown>"
+
+// standardHTTPMethods is the allowlist a method is measured against before it
+// can become a label value: the nine methods RFC 7231/7238 define.
+var standardHTTPMethods = map[string]bool{
+	http.MethodGet:     true,
+	http.MethodHead:    true,
+	http.MethodPost:    true,
+	http.MethodPut:     true,
+	http.MethodPatch:   true,
+	http.MethodDelete:  true,
+	http.MethodConnect: true,
+	http.MethodOptions: true,
+	http.MethodTrace:   true,
+}
 
 // HTTPMetrics are the request-edge instruments: one counter and one histogram,
 // both labelled by the chi ROUTE PATTERN rather than the resolved path.
@@ -42,10 +66,16 @@ func (m *HTTPMetrics) collectors() []prometheus.Collector {
 }
 
 // Observe records one completed request. route MUST be a bounded value — a chi
-// route pattern or UnmatchedRoute — never a raw URL path.
+// route pattern or UnmatchedRoute — never a raw URL path. method is sanitized
+// against standardHTTPMethods here (not at each call site) so every caller is
+// covered: an unbounded, client-supplied method string must never reach
+// WithLabelValues.
 func (m *HTTPMetrics) Observe(route, method string, status int, d time.Duration) {
 	if route == "" {
 		route = UnmatchedRoute
+	}
+	if !standardHTTPMethods[method] {
+		method = UnknownMethod
 	}
 	m.Requests.WithLabelValues(route, method, strconv.Itoa(status)).Inc()
 	m.Duration.WithLabelValues(route, method).Observe(d.Seconds())
