@@ -133,7 +133,7 @@ func main() {
 	mx := inst.Maintenance
 	srv := api.New(api.Deps{
 		Config:      cfg,
-		Logger:      observability.Component(log, "api"),
+		Logger:      log,
 		Ingester:    store,
 		Engine:      engine,
 		Registry:    reg,
