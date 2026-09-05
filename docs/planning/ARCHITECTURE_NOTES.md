@@ -613,7 +613,7 @@ The backend exposes the following metrics at `/metrics`, scraped by a separate P
 - `obs_log_lines_rejected_total{reason}` — rejected log lines
 
 **Queries:**
-- `obs_http_requests_total{route,method,status}` — HTTP requests (route is chi pattern, never raw path; status is 1xx/2xx/3xx/4xx/5xx)
+- `obs_http_requests_total{route,method,status}` — HTTP requests (route is chi pattern, never raw path; status is the numeric status code as a string, e.g. `"200"` or `"404"` — via `strconv.Itoa`, not a `1xx`/`2xx` class)
 - `obs_http_request_duration_seconds{route,method}` — request latency histogram
 
 **Maintenance:**
@@ -643,7 +643,7 @@ HTTP request metrics (`obs_http_requests_total`, `obs_http_request_duration_seco
 
 #### Component Name Set
 
-Request-scoped loggers carry a fixed `component` name. The allowed set is: `api`, `ingester`, `query_engine`, `wal`, `block_store`, `compactor`, `logs_ingester`, `logs_store`. Each component name appears at most once per log line. This constraint is enforced by internal logging helpers and enables reliable filtering and attribution in operational logs.
+Request-scoped and startup loggers carry a fixed `component` name. The set actually emitted is: `api`, `compactor`, `metrics_ingest`, `logs_push`, `logs_query`, `logs`, `logwal`, `wal`. Each component name appears at most once per log line. Nothing enforces this set in code — `observability.Component()` accepts any string — so it is a call-site convention, not a constraint the logging helpers check.
 
 #### Datasource UIDs
 
