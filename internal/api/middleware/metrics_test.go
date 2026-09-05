@@ -126,6 +126,12 @@ func TestHandlerThatNeverCallsWriteHeaderRecords200(t *testing.T) {
 // access-log line). The middleware must not recover the panic itself — that is
 // a separate decision — so this test recovers it locally to observe both that
 // the panic still propagates and that the counter still moved.
+//
+// It also pins the recorded STATUS, not just that some series exists: a
+// wrapped writer that never had WriteHeader called reports 0 the same way for
+// a panic as for a handler that silently returns, and recording either as 200
+// would hide the panic inside a "success" series where the dashboard's 5xx
+// expression would never see it.
 func TestPanickingHandlerStillRecordsMetrics(t *testing.T) {
 	m := observability.NewHTTPMetrics()
 	r := routerWith(m)
@@ -141,6 +147,12 @@ func TestPanickingHandlerStillRecordsMetrics(t *testing.T) {
 
 	if n := testutil.CollectAndCount(m.Requests); n != 1 {
 		t.Errorf("counter has %d series after a panicking handler, want 1; the request must not vanish from telemetry", n)
+	}
+	if got := testutil.ToFloat64(m.Requests.WithLabelValues("/panic", "GET", "500")); got != 1 {
+		t.Errorf("panic counter (status=500) = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(m.Requests.WithLabelValues("/panic", "GET", "200")); got != 0 {
+		t.Errorf("panic counter (status=200) = %v, want 0; a panic must never be recorded as a success", got)
 	}
 }
 
