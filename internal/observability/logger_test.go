@@ -43,19 +43,32 @@ func TestComponentAddsTheFieldToEveryLine(t *testing.T) {
 	}
 }
 
-// slog does not deduplicate attribute keys, so a call site that logs through a
-// component logger and ALSO passes its own "component" argument ends up with
-// both rendered on the line — this is the exact failure mode the migration
-// guards against, and this test pins it down rather than merely asserting it
-// away: a call site written this way is wrong, and this is what "wrong" looks
-// like on the wire.
+// slog does not deduplicate attribute keys, so a logger that already carries
+// "component" before a second Component() call is layered on top ends up with
+// BOTH rendered on the line, not the second replacing the first. That is
+// exactly how production used to double up: cmd/server/main.go handed the
+// request middleware a logger already wrapped in Component(log, "api"), so
+// every handler's own observability.Component(observability.FromContext(ctx),
+// "<subsystem>") call added a SECOND "component" key instead of contributing
+// the request's only one.
+//
+// The fix is that a context-provided logger must never carry "component"
+// already. FromContext here returns exactly that shape — a logger with only
+// "request_id", the same shape middleware.Logger installs post-fix — so the
+// single Component call below must be the only source of "component" on the
+// line. A context logger that (incorrectly) already carried "component"
+// before this call would push the count to 2 and fail this assertion; that is
+// the regression this test guards against.
 func TestComponentIsNotDuplicatedByCallSites(t *testing.T) {
 	var buf bytes.Buffer
-	log := Component(slog.New(slog.NewJSONHandler(&buf, nil)), "logs")
-	log.Warn("replay skipped", "component", "logs", "error", "bad labels")
+	base := slog.New(slog.NewJSONHandler(&buf, nil)).With(slog.String("request_id", "abc123"))
+	ctx := ContextWithLogger(context.Background(), base)
 
-	if n := strings.Count(buf.String(), `"component"`); n != 2 {
-		t.Errorf("line carries %d component keys, want exactly 2 (both the component logger's and the call site's manual one): %s", n, buf.String())
+	log := Component(FromContext(ctx), "logs")
+	log.Warn("replay skipped", "error", "bad labels")
+
+	if n := strings.Count(buf.String(), `"component"`); n != 1 {
+		t.Errorf("line carries %d component keys, want exactly 1 (a context logger that already carried \"component\" before this call would produce 2): %s", n, buf.String())
 	}
 }
 
