@@ -648,7 +648,7 @@ backend's own query API, so every internal metric was unreachable from any dashb
 - [x] Static: internals datasource and dashboard pinned; every metric the dashboard names checked against what the registry actually exposes
 - [x] Helm: new chart renders; Grafana's internals URL resolves to a Service the Prometheus chart creates
 - [x] Compose: `up == 1` **and** a panel query through Grafana returns numeric data — `up` alone passes on a scrape returning zero series
-- [ ] Kind: same panel assertion in-cluster — assertions written (`f7e0baa`) but **not yet observed passing**: `kind create cluster` cannot start kubelet on this host because its Docker runs cgroup v1, and kind's node images need cgroup v2. Closes on the CI `helm-k8s-e2e` job (ubuntu-latest), not locally
+- [x] Kind: same panel assertion in-cluster — green in CI's `helm-k8s-e2e` job (ubuntu-latest) on commit `7ba10b0`: [run 33943772164](https://github.com/Weilei424/observability-platform/actions/runs/33943772164). It cannot run on a cgroup v1 host, so it closes in CI rather than locally
 - [x] Verify: platform dashboard shows ingest/query/storage health — verified in Compose (`14cac77`): 69 assertions passing, including three internals panel queries through Grafana (`obs_active_series`, `sum(rate(obs_http_requests_total[1m]))`, `obs_wal_bytes`). The in-cluster half rides on the Kind line above and closes on CI's `helm-k8s-e2e` job, not locally.
 
 **Docs**
