@@ -30,7 +30,7 @@ This is not a dashboard UI project. Grafana is the UI. The backend observability
 # Run locally
 make run
 
-# Start the demo stack in Docker: backend + Grafana + load generator + sample app
+# Start the demo stack in Docker: backend + Prometheus + Grafana + load generator + sample app
 make local-up   # backend: http://localhost:8080  grafana: http://localhost:3000
 make local-down
 make local-logs # follow the stack's logs
@@ -73,12 +73,13 @@ See [`docs/runbooks/self-observability.md`](docs/runbooks/self-observability.md)
 ## Kubernetes
 
 The Compose demo above remains the fastest way to see the project work; Kubernetes is
-the deployment demonstration, not a replacement for it. Three Helm charts —
-`deployments/helm/backend`, `deployments/helm/grafana`, `deployments/helm/producers` —
-install the same backend image as a StatefulSet, Grafana, and the two producers into any
-cluster. See [`docs/runbooks/kubernetes-demo.md`](docs/runbooks/kubernetes-demo.md) for
-the full walkthrough and [`deployments/helm/README.md`](deployments/helm/README.md) for
-the per-chart values reference.
+the deployment demonstration, not a replacement for it. Four Helm charts —
+`deployments/helm/backend`, `deployments/helm/prometheus`, `deployments/helm/grafana`,
+`deployments/helm/producers` — install the same backend image as a StatefulSet, the
+internals-scraping Prometheus, Grafana, and the two producers into any cluster. See
+[`docs/runbooks/kubernetes-demo.md`](docs/runbooks/kubernetes-demo.md) for the full
+walkthrough and [`deployments/helm/README.md`](deployments/helm/README.md) for the
+per-chart values reference.
 
 ## Local Metrics Demo (without Docker)
 

@@ -182,6 +182,7 @@ prometheus pair), that every rendered probe path is a real route in
 default, and that rendering Grafana without a password fails as designed.
 
 `tests/e2e/kind_smoke.sh` is the cluster-dependent counterpart: it builds and loads the
-three images into a real `kind` cluster, installs all three charts in the documented
+three custom images (backend, load-generator, sample-app; Prometheus and Grafana use
+public images) into a real `kind` cluster, installs all four charts in the documented
 order, and additionally verifies that data survives a pod restart and that Grafana can
 query the backend from inside the cluster. It only runs in CI (the `helm-k8s-e2e` job).
