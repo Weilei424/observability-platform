@@ -451,6 +451,20 @@ fi
 echo ""
 echo "-- Platform self-observability --"
 
+# Fetch the dashboard by uid through Grafana's own API before querying any of
+# its panels. Without this, a dashboard ConfigMap that failed to provision
+# in-cluster (a bad mount, a rename that broke the uid) would go unnoticed:
+# the panel-query check below hits the internals Prometheus datasource
+# directly and would still pass even with no such dashboard loaded.
+IDASH=$(curl -s --max-time 15 -u "admin:e2e-only" \
+    "http://localhost:13000/api/dashboards/uid/obs-self-v1")
+if printf '%s' "$IDASH" | grep -q '"uid":"obs-self-v1"' \
+        && printf '%s' "$IDASH" | grep -q '"title":"Observability Platform Internals"'; then
+    log_pass "internals dashboard provisioned in-cluster (uid obs-self-v1)"
+else
+    log_fail "internals dashboard not provisioned as expected: $IDASH"
+fi
+
 # One self-observability panel query, through Grafana, against the internals
 # datasource — the same path a dashboard panel takes. A freshly installed
 # Prometheus has not scraped yet, so this polls rather than asserting once.
