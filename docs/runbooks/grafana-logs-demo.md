@@ -150,8 +150,8 @@ make smoke-compose
 
 This one owns its stack: it uses its own Compose project name (`obs-compose-e2e`)
 and removes its volumes at the end, so it will not touch a stack you started with
-`make local-up`. It does need ports 3000 and 8080 free, and fails immediately with
-a clear message if either is taken.
+`make local-up`. It does need ports 3000, 8080, and 9090 free, and fails immediately
+with a clear message if any is taken.
 
 Everything it asserts goes through Grafana's HTTP API rather than the backend's:
 
@@ -161,7 +161,7 @@ Everything it asserts goes through Grafana's HTTP API rather than the backend's:
   actually serves, so the test cannot drift from the panels
 - log chunks reaching disk, which is what the demo's 16 KiB flush override is for
 - the data surviving a `docker compose restart backend`
-- all four containers still running at the end, and fresh sample-app rows arriving
+- all five containers still running at the end, and fresh sample-app rows arriving
   after the restart — a producer that dies partway through leaves the label values
   and seeded lines behind, so "it ran once" and "it is running" otherwise look the same
 
