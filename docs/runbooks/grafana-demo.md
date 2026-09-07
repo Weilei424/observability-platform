@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - Docker and Docker Compose installed
-- Ports 8080 and 3000 free
+- Ports 8080, 3000, and 9090 free
 
 ## Start the stack
 
