@@ -3,8 +3,8 @@
 The deployment counterpart to [`grafana-demo.md`](grafana-demo.md) and
 [`grafana-logs-demo.md`](grafana-logs-demo.md). Those two run the backend as a single
 Compose container; this one runs the same backend image as a Kubernetes StatefulSet,
-fronted by Grafana and the same two producers, all installed from three separate Helm
-charts under `deployments/helm/`.
+fronted by Grafana, the internals-scraping Prometheus, and the same two producers, all
+installed from four separate Helm charts under `deployments/helm/`.
 
 The Compose demo remains the fastest way to see the project work. This runbook exists to
 demonstrate the deployment story — Helm charts, a StatefulSet with a real PVC, liveness
@@ -31,10 +31,12 @@ Everything below targets the `obs` namespace. Drop `-n obs` throughout (and the
 
 ## Build and load the images
 
-The three charts use `imagePullPolicy: IfNotPresent` and reference images by name only —
-there is no registry involved. Build them from the existing multi-stage
-[`Dockerfile`](../../deployments/docker/Dockerfile) and load each one directly into the
-cluster's node:
+The backend and producers charts use `imagePullPolicy: IfNotPresent` and reference these
+three images by name only — there is no registry involved. (The Grafana and Prometheus
+charts pull their public `grafana/grafana` and `prom/prometheus` images from Docker Hub
+as normal; nothing to build or load for those two.) Build the three custom images from
+the existing multi-stage [`Dockerfile`](../../deployments/docker/Dockerfile) and load
+each one directly into the cluster's node:
 
 ```bash
 docker build -t observability-platform/backend:dev --target backend \
@@ -54,10 +56,16 @@ from instead, and override `image.repository`/`image.tag` on install.
 
 ## Install, in this order
 
-Install order is not arbitrary. The backend must exist before anything queries it, the
-dashboards ConfigMap must exist before Grafana starts (its mount is deliberately not
-`optional`, so a missing ConfigMap leaves the pod stuck rather than starting with no
-dashboards), and the producers assume both are already up.
+Install order is not arbitrary. The backend must exist before anything queries it;
+Prometheus must exist before Grafana starts, because Grafana's provisioned
+`obs-internals` datasource (see [`self-observability.md`](self-observability.md)) names
+Prometheus's Service by hostname — installing Grafana first would still succeed (Helm
+and Grafana do not validate a datasource URL at install time), but every panel on the
+**Observability Platform Internals** dashboard would read "No data" against a Service
+that does not exist yet; the dashboards ConfigMap must also exist before Grafana starts
+(its mount is deliberately not `optional`, so a missing ConfigMap leaves the pod stuck
+rather than starting with no dashboards); and the producers assume the backend and
+Grafana are already up.
 
 ### 1. Backend
 
@@ -73,7 +81,21 @@ data, and a query would see whichever one it happened to land on. That ceiling i
 this phase does not attempt to hide it — and Phase 6 is where sharding is meant to be
 solved properly.
 
-### 2. Dashboards ConfigMap (mandatory before Grafana)
+### 2. Prometheus (self-observability scraper)
+
+```bash
+helm install prometheus deployments/helm/prometheus -n obs --wait
+kubectl rollout status deployment/observability-prometheus -n obs
+```
+
+This Prometheus scrapes the backend's own `/metrics` — it is not the datasource behind
+the Metrics/Sample App/Logs dashboards, which query the backend directly. It exists so
+the **Observability Platform Internals** dashboard has something to read once Grafana is
+installed in step 4. Its chart's `fullnameOverride` fixes the Service name at
+`observability-prometheus` regardless of the Helm release name, matching the
+`obs-internals` datasource's default URL.
+
+### 3. Dashboards ConfigMap (mandatory before Grafana)
 
 The Grafana chart does not ship the dashboards. Helm can only read files inside its own
 chart directory, so copying them in would fork them from
@@ -89,7 +111,7 @@ kubectl create configmap grafana-dashboards \
 `tests/e2e/kind_smoke.sh` runs this exact command in CI, so it is a tested path, not
 just documentation.
 
-### 3. Grafana
+### 4. Grafana
 
 ```bash
 helm install grafana deployments/helm/grafana -n obs \
@@ -107,7 +129,7 @@ credential ends up in production. This differs from the Compose demo, which keep
 
 Omitting both fails the install with a message telling you which to set.
 
-### 4. Producers
+### 5. Producers
 
 ```bash
 helm install producers deployments/helm/producers -n obs --wait
@@ -120,13 +142,14 @@ Service. Without this chart the dashboards render with nothing in them.
 
 ```bash
 kubectl rollout status statefulset/observability-backend -n obs
+kubectl rollout status deploy/observability-prometheus -n obs
 kubectl rollout status deploy/observability-grafana -n obs
 kubectl rollout status deploy/observability-producers-sample-app -n obs
 kubectl rollout status deploy/observability-producers-load-generator -n obs
 kubectl get pvc -n obs
 ```
 
-Expected: all four rollouts complete, and the PVC created for the backend's
+Expected: all five rollouts complete, and the PVC created for the backend's
 `volumeClaimTemplates` shows `Bound`.
 
 Port-forward the backend and confirm it answers:
@@ -138,7 +161,7 @@ curl -g 'http://localhost:8080/api/v1/query?query=http_requests_total'
 
 `up` is a Prometheus scrape-synthesized series; this backend is push-only, so `up`
 never has any data and would make a working deploy look broken. `http_requests_total`
-is written by the load generator installed in step 4, so a non-empty result here is
+is written by the load generator installed in step 5, so a non-empty result here is
 real proof the producers are reaching the backend.
 
 In a second terminal, port-forward Grafana and open it in a browser:
@@ -148,9 +171,14 @@ kubectl port-forward -n obs svc/observability-grafana 3000:3000
 # then http://localhost:3000, admin / <the password you set above>
 ```
 
-The same three dashboards from the Compose demo should be present and, after ~15
-seconds, showing live data from the producers: **Observability Platform Metrics**,
-**Observability Platform Sample App**, and **Observability Platform Logs**.
+The same four dashboards from the Compose demo should be present: **Observability
+Platform Metrics**, **Observability Platform Sample App**, and **Observability
+Platform Logs**, all showing live data from the producers after ~15 seconds, plus
+**Observability Platform Internals**, which reads from the Prometheus installed in
+step 2 rather than from the producers — give it the same ~15 seconds for that
+Prometheus to complete its first scrape. If Internals reads "No data" while the other
+three dashboards work, the Prometheus chart from step 2 is the place to look (see
+Troubleshooting below).
 
 `make smoke-kind` (`tests/e2e/kind_smoke.sh`) automates everything above end to end in
 a disposable `kind` cluster, plus a pod-restart persistence check and a check that the
@@ -165,12 +193,14 @@ locally the same way.
 | `helm install grafana` fails with a message about `admin.password` | no password supplied; the chart ships none by design | pass `--set admin.password=...` or `--set admin.existingSecret=...` |
 | Backend pod `ImagePullBackOff` | the image was never loaded into the cluster | `kind load docker-image observability-platform/backend:dev --name <cluster>` |
 | `kubectl create configmap grafana-dashboards` fails with `already exists` | re-running this runbook in a namespace from a previous, incompletely cleaned-up run | `kubectl delete configmap grafana-dashboards -n obs` (also covered by Cleanup below), then re-run the create command |
+| **Observability Platform Internals** dashboard shows "No data" on every panel, other dashboards work | the `obs-internals` datasource points at the `observability-prometheus` Service, but step 2 (installing the Prometheus chart) was skipped or installed after Grafana | `helm install prometheus deployments/helm/prometheus -n obs --wait`, then wait ~15s for its first scrape; no Grafana restart needed — the datasource resolves the Service once it exists |
 
 ## Cleanup
 
 ```bash
 helm uninstall producers -n obs
 helm uninstall grafana -n obs
+helm uninstall prometheus -n obs
 helm uninstall backend -n obs
 kubectl delete configmap grafana-dashboards -n obs
 kubectl delete pvc -n obs --all
