@@ -4,13 +4,13 @@ This runbook covers how to view the backend's internal metrics — ingestion rat
 
 ## Dashboard and Datasources
 
-The dashboard (`obs-self-v1`, title "Observability Platform Internals") shows 12 panels of metrics **about** the backend itself:
+The dashboard (`obs-self-v1`, title "Observability Platform Internals") shows 14 panels of metrics **about** the backend itself:
 
 - Ingest rate (samples/sec and lines/sec)
 - Ingest rejections by reason
 - Query rate and latency
-- Block and log storage state
-- Compaction and retention progress
+- Block and log storage state, including block bytes and log-chunk bytes
+- Compaction and retention progress, including retention deletions
 
 It reaches these metrics through the `obs-internals` datasource, which connects to a **separate Prometheus instance** that scrapes the backend's `/metrics` endpoint. This design is intentional: the telemetry system that monitors the backend does not use the same storage the backend uses to record workload metrics. If the metrics TSDB fails, the backend's self-observability signals still exist in the separate Prometheus and can diagnose the failure.
 
