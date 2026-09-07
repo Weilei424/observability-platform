@@ -470,3 +470,78 @@ func TestPushCountsEveryLineInAWholesaleRejectedStream(t *testing.T) {
 		t.Errorf("rejected{reason=labels} = %v, want 3 (three skipped lines, not one)", total)
 	}
 }
+
+// TestPushCountsCollateralLossUnderBatch pins that a valid line sharing a push
+// with an invalid one is still counted as rejected, because validation is
+// atomic and the whole batch is discarded. The valid line did nothing wrong
+// itself, so it is counted under the distinct "batch" reason rather than
+// folded into the invalid line's own reason or dropped silently.
+func TestPushCountsCollateralLossUnderBatch(t *testing.T) {
+	im := observability.NewIngestMetrics()
+	s := newPushTestServerWithIngest(t, im)
+
+	body := `{"streams":[` +
+		`{"stream":{"service":"api"},"values":[["1700000000000000000","hello"]]},` +
+		`{"stream":{"service":"web"},"values":[["notanumber","world"]]}` +
+		`]}`
+	rec := postPush(t, s, body, "application/json")
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := testutil.ToFloat64(im.LogLinesRejected.WithLabelValues("timestamp")); got != 1 {
+		t.Errorf("rejected{reason=timestamp} = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(im.LogLinesRejected.WithLabelValues("batch")); got != 1 {
+		t.Errorf("rejected{reason=batch} = %v, want 1 (the valid line discarded only because its sibling was invalid)", got)
+	}
+	total := testutil.ToFloat64(im.LogLinesRejected.WithLabelValues("timestamp")) + testutil.ToFloat64(im.LogLinesRejected.WithLabelValues("batch"))
+	if total != 2 {
+		t.Errorf("total rejected across reasons = %v, want 2 (one invalid line by its own reason, one valid line lost to the batch)", total)
+	}
+}
+
+// TestPushCountsAbandonedLinesAfterAppendFailure pins that when the handler
+// stops on the first append error, the lines it never attempted afterward
+// are still counted as rejected. A three-line push whose first append fails
+// must land nothing and count all three: one "append" (the line that failed)
+// plus two "batch" (the lines abandoned as a result).
+func TestPushCountsAbandonedLinesAfterAppendFailure(t *testing.T) {
+	im := observability.NewIngestMetrics()
+	cfg := &config.Config{HTTPAddr: ":0", DataDir: t.TempDir(), LogLevel: "info"}
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	mstore := metrics.NewMemoryStore()
+	engine := metrics.NewQueryEngine(mstore)
+	reg, _ := observability.NewRegistry(observability.RegistryOptions{Cardinality: mstore})
+	s := api.New(api.Deps{
+		Config:      cfg,
+		Logger:      log,
+		Ingester:    mstore,
+		Engine:      engine,
+		Registry:    reg,
+		LogIngester: &failingIngester{},
+		Ingest:      im,
+	})
+
+	body := `{"streams":[{"stream":{"service":"api"},"values":[` +
+		`["1700000000000000000","a"],["1700000000000000001","b"],["1700000000000000002","c"]` +
+		`]}]}`
+	rec := postPush(t, s, body, "application/json")
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := testutil.ToFloat64(im.LogLinesIngested); got != 0 {
+		t.Errorf("ingested = %v, want 0", got)
+	}
+	if got := testutil.ToFloat64(im.LogLinesRejected.WithLabelValues("append")); got != 1 {
+		t.Errorf("rejected{reason=append} = %v, want 1 (the line whose append actually failed)", got)
+	}
+	if got := testutil.ToFloat64(im.LogLinesRejected.WithLabelValues("batch")); got != 2 {
+		t.Errorf("rejected{reason=batch} = %v, want 2 (the two lines abandoned after the first append error)", got)
+	}
+	total := testutil.ToFloat64(im.LogLinesRejected.WithLabelValues("append")) + testutil.ToFloat64(im.LogLinesRejected.WithLabelValues("batch"))
+	if total != 3 {
+		t.Errorf("total rejected across reasons = %v, want 3 (all three lines failed to land)", total)
+	}
+}
