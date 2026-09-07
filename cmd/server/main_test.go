@@ -108,3 +108,62 @@ func TestBuildServerKeepsLoggerComponentFree(t *testing.T) {
 		t.Errorf("component = %v, want %q (the handler's own subsystem, not \"api\")", decoded["component"], "metrics_ingest")
 	}
 }
+
+// TestBuildServerStartupLogsCarryComponent guards F4: buildServer's own
+// startup/replay log lines (WAL checkpoint, logs store readiness, ...) must
+// carry a "component" name, same as request-scoped logging does. Before the
+// fix these lines went through the plain, component-free logger handed to
+// buildServer (which must stay component-free because it also becomes
+// api.Deps.Logger) and so had no component at all.
+func TestBuildServerStartupLogsCarryComponent(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, nil))
+
+	cfg := &config.Config{
+		HTTPAddr:                ":0",
+		DataDir:                 t.TempDir(),
+		LogLevel:                "info",
+		WALSegmentMaxBytes:      1 << 20,
+		WALSyncEveryN:           1,
+		LogsFlushThresholdBytes: 1 << 20,
+	}
+
+	sc, err := buildServer(cfg, log)
+	if err != nil {
+		t.Fatalf("buildServer: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = sc.LogStore.Close()
+		_ = sc.BlockStore.Close()
+	})
+
+	wantComponent := map[string]string{
+		"WAL checkpoint":   "wal",
+		"logs store ready": "logs",
+	}
+	found := make(map[string]bool, len(wantComponent))
+
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal([]byte(line), &decoded); err != nil {
+			t.Fatalf("startup log line is not JSON: %q: %v", line, err)
+		}
+		msg, _ := decoded["msg"].(string)
+		wantComp, ok := wantComponent[msg]
+		if !ok {
+			continue
+		}
+		found[msg] = true
+		if got, _ := decoded["component"]; got != wantComp {
+			t.Errorf("line %q: component = %v, want %q", msg, got, wantComp)
+		}
+	}
+	for msg := range wantComponent {
+		if !found[msg] {
+			t.Errorf("expected a %q log line, found none in:\n%s", msg, buf.String())
+		}
+	}
+}
