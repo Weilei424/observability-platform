@@ -61,16 +61,30 @@ func TestDirStatsCountsOnlyWALSegments(t *testing.T) {
 	}
 }
 
-func TestDirStatsMissingDirIsNotAnError(t *testing.T) {
-	// A backend that has not written its first record yet has no WAL directory.
-	// Reporting an error there would make the collector emit a gap on a healthy
-	// server, so a missing directory must read as an empty one.
-	bytes, segments, err := DirStats(filepath.Join(t.TempDir(), "does-not-exist"))
-	if err != nil {
-		t.Fatalf("DirStats on missing dir: %v", err)
+// TestDirStatsErrorsOnMissingDir pins the collector-facing contract: main.go
+// creates the WAL directory at startup before any collector that calls
+// DirStats is registered, so a missing directory at scrape time means
+// something deleted it out from under the store -- an operational failure,
+// not a healthy empty WAL. Returning (0, 0, nil) there would show a
+// confident zero on the dashboard instead of a gap, and
+// obs_collector_errors_total would never move.
+func TestDirStatsErrorsOnMissingDir(t *testing.T) {
+	_, _, err := DirStats(filepath.Join(t.TempDir(), "does-not-exist"))
+	if err == nil {
+		t.Fatal("DirStats on missing dir: got nil error, want an error so the collector emits a gap instead of a confident zero")
 	}
-	if bytes != 0 || segments != 0 {
-		t.Errorf("got (%d, %d), want (0, 0)", bytes, segments)
+}
+
+// TestDirSize_MissingDir_StillReturnsZero pins that DirSize keeps its own,
+// deliberately more tolerant contract even though DirStats (which it is
+// implemented over) now errors on ENOENT: DirSize's only caller
+// (metrics.WALStore.WALBytes, a compactor flush-size trigger) has no
+// startup-ordering guarantee and already treats any error as "skip the
+// size-based flush," so there is nothing to gain by hardening it too.
+func TestDirSize_MissingDir_StillReturnsZero(t *testing.T) {
+	got, err := DirSize(filepath.Join(t.TempDir(), "still-missing"))
+	if err != nil || got != 0 {
+		t.Fatalf("DirSize(missing) = %d, %v; want 0, nil", got, err)
 	}
 }
 
