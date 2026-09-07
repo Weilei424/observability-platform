@@ -333,6 +333,14 @@ check_contains "sample-app dashboard panel expression is the one tested below" "
 # dashboard, so its key spacing is its own and must not be assumed.
 check_contains "sample-app dashboard workers panel expression is the one tested below" "$SDASH" 'sample_app_active_workers'
 
+# As with the other three dashboards, fetch this one by uid too: without this,
+# the self-observability dashboard failing to provision would go unnoticed —
+# the "internals panel query" checks below only exercise the internals
+# Prometheus datasource directly, never Grafana's copy of the dashboard.
+IDASH=$(gapi /api/dashboards/uid/obs-self-v1)
+check_contains "internals dashboard provisioned — uid" "$IDASH" '"uid":"obs-self-v1"'
+check_contains "internals dashboard provisioned — title" "$IDASH" '"title":"Observability Platform Internals"'
+
 # ---- Seed a marker stream -------------------------------------------
 echo ""
 echo "-- Seeding markers --"
