@@ -643,7 +643,9 @@ HTTP request metrics (`obs_http_requests_total`, `obs_http_request_duration_seco
 
 #### Component Name Set
 
-Request-scoped and startup loggers carry a fixed `component` name. The set actually emitted is: `api`, `compactor`, `metrics_ingest`, `logs_push`, `logs_query`, `logs`, `logwal`, `wal`. Each component name appears at most once per log line. Nothing enforces this set in code — `observability.Component()` accepts any string — so it is a call-site convention, not a constraint the logging helpers check.
+Request-scoped and startup loggers carry a fixed `component` name. The set actually emitted is: `api`, `compactor`, `logs`, `logs_push`, `logs_query`, `logwal`, `main`, `metrics_ingest`, `wal`. Each component name appears at most once per log line. Nothing enforces this set in code — `observability.Component()` accepts any string — so it is a call-site convention, not a constraint the logging helpers check.
+
+`main` covers `cmd/server/main.go`'s own generic startup/lifecycle lines (data directory creation, binding the listener, starting and shutting down the HTTP server) that are not specific to any one storage subsystem. Its startup lines that ARE specific to a subsystem reuse that subsystem's existing component name instead: WAL checkpoint/replay/open/close logs carry `wal`, and logs-store open/ready/close logs carry `logs` — the same names those subsystems already use for their own runtime log lines. `cmd/server/main.go`'s `log` value itself is `api.Deps.Logger` and stays component-free per that field's doc comment; every startup line goes through a separate, derived logger instead.
 
 #### Datasource UIDs
 
