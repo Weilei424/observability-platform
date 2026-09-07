@@ -614,7 +614,7 @@ The backend exposes the following metrics at `/metrics`, scraped by a separate P
 
 **Ingestion:**
 - `obs_samples_ingested_total` — accepted metric samples
-- `obs_samples_rejected_total{reason}` — rejected samples (closed-set reason labels: `name`, `timestamp`, `value`, `labels`, `other`, `append`, `batch` — see `internal/api/reject_reason.go`; `batch` covers a sample that was itself valid but discarded only because a sibling in the same atomically-rejected batch was invalid, or because the handler abandoned the rest of the batch after an append error)
+- `obs_samples_rejected_total{reason}` — rejected samples (closed-set reason labels: `name`, `timestamp`, `value`, `labels`, `other`, `append`, `batch` — see `internal/api/reject_reason.go`; `batch` covers a sample that was itself valid but discarded only because a sibling in the same atomically-rejected batch was invalid. The metrics handler attempts every append even after one fails, so a failed write is always `append` there, never `batch`; only the Loki push path abandons a tail after an append error)
 - `obs_log_lines_ingested_total` — accepted log lines
 - `obs_log_lines_rejected_total{reason}` — rejected log lines (closed-set reason labels: `values`, `timestamp`, `line`, `labels`, `other`, `append`, `batch` — same `batch` semantics as above)
 
