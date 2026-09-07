@@ -376,3 +376,28 @@ func TestIngestCountsRejectionsByClassifiedReason(t *testing.T) {
 		t.Errorf("ingested = %v, want 0; a request with validation errors appends nothing", got)
 	}
 }
+
+// TestIngestCountsOneRejectionPerEntry_NotPerValidationError pins that a
+// single malformed sample counts once against obs_samples_rejected_total no
+// matter how many validation error items it produces. A sample missing both
+// timestamp_ms and value appends two items to the error list (one per
+// missing field), but it is still exactly one rejected sample.
+func TestIngestCountsOneRejectionPerEntry_NotPerValidationError(t *testing.T) {
+	im := observability.NewIngestMetrics()
+	s := newTestServerWithIngest(t, im)
+
+	body := `{"metrics":[{"name":"a"}]}`
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/ingest/metrics", strings.NewReader(body)))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if n := testutil.CollectAndCount(im.SamplesRejected); n != 1 {
+		t.Errorf("rejection counter has %d series, want exactly 1", n)
+	}
+	total := testutil.ToFloat64(im.SamplesRejected.WithLabelValues("timestamp"))
+	if total != 1 {
+		t.Errorf("rejected total across all reasons = %v, want 1 (one rejected sample, not one per validation error)", total)
+	}
+}

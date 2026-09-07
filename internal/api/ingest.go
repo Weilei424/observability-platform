@@ -54,17 +54,31 @@ func (s *Server) handleIngestMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var validationErrors []ingestErrorItem
+	// firstRejectField holds, per rejected entry index, the field of the FIRST
+	// validation error recorded for that entry. One malformed entry (e.g. a
+	// sample missing both timestamp_ms and value) can append several items to
+	// validationErrors, but it is still exactly one rejected sample; counting
+	// every item would inflate obs_samples_rejected_total to more than the
+	// number of samples actually rejected. Each rejected entry is therefore
+	// counted once, attributed to its first error.
+	firstRejectField := make(map[int]string, len(req.Metrics))
+	recordValidationError := func(i int, field, message string) {
+		validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: field, Message: message})
+		if _, ok := firstRejectField[i]; !ok {
+			firstRejectField[i] = field
+		}
+	}
 	samples := make([]pending, 0, len(req.Metrics))
 
 	for i, entry := range req.Metrics {
 		var entryHasError bool
 
 		if entry.TimestampMs == nil {
-			validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: "timestamp_ms", Message: "required"})
+			recordValidationError(i, "timestamp_ms", "required")
 			entryHasError = true
 		}
 		if entry.Value == nil {
-			validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: "value", Message: "required"})
+			recordValidationError(i, "value", "required")
 			entryHasError = true
 		}
 
@@ -78,9 +92,9 @@ func (s *Server) handleIngestMetrics(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			var ve *metrics.ValidationError
 			if errors.As(err, &ve) {
-				validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: ve.Field, Message: ve.Message})
+				recordValidationError(i, ve.Field, ve.Message)
 			} else {
-				validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: "unknown", Message: err.Error()})
+				recordValidationError(i, "unknown", err.Error())
 			}
 			entryHasError = true
 		}
@@ -92,9 +106,9 @@ func (s *Server) handleIngestMetrics(w http.ResponseWriter, r *http.Request) {
 		if err := metrics.ValidateSample(metrics.Sample{TimestampMs: *entry.TimestampMs, Value: *entry.Value}); err != nil {
 			var ve *metrics.ValidationError
 			if errors.As(err, &ve) {
-				validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: ve.Field, Message: ve.Message})
+				recordValidationError(i, ve.Field, ve.Message)
 			} else {
-				validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: "unknown", Message: err.Error()})
+				recordValidationError(i, "unknown", err.Error())
 			}
 			continue
 		}
@@ -103,8 +117,8 @@ func (s *Server) handleIngestMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(validationErrors) > 0 {
-		for _, ve := range validationErrors {
-			s.ingest.SamplesRejected.WithLabelValues(metricRejectReason(ve.Field)).Inc()
+		for _, field := range firstRejectField {
+			s.ingest.SamplesRejected.WithLabelValues(metricRejectReason(field)).Inc()
 		}
 		writeJSON(w, http.StatusBadRequest, map[string]any{"errors": validationErrors})
 		return
