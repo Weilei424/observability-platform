@@ -401,3 +401,34 @@ func TestIngestCountsOneRejectionPerEntry_NotPerValidationError(t *testing.T) {
 		t.Errorf("rejected total across all reasons = %v, want 1 (one rejected sample, not one per validation error)", total)
 	}
 }
+
+// TestIngestCountsCollateralLossUnderBatch pins that a valid sample sharing a
+// batch with an invalid one is still counted as rejected, because validation
+// is atomic and the whole batch is discarded. The valid sample did nothing
+// wrong itself, so it is counted under the distinct "batch" reason rather
+// than folded into the invalid sample's own reason or dropped silently.
+func TestIngestCountsCollateralLossUnderBatch(t *testing.T) {
+	im := observability.NewIngestMetrics()
+	s := newTestServerWithIngest(t, im)
+
+	body := `{"metrics":[
+		{"name":"valid_metric","timestamp_ms":1,"value":1},
+		{"name":"!bad","timestamp_ms":2,"value":2}
+	]}`
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/ingest/metrics", strings.NewReader(body)))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if got := testutil.ToFloat64(im.SamplesRejected.WithLabelValues("name")); got != 1 {
+		t.Errorf("rejected{reason=name} = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(im.SamplesRejected.WithLabelValues("batch")); got != 1 {
+		t.Errorf("rejected{reason=batch} = %v, want 1 (the valid sample discarded only because its sibling was invalid)", got)
+	}
+	total := testutil.ToFloat64(im.SamplesRejected.WithLabelValues("name")) + testutil.ToFloat64(im.SamplesRejected.WithLabelValues("batch"))
+	if total != 2 {
+		t.Errorf("total rejected across reasons = %v, want 2 (one invalid sample by its own reason, one valid sample lost to the batch)", total)
+	}
+}
