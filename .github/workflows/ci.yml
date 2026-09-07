@@ -62,7 +62,7 @@ jobs:
     name: Compose Stack E2E (through Grafana)
     runs-on: ubuntu-latest
     # Starts the real demo stack and drives it through Grafana's HTTP API. The
-    # job above proves the images build; only this one proves the four services
+    # job above proves the images build; only this one proves the five services
     # actually talk to each other — provisioning mounts, datasource resolution,
     # dashboard loading, the sample app producing, and the storage path.
     needs: build-test-lint
