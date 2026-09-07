@@ -55,7 +55,7 @@ smoke-logs:
 smoke-compose:
 	bash tests/e2e/compose_smoke.sh
 
-## smoke-kind: Deploy all three Helm charts into a kind cluster and test the restart/persistence path (needs kind, kubectl, helm, docker)
+## smoke-kind: Deploy all four Helm charts into a kind cluster and test the restart/persistence path (needs kind, kubectl, helm, docker)
 smoke-kind:
 	bash tests/e2e/kind_smoke.sh
 
