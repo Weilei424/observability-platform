@@ -446,6 +446,79 @@
       ],
       "title": "Maintenance Failures",
       "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "obs-internals" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 48 },
+      "id": 13,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "obs-internals" },
+          "expr": "obs_blocks_bytes",
+          "legendFormat": "block bytes",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "obs-internals" },
+          "expr": "obs_log_chunk_bytes",
+          "legendFormat": "log chunk bytes",
+          "refId": "B"
+        }
+      ],
+      "title": "Block and Log Chunk Bytes",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "obs-internals" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 48 },
+      "id": 14,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "obs-internals" },
+          "expr": "rate(obs_retention_deleted_blocks_total[5m])",
+          "legendFormat": "deleted blocks",
+          "refId": "A"
+        }
+      ],
+      "title": "Retention Deletions",
+      "type": "timeseries"
     }
   ],
   "refresh": "10s",
