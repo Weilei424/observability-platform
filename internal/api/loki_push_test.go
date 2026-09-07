@@ -446,3 +446,27 @@ func TestPushCountsRejectionsByClassifiedReason(t *testing.T) {
 		t.Errorf("ingested = %v, want 0; a request with validation errors appends nothing", got)
 	}
 }
+
+// TestPushCountsEveryLineInAWholesaleRejectedStream pins that rejecting a
+// stream's labels counts every line the stream carried, not just the one
+// validation error item that explains the rejection. A stream with an
+// invalid label and N values causes N lines to be skipped.
+func TestPushCountsEveryLineInAWholesaleRejectedStream(t *testing.T) {
+	im := observability.NewIngestMetrics()
+	s := newPushTestServerWithIngest(t, im)
+
+	// The stream label "1nope" is invalid, so all three of this stream's
+	// values are skipped as a result.
+	body := `{"streams":[` +
+		`{"stream":{"1nope":"x"},"values":[["1700000000000000000","a"],["1700000000000000001","b"],["1700000000000000002","c"]]}` +
+		`]}`
+	rec := postPush(t, s, body, "application/json")
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	total := testutil.ToFloat64(im.LogLinesRejected.WithLabelValues("labels"))
+	if total != 3 {
+		t.Errorf("rejected{reason=labels} = %v, want 3 (three skipped lines, not one)", total)
+	}
+}

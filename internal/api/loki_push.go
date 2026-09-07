@@ -94,6 +94,20 @@ func (s *Server) handleLokiPush(w http.ResponseWriter, r *http.Request) {
 		line   string
 	}
 	var validationErrors []ingestErrorItem
+	// rejectedLineFields holds one entry per rejected log LINE, for counting.
+	// A per-value error (bad pair shape, bad timestamp, bad line) already
+	// corresponds to exactly one line, so it contributes one entry. But when a
+	// stream's labels themselves are rejected, every value in that stream is
+	// skipped as a result — that is N rejected lines from a single validation
+	// error item, and obs_log_lines_rejected_total must count all N, not the 1
+	// error item that explains them.
+	var rejectedLineFields []string
+	recordValidationError := func(i int, field, message string, rejectedLines int) {
+		validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: field, Message: message})
+		for n := 0; n < rejectedLines; n++ {
+			rejectedLineFields = append(rejectedLineFields, field)
+		}
+	}
 	entries := make([]pending, 0, len(req.Streams))
 
 	for i, st := range req.Streams {
@@ -101,7 +115,7 @@ func (s *Server) handleLokiPush(w http.ResponseWriter, r *http.Request) {
 		var nullLabel bool
 		for k, vp := range st.Stream {
 			if vp == nil {
-				validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: k, Message: "label value must be a string, not null"})
+				recordValidationError(i, k, "label value must be a string, not null", len(st.Values))
 				nullLabel = true
 				break
 			}
@@ -114,15 +128,15 @@ func (s *Server) handleLokiPush(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			var ve *logs.ValidationError
 			if errors.As(err, &ve) {
-				validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: ve.Field, Message: ve.Message})
+				recordValidationError(i, ve.Field, ve.Message, len(st.Values))
 			} else {
-				validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: "stream", Message: err.Error()})
+				recordValidationError(i, "stream", err.Error(), len(st.Values))
 			}
 			continue
 		}
 		for _, v := range st.Values {
 			if len(v) != 2 {
-				validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: "values", Message: "each value must be a [timestamp, line] pair; structured metadata is not supported"})
+				recordValidationError(i, "values", "each value must be a [timestamp, line] pair; structured metadata is not supported", 1)
 				continue
 			}
 			// Decode into *string (not string) so a JSON null is rejected rather
@@ -130,25 +144,25 @@ func (s *Server) handleLokiPush(w http.ResponseWriter, r *http.Request) {
 			// for a string, but leaves a *string nil.
 			var tsPtr, linePtr *string
 			if err := json.Unmarshal(v[0], &tsPtr); err != nil || tsPtr == nil {
-				validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: "values", Message: "timestamp must be a string"})
+				recordValidationError(i, "values", "timestamp must be a string", 1)
 				continue
 			}
 			if err := json.Unmarshal(v[1], &linePtr); err != nil || linePtr == nil {
-				validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: "values", Message: "line must be a string"})
+				recordValidationError(i, "values", "line must be a string", 1)
 				continue
 			}
 			line := *linePtr
 			tsNs, perr := strconv.ParseInt(*tsPtr, 10, 64)
 			if perr != nil {
-				validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: "timestamp", Message: "invalid nanosecond timestamp: " + *tsPtr})
+				recordValidationError(i, "timestamp", "invalid nanosecond timestamp: "+*tsPtr, 1)
 				continue
 			}
 			if verr := logs.ValidateEntry(logs.LogEntry{TimestampNs: tsNs, Line: line}); verr != nil {
 				var ve *logs.ValidationError
 				if errors.As(verr, &ve) {
-					validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: ve.Field, Message: ve.Message})
+					recordValidationError(i, ve.Field, ve.Message, 1)
 				} else {
-					validationErrors = append(validationErrors, ingestErrorItem{Index: i, Field: "unknown", Message: verr.Error()})
+					recordValidationError(i, "unknown", verr.Error(), 1)
 				}
 				continue
 			}
@@ -157,8 +171,8 @@ func (s *Server) handleLokiPush(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(validationErrors) > 0 {
-		for _, ve := range validationErrors {
-			s.ingest.LogLinesRejected.WithLabelValues(logRejectReason(ve.Field)).Inc()
+		for _, field := range rejectedLineFields {
+			s.ingest.LogLinesRejected.WithLabelValues(logRejectReason(field)).Inc()
 		}
 		writeJSON(w, http.StatusBadRequest, map[string]any{"errors": validationErrors})
 		return
