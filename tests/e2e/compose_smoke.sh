@@ -237,7 +237,7 @@ if ! docker compose version >/dev/null 2>&1; then
     echo "FATAL: 'docker compose' is not available; this test needs Docker with the Compose plugin." >&2
     exit 2
 fi
-for port in 3000 8080; do
+for port in 3000 8080 9090; do
     if curl -s -o /dev/null --connect-timeout 2 --max-time 5 "http://localhost:$port" 2>/dev/null; then
         echo "FATAL: port $port is already serving. Stop the other stack (make local-down) and retry." >&2
         exit 2
