@@ -17,8 +17,9 @@ the Loki subset at once.
 make local-up
 ```
 
-This starts four services:
+This starts five services:
 - **backend** on port 8080 — the observability backend
+- **prometheus** on port 9090 — scrapes the backend's own `/metrics` for the self-observability dashboard (see [`self-observability.md`](self-observability.md))
 - **grafana** on port 3000 — Grafana with provisioned datasources and dashboards
 - **load-generator** — continuously posts metrics
 - **sample-app** — continuously pushes log streams (and its own metrics; see [`grafana-demo.md`](grafana-demo.md))
