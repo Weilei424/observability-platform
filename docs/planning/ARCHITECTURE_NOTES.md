@@ -331,24 +331,30 @@ not, because its datasources are `access: proxy` and resolved on first query. Ph
 Kubernetes probes use `httpGet` instead of this exec command — see "Kubernetes topology"
 below for why the two environments correctly differ here.
 
-### Kubernetes topology (introduced in 5.2)
+### Kubernetes topology (introduced in 5.2; `prometheus` chart added in 5.3)
 
-Three separate Helm charts under `deployments/helm/` — `backend`, `grafana`,
-`producers` — rather than one umbrella chart, because they scale and fail
-independently: the backend is stateful and singular, Grafana is stateless and singular,
-and the producers are optional demo traffic an operator might disable or scale without
-touching either of the other two.
+Four separate Helm charts under `deployments/helm/` — `backend`, `prometheus`,
+`grafana`, `producers` — rather than one umbrella chart, because they scale and fail
+independently: the backend is stateful and singular, the self-observability Prometheus
+and Grafana are each stateless and singular, and the producers are optional demo traffic
+an operator might disable or scale without touching any of the other three.
 
 **Cross-chart contract.** The grafana and producers charts both default `backend.url` to
 `http://observability-backend:8080` — the literal Service name the backend chart creates
-via its pinned `fullnameOverride: observability-backend`. Helm renders each chart in
-isolation and never checks a claim one chart makes about another, so two charts silently
-pointing at a Service the third no longer creates is possible with every chart still
-linting clean. `tests/e2e/helm_test.go`'s `TestCrossChartBackendURLResolves` is the
-Kubernetes analogue of `TestLokiDatasourceURLMatchesComposeBackend` (which
-cross-references `docker-compose.yml` instead of trusting a literal): it renders all
-three charts and fails if any `backend.url` doesn't resolve to a Service name and port
-the backend chart's own rendered output actually defines.
+via its pinned `fullnameOverride: observability-backend`. The prometheus chart carries
+the same URL under its own `backend.url` (its scrape target), and the grafana chart's
+`internals.url` in turn defaults to `http://observability-prometheus:9090` — the
+prometheus chart's own pinned `fullnameOverride`. Helm renders each chart in isolation
+and never checks a claim one chart makes about another, so a rename in any one of these
+is possible with every chart still linting clean. `tests/e2e/helm_test.go` checks every
+edge of this: `TestCrossChartBackendURLResolves` (the Kubernetes analogue of
+`TestLokiDatasourceURLMatchesComposeBackend`, which cross-references
+`docker-compose.yml` instead of trusting a literal) covers grafana and producers against
+the backend chart; `TestPrometheusChartScrapesTheBackendService` covers the prometheus
+chart against the backend chart; `TestGrafanaInternalsURLResolvesToThePrometheusService`
+covers the grafana chart against the prometheus chart. Each renders the charts on both
+ends of a claim and fails if the URL doesn't resolve to a Service name and port the
+other chart's own rendered output actually defines.
 
 **StatefulSet, not Deployment.** The backend owns a WAL and on-disk chunks/blocks on a
 `ReadWriteOnce` volume. A Deployment's rolling update starts the new pod before
@@ -384,7 +390,7 @@ drifts from the one Compose provisions. Instead the chart mounts a ConfigMap
 directly from that directory before installing the chart — one source of truth instead
 of two. The mount is deliberately **not** `optional`: a missing ConfigMap leaves the pod
 in `ContainerCreating`, naming exactly what's absent, which is louder than a Grafana
-that starts happily with three empty dashboards. `tests/e2e/kind_smoke.sh` runs the
+that starts happily with four empty dashboards. `tests/e2e/kind_smoke.sh` runs the
 documented `kubectl create configmap` command verbatim in CI, so the runbook step is a
 tested path rather than a hope.
 
