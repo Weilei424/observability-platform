@@ -11,6 +11,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -129,12 +130,31 @@ func TestInternalsDashboardCoversIngestQueryAndStorage(t *testing.T) {
 	}
 }
 
-// TestInternalsDashboardQueryLatencyExcludesProbeRoutes pins F3: the "Query
-// Latency" panel must not fold /healthz (probed every 5s), /readyz, and
-// /metrics (scraped every 15s) into what its title claims is query latency.
-// An idle system with no real API traffic would otherwise show a confident,
-// entirely-probe-driven "query latency."
-func TestInternalsDashboardQueryLatencyExcludesProbeRoutes(t *testing.T) {
+// TestInternalsDashboardQueryLatencyIsRouteScoped pins F2/F3: the "Query
+// Latency" panel must whitelist the actual query and metadata routes (from
+// internal/api/router.go) rather than blacklist known non-query routes. A
+// blacklist silently mis-measures the moment a new non-query route (ingest,
+// push, a probe) is added; a whitelist instead requires the new route to be
+// added deliberately before it counts toward "query latency." This test
+// compiles each target's route filter and checks it against the router's
+// full route set, so a future edit that drops or loosens the filter fails
+// here instead of silently blending non-query traffic into the panel.
+func TestInternalsDashboardQueryLatencyIsRouteScoped(t *testing.T) {
+	// Every query and metadata route the router registers (internal/api/router.go).
+	queryRoutes := []string{
+		"/api/v1/query", "/api/v1/query_range", "/api/v1/labels",
+		"/api/v1/label/{name}/values", "/api/v1/series",
+		"/loki/api/v1/query", "/loki/api/v1/query_range", "/loki/api/v1/labels",
+		"/loki/api/v1/label/{name}/values",
+	}
+	// Every non-query route the router registers, plus the chi/middleware
+	// sentinel for a request that matched no route at all.
+	nonQueryRoutes := []string{
+		"/healthz", "/readyz", "/metrics",
+		"/api/v1/ingest/metrics", "/loki/api/v1/push",
+		"<unmatched>",
+	}
+
 	var panel *dashboardPanel
 	for i, p := range loadDashboard(t, internalsDashboardPath).Panels {
 		if strings.Contains(p.Title, "Query Latency") {
@@ -148,15 +168,36 @@ func TestInternalsDashboardQueryLatencyExcludesProbeRoutes(t *testing.T) {
 	if len(panel.Targets) == 0 {
 		t.Fatal("Query Latency panel has no targets")
 	}
+
+	routeFilter := regexp.MustCompile(`route=~"([^"]*)"`)
+	sawFilter := false
 	for _, tgt := range panel.Targets {
 		if !strings.Contains(tgt.Expr, "obs_http_request_duration_seconds_bucket") {
 			continue
 		}
-		for _, excluded := range []string{"/healthz", "/readyz", "/metrics"} {
-			if !strings.Contains(tgt.Expr, excluded) {
-				t.Errorf("target %s expr %q does not exclude probe/scrape route %q; the panel would fold probe latency into query latency", tgt.RefID, tgt.Expr, excluded)
+		m := routeFilter.FindStringSubmatch(tgt.Expr)
+		if m == nil {
+			t.Errorf("target %s expr %q has no route=~ whitelist; a query-latency panel must scope itself to query/metadata routes", tgt.RefID, tgt.Expr)
+			continue
+		}
+		sawFilter = true
+		re, err := regexp.Compile("^(?:" + m[1] + ")$")
+		if err != nil {
+			t.Fatalf("target %s route filter %q does not compile as a regexp: %v", tgt.RefID, m[1], err)
+		}
+		for _, want := range queryRoutes {
+			if !re.MatchString(want) {
+				t.Errorf("target %s route filter %q does not match query route %q; the panel would silently drop it", tgt.RefID, m[1], want)
 			}
 		}
+		for _, unwanted := range nonQueryRoutes {
+			if re.MatchString(unwanted) {
+				t.Errorf("target %s route filter %q matches non-query route %q; the panel would fold it into query latency", tgt.RefID, m[1], unwanted)
+			}
+		}
+	}
+	if !sawFilter {
+		t.Fatal("no target in the Query Latency panel queries obs_http_request_duration_seconds_bucket")
 	}
 }
 
