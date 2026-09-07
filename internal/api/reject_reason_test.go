@@ -7,8 +7,8 @@ import "testing"
 // so a classifier that passes Field through lets any client mint an unbounded
 // number of metric label values by posting garbage label names.
 func TestRejectReasonsAreABoundedSet(t *testing.T) {
-	metricAllowed := map[string]bool{"name": true, "labels": true, "timestamp": true, "value": true, "append": true, "other": true}
-	logAllowed := map[string]bool{"labels": true, "timestamp": true, "line": true, "values": true, "append": true, "other": true}
+	metricAllowed := map[string]bool{"name": true, "labels": true, "timestamp": true, "value": true, "append": true, "batch": true, "other": true}
+	logAllowed := map[string]bool{"labels": true, "timestamp": true, "line": true, "values": true, "append": true, "batch": true, "other": true}
 
 	hostile := []string{
 		"user_supplied_label_0", "\x00", "a very long label name that a client chose",
