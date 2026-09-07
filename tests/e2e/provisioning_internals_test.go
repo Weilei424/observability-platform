@@ -129,6 +129,37 @@ func TestInternalsDashboardCoversIngestQueryAndStorage(t *testing.T) {
 	}
 }
 
+// TestInternalsDashboardQueryLatencyExcludesProbeRoutes pins F3: the "Query
+// Latency" panel must not fold /healthz (probed every 5s), /readyz, and
+// /metrics (scraped every 15s) into what its title claims is query latency.
+// An idle system with no real API traffic would otherwise show a confident,
+// entirely-probe-driven "query latency."
+func TestInternalsDashboardQueryLatencyExcludesProbeRoutes(t *testing.T) {
+	var panel *dashboardPanel
+	for i, p := range loadDashboard(t, internalsDashboardPath).Panels {
+		if strings.Contains(p.Title, "Query Latency") {
+			panel = &loadDashboard(t, internalsDashboardPath).Panels[i]
+			break
+		}
+	}
+	if panel == nil {
+		t.Fatal(`no panel titled "Query Latency ..." found`)
+	}
+	if len(panel.Targets) == 0 {
+		t.Fatal("Query Latency panel has no targets")
+	}
+	for _, tgt := range panel.Targets {
+		if !strings.Contains(tgt.Expr, "obs_http_request_duration_seconds_bucket") {
+			continue
+		}
+		for _, excluded := range []string{"/healthz", "/readyz", "/metrics"} {
+			if !strings.Contains(tgt.Expr, excluded) {
+				t.Errorf("target %s expr %q does not exclude probe/scrape route %q; the panel would fold probe latency into query latency", tgt.RefID, tgt.Expr, excluded)
+			}
+		}
+	}
+}
+
 // registeredMetricNames gathers the names a real registry exposes, so the
 // dashboard is checked against the server rather than against a hand-kept list
 // that would drift.

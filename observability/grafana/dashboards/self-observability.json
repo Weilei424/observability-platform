@@ -170,19 +170,19 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "obs-internals" },
-          "expr": "histogram_quantile(0.5, sum by (le)(rate(obs_http_request_duration_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.5, sum by (le)(rate(obs_http_request_duration_seconds_bucket{route!~\"/healthz|/readyz|/metrics\"}[5m])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "obs-internals" },
-          "expr": "histogram_quantile(0.95, sum by (le)(rate(obs_http_request_duration_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le)(rate(obs_http_request_duration_seconds_bucket{route!~\"/healthz|/readyz|/metrics\"}[5m])))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "obs-internals" },
-          "expr": "histogram_quantile(0.99, sum by (le)(rate(obs_http_request_duration_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.99, sum by (le)(rate(obs_http_request_duration_seconds_bucket{route!~\"/healthz|/readyz|/metrics\"}[5m])))",
           "legendFormat": "p99",
           "refId": "C"
         }
