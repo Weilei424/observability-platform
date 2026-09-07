@@ -8,7 +8,7 @@ The dashboard (`obs-self-v1`, title "Observability Platform Internals") shows 14
 
 - Ingest rate (samples/sec and lines/sec)
 - Ingest rejections by reason
-- Query rate and latency
+- HTTP request rate by route (all traffic) and query latency (query and metadata routes only)
 - Block and log storage state, including block bytes and log-chunk bytes
 - Compaction and retention progress, including retention deletions
 
