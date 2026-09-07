@@ -120,6 +120,13 @@ func (s *Server) handleIngestMetrics(w http.ResponseWriter, r *http.Request) {
 		for _, field := range firstRejectField {
 			s.ingest.SamplesRejected.WithLabelValues(metricRejectReason(field)).Inc()
 		}
+		// samples holds the entries that passed validation on their own; they are
+		// still discarded because the batch is rejected atomically. That is
+		// collateral loss, not an invalidity of their own, so it is counted under
+		// the distinct "batch" reason rather than folded into the reasons above.
+		if len(samples) > 0 {
+			s.ingest.SamplesRejected.WithLabelValues("batch").Add(float64(len(samples)))
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]any{"errors": validationErrors})
 		return
 	}
