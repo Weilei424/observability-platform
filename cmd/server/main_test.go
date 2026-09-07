@@ -157,7 +157,7 @@ func TestBuildServerStartupLogsCarryComponent(t *testing.T) {
 			continue
 		}
 		found[msg] = true
-		if got, _ := decoded["component"]; got != wantComp {
+		if got := decoded["component"]; got != wantComp {
 			t.Errorf("line %q: component = %v, want %q", msg, got, wantComp)
 		}
 	}
