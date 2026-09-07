@@ -160,6 +160,28 @@ func TestInternalsDashboardQueryLatencyExcludesProbeRoutes(t *testing.T) {
 	}
 }
 
+// TestInternalsDashboardPlotsBlockAndLogChunkBytesAndRetentionDeletions pins
+// F5: the design (docs/superpowers/specs/2026-08-31-phase-5.3-self-observability-design.md)
+// and the runbook both promise block bytes, log-chunk bytes, and retention
+// deletions on this dashboard, but the original 12 panels covered counts
+// only, never these three metrics.
+func TestInternalsDashboardPlotsBlockAndLogChunkBytesAndRetentionDeletions(t *testing.T) {
+	want := []string{"obs_blocks_bytes", "obs_log_chunk_bytes", "obs_retention_deleted_blocks_total"}
+	seen := make(map[string]bool, len(want))
+	for _, p := range loadDashboard(t, internalsDashboardPath).Panels {
+		for _, tgt := range p.Targets {
+			for _, name := range metricNamesIn(tgt.Expr) {
+				seen[name] = true
+			}
+		}
+	}
+	for _, name := range want {
+		if !seen[name] {
+			t.Errorf("no panel plots %q; the design and runbook both promise it", name)
+		}
+	}
+}
+
 // registeredMetricNames gathers the names a real registry exposes, so the
 // dashboard is checked against the server rather than against a hand-kept list
 // that would drift.
