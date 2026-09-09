@@ -51,7 +51,7 @@ smoke-logs:
 	go test ./tests/e2e/ -count=1
 	bash tests/e2e/logs_smoke.sh
 
-## smoke-compose: Bring up the Compose stack and test it through Grafana's API (needs Docker; ports 3000/8080 free)
+## smoke-compose: Bring up the Compose stack and test it through Grafana's API (needs Docker; ports 3000/8080/9090 free)
 smoke-compose:
 	bash tests/e2e/compose_smoke.sh
 
