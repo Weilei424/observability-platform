@@ -12,10 +12,13 @@ package api
 // This function only classifies per-item validation failures. Two more reasons
 // in the closed set are assigned directly by the ingest handler, never through
 // this function: "append" (the item passed validation but the write to storage
-// failed) and "batch" (the item was itself valid but was discarded only because
-// a sibling in the same atomically-rejected batch was invalid, or because the
-// handler abandoned the rest of the batch after an append error). The full
-// closed set is therefore: name, timestamp, value, labels, other, append, batch.
+// failed) and "batch" (the sample was itself valid but was discarded only
+// because a sibling in the same atomically-rejected batch was invalid).
+//
+// "batch" here never means an abandoned append tail: handleIngestMetrics
+// attempts every append even after one fails, so a failed write is always
+// "append". Only the Loki push path abandons a tail — see logRejectReason.
+// The full closed set is: name, timestamp, value, labels, other, append, batch.
 func metricRejectReason(field string) string {
 	switch field {
 	case "__name__":
@@ -36,6 +39,10 @@ func metricRejectReason(field string) string {
 
 // logRejectReason is metricRejectReason's counterpart for the Loki push path. Same
 // rule: Field is client-influenced and never becomes a label value unchanged.
+//
+// "batch" is broader on this path than on the metrics one: besides collateral
+// from an atomically-rejected batch, handleLokiPush returns on the first append
+// failure, so every line after it is abandoned and counted as "batch" too.
 //
 // As with metricRejectReason, "append" and "batch" are assigned directly by the
 // push handler rather than through this function — see metricRejectReason's
