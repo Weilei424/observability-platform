@@ -369,8 +369,15 @@ func TestIngestCountsRejectionsByClassifiedReason(t *testing.T) {
 	if got := testutil.ToFloat64(im.SamplesRejected.WithLabelValues("labels")); got != 1 {
 		t.Errorf("rejected{reason=labels} = %v, want 1", got)
 	}
-	if n := testutil.CollectAndCount(im.SamplesRejected); n != 2 {
-		t.Errorf("rejection counter has %d series, want exactly 2 (name, labels)", n)
+	// NewIngestMetrics preinitializes a zero-valued child for every reason in
+	// observability.SampleRejectReasons, so the series count is always the
+	// full closed set rather than just the reasons this request happened to
+	// hit. That fixed count is still the cardinality guard this test exists
+	// for: if the classifier let "1nope" (a client-supplied field name) mint
+	// its own series instead of collapsing into "labels", the count below
+	// would be one more than the closed set's size.
+	if n := testutil.CollectAndCount(im.SamplesRejected); n != len(observability.SampleRejectReasons) {
+		t.Errorf("rejection counter has %d series, want exactly %d (the closed reason set)", n, len(observability.SampleRejectReasons))
 	}
 	if got := testutil.ToFloat64(im.SamplesIngested); got != 0 {
 		t.Errorf("ingested = %v, want 0; a request with validation errors appends nothing", got)
@@ -393,8 +400,12 @@ func TestIngestCountsOneRejectionPerEntry_NotPerValidationError(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
-	if n := testutil.CollectAndCount(im.SamplesRejected); n != 1 {
-		t.Errorf("rejection counter has %d series, want exactly 1", n)
+	// NewIngestMetrics preinitializes a zero-valued child for every reason in
+	// observability.SampleRejectReasons, so the series count is always the
+	// full closed set regardless of what this request hits; the value at
+	// "timestamp" below is what actually pins one-rejection-per-entry.
+	if n := testutil.CollectAndCount(im.SamplesRejected); n != len(observability.SampleRejectReasons) {
+		t.Errorf("rejection counter has %d series, want exactly %d (the closed reason set)", n, len(observability.SampleRejectReasons))
 	}
 	total := testutil.ToFloat64(im.SamplesRejected.WithLabelValues("timestamp"))
 	if total != 1 {
