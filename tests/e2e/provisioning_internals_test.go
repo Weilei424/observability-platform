@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/masonwheeler/observability-platform/internal/observability"
+	dto "github.com/prometheus/client_model/go"
 )
 
 const (
@@ -282,10 +283,16 @@ func registeredMetricNames(t *testing.T) map[string]bool {
 	names := make(map[string]bool, len(families))
 	for _, f := range families {
 		names[f.GetName()] = true
-		// A histogram named X is queried as X_bucket, X_sum, and X_count.
-		names[f.GetName()+"_bucket"] = true
-		names[f.GetName()+"_sum"] = true
-		names[f.GetName()+"_count"] = true
+		// A histogram named X is queried as X_bucket, X_sum, and X_count. Only
+		// HISTOGRAM families get these aliases: adding them for every family
+		// regardless of type let a typo like obs_active_series_bucket (a
+		// gauge, not a histogram) pass this guard while rendering an empty
+		// panel, defeating the point of the test.
+		if f.GetType() == dto.MetricType_HISTOGRAM {
+			names[f.GetName()+"_bucket"] = true
+			names[f.GetName()+"_sum"] = true
+			names[f.GetName()+"_count"] = true
+		}
 	}
 	return names
 }
