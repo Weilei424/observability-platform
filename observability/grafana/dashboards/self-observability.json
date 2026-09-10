@@ -215,12 +215,12 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "obs-internals" },
-          "expr": "sum by (status)(rate(obs_http_requests_total{status=~\"5..\"}[1m]))",
+          "expr": "sum by (status)(obs_http_requests_total{status=~\"5..\"})",
           "legendFormat": "{{status}}",
           "refId": "A"
         }
       ],
-      "title": "HTTP Errors by Status",
+      "title": "Total HTTP Errors by Status",
       "type": "timeseries"
     },
     {
