@@ -60,21 +60,28 @@ func TestMetricsEndpointExposesTheDashboardMetricNames(t *testing.T) {
 		"obs_wal_bytes",
 		"obs_wal_segments",
 		"obs_active_series",
+		// obs_samples_rejected_total and obs_log_lines_rejected_total are
+		// *prometheus.CounterVec, and obs_collector_errors_total is too; this
+		// fixture never observes any of the three. They still appear:
+		// NewIngestMetrics and NewRegistry preinitialize a zero-valued child
+		// for every reason in observability.SampleRejectReasons /
+		// LogLineRejectReasons, and for each of observability.CollectorNames,
+		// specifically so a labelled failure counter reads absent(0) -> 1 on
+		// its first observation instead of absent -> 1, which rate() cannot
+		// render at all. Before that preinitialization a CounterVec with no
+		// observed child emitted nothing on a healthy scrape, which is why
+		// these three were once excluded from this list. (They were joined
+		// in that exclusion, inaccurately, by obs_log_lines_ingested_total: a
+		// plain, unlabelled Counter always reports its zero value once
+		// registered, preinitialization or not, so it belonged in this list
+		// all along.)
+		"obs_samples_rejected_total",
+		"obs_log_lines_ingested_total",
+		"obs_log_lines_rejected_total",
+		"obs_collector_errors_total",
 	} {
 		if !strings.Contains(body, name) {
 			t.Errorf("/metrics does not expose %s", name)
 		}
 	}
-	// obs_collector_errors_total is deliberately not in the list above for the
-	// same reason obs_samples_rejected_total, obs_log_lines_ingested_total, and
-	// obs_log_lines_rejected_total are not: it is a *prometheus.CounterVec, and a
-	// labelled counter with no observed child emits nothing at all — not even a
-	// zero. Per collectors.go's walCollector/logsCollector (and the tests in
-	// internal/observability/collectors_test.go, e.g.
-	// TestScrapeSucceedsWhenACollectorFails), the "collector" label is only ever
-	// populated by an actual scrape-time failure; a healthy WAL source, as this
-	// fixture uses, never touches it. That is intentional: synthesizing a zero
-	// here would be indistinguishable from "scraped and healthy" on a dashboard,
-	// which is the exact failure mode walCollector's own gap-not-zero contract
-	// (see its doc comment) is designed to avoid for the gauges it guards.
 }
