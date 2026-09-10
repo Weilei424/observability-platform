@@ -2,6 +2,19 @@ package observability
 
 import "github.com/prometheus/client_golang/prometheus"
 
+// Collector label values for obs_collector_errors_total. CollectorNames is
+// the closed set NewRegistry preinitializes to zero; walCollector and
+// logsCollector below count against these same constants so a third
+// collector added later cannot be counted here without also being
+// preinitialized there.
+const (
+	CollectorWAL  = "wal"
+	CollectorLogs = "logs"
+)
+
+// CollectorNames is the closed set of "collector" label values.
+var CollectorNames = []string{CollectorWAL, CollectorLogs}
+
 type cardinalityCollector struct {
 	src          CardinalitySource
 	activeSeries *prometheus.Desc
@@ -62,7 +75,7 @@ func (c *walCollector) Collect(ch chan<- prometheus.Metric) {
 	for _, src := range c.sources {
 		bytes, segments, err := src.Stats()
 		if err != nil {
-			c.errors.WithLabelValues("wal").Inc()
+			c.errors.WithLabelValues(CollectorWAL).Inc()
 			continue
 		}
 		ch <- prometheus.MustNewConstMetric(c.bytes, prometheus.GaugeValue, float64(bytes), src.Name)
@@ -89,7 +102,7 @@ func (c *logsCollector) Describe(ch chan<- *prometheus.Desc) {
 func (c *logsCollector) Collect(ch chan<- prometheus.Metric) {
 	streams, chunks, bytes, err := c.src.Stats()
 	if err != nil {
-		c.errors.WithLabelValues("logs").Inc()
+		c.errors.WithLabelValues(CollectorLogs).Inc()
 		return
 	}
 	ch <- prometheus.MustNewConstMetric(c.streams, prometheus.GaugeValue, float64(streams))
