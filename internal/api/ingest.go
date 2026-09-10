@@ -125,7 +125,7 @@ func (s *Server) handleIngestMetrics(w http.ResponseWriter, r *http.Request) {
 		// collateral loss, not an invalidity of their own, so it is counted under
 		// the distinct "batch" reason rather than folded into the reasons above.
 		if len(samples) > 0 {
-			s.ingest.SamplesRejected.WithLabelValues("batch").Add(float64(len(samples)))
+			s.ingest.SamplesRejected.WithLabelValues(observability.ReasonBatch).Add(float64(len(samples)))
 		}
 		writeJSON(w, http.StatusBadRequest, map[string]any{"errors": validationErrors})
 		return
@@ -145,7 +145,7 @@ func (s *Server) handleIngestMetrics(w http.ResponseWriter, r *http.Request) {
 	// Count what actually landed, before the error branch: a partial append leaves
 	// those samples in the store, and reporting zero would understate ingest.
 	s.ingest.SamplesIngested.Add(float64(appended))
-	s.ingest.SamplesRejected.WithLabelValues("append").Add(float64(len(appendErrors)))
+	s.ingest.SamplesRejected.WithLabelValues(observability.ReasonAppend).Add(float64(len(appendErrors)))
 	if len(appendErrors) > 0 {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
