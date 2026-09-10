@@ -81,6 +81,36 @@ func (m *HTTPMetrics) Observe(route, method string, status int, d time.Duration)
 	m.Duration.WithLabelValues(route, method).Observe(d.Seconds())
 }
 
+// Reason label values for obs_samples_rejected_total and
+// obs_log_lines_rejected_total. These are the single source of truth for both
+// the API layer's field-to-reason classifiers (internal/api/reject_reason.go)
+// and the preinitialization below: a reason must be added here before it can
+// be produced or counted anywhere, so it cannot be introduced in one place
+// only and silently missing from the other.
+const (
+	ReasonName      = "name"
+	ReasonTimestamp = "timestamp"
+	ReasonValue     = "value"
+	ReasonValues    = "values"
+	ReasonLine      = "line"
+	ReasonLabels    = "labels"
+	ReasonOther     = "other"
+	ReasonAppend    = "append"
+	ReasonBatch     = "batch"
+)
+
+// SampleRejectReasons is the closed set of reason values obs_samples_rejected_total
+// can take. Order is display order, not significant otherwise.
+var SampleRejectReasons = []string{
+	ReasonName, ReasonTimestamp, ReasonValue, ReasonLabels, ReasonOther, ReasonAppend, ReasonBatch,
+}
+
+// LogLineRejectReasons is the closed set of reason values obs_log_lines_rejected_total
+// can take.
+var LogLineRejectReasons = []string{
+	ReasonValues, ReasonTimestamp, ReasonLine, ReasonLabels, ReasonOther, ReasonAppend, ReasonBatch,
+}
+
 // IngestMetrics count accepted and rejected data at the ingest edge. The reason
 // label is a closed set produced by the API layer's classifier; raw validation
 // fields are client-influenced and never become label values.
@@ -91,9 +121,17 @@ type IngestMetrics struct {
 	LogLinesRejected *prometheus.CounterVec
 }
 
-// NewIngestMetrics builds the instruments without registering them.
+// NewIngestMetrics builds the instruments without registering them. Every
+// reason in SampleRejectReasons and LogLineRejectReasons is given a
+// zero-valued child up front: without this, a CounterVec child does not exist
+// until its first Inc, so Prometheus sees the series go absent -> 1 rather
+// than 0 -> 1, and rate() needs two points in its window to render anything.
+// A single rejection can then be invisible on a dashboard whose entire job is
+// to show rejections. Preinitializing is safe here because the label sets are
+// closed and small — unlike obs_http_requests_total's route/method/status,
+// which is not preinitialized for exactly that reason.
 func NewIngestMetrics() *IngestMetrics {
-	return &IngestMetrics{
+	m := &IngestMetrics{
 		SamplesIngested: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "obs_samples_ingested_total",
 			Help: "Total metric samples accepted and appended.",
@@ -111,6 +149,13 @@ func NewIngestMetrics() *IngestMetrics {
 			Help: "Total log lines rejected, by reason.",
 		}, []string{"reason"}),
 	}
+	for _, reason := range SampleRejectReasons {
+		m.SamplesRejected.WithLabelValues(reason)
+	}
+	for _, reason := range LogLineRejectReasons {
+		m.LogLinesRejected.WithLabelValues(reason)
+	}
+	return m
 }
 
 func (m *IngestMetrics) collectors() []prometheus.Collector {
