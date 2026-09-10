@@ -66,6 +66,12 @@ func NewRegistry(opts RegistryOptions) (*prometheus.Registry, *Instruments) {
 		Name: "obs_collector_errors_total",
 		Help: "Total scrape-time collector failures by collector.",
 	}, []string{"collector"})
+	// Preinitialize both known collectors so a single failure reads as
+	// absent(0) -> 1 rather than absent -> 1: the latter is invisible to
+	// rate(), which needs two points in its window. See CollectorNames.
+	for _, collector := range CollectorNames {
+		collectorErrors.WithLabelValues(collector)
+	}
 	reg.MustRegister(collectorErrors)
 
 	reg.MustRegister(&cardinalityCollector{
