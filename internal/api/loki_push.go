@@ -179,7 +179,7 @@ func (s *Server) handleLokiPush(w http.ResponseWriter, r *http.Request) {
 		// collateral loss, not an invalidity of their own, so it is counted under
 		// the distinct "batch" reason rather than folded into the reasons above.
 		if len(entries) > 0 {
-			s.ingest.LogLinesRejected.WithLabelValues("batch").Add(float64(len(entries)))
+			s.ingest.LogLinesRejected.WithLabelValues(observability.ReasonBatch).Add(float64(len(entries)))
 		}
 		writeJSON(w, http.StatusBadRequest, map[string]any{"errors": validationErrors})
 		return
@@ -193,13 +193,13 @@ func (s *Server) handleLokiPush(w http.ResponseWriter, r *http.Request) {
 			// append error rather than collecting them, so count what landed
 			// before this one plus the one failure, then stop.
 			s.ingest.LogLinesIngested.Add(float64(i))
-			s.ingest.LogLinesRejected.WithLabelValues("append").Inc()
+			s.ingest.LogLinesRejected.WithLabelValues(observability.ReasonAppend).Inc()
 			// entries[i+1:] are never attempted: the handler abandons the rest of
 			// the batch after the first append error. Those lines are discarded
 			// only because their sibling failed to land, not because they were
 			// themselves invalid, so they count under "batch" rather than "append".
 			if abandoned := len(entries) - i - 1; abandoned > 0 {
-				s.ingest.LogLinesRejected.WithLabelValues("batch").Add(float64(abandoned))
+				s.ingest.LogLinesRejected.WithLabelValues(observability.ReasonBatch).Add(float64(abandoned))
 			}
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 			return
