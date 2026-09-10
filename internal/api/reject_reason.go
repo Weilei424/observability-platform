@@ -1,5 +1,7 @@
 package api
 
+import "github.com/masonwheeler/observability-platform/internal/observability"
+
 // metricRejectReason maps a validation error's Field onto a closed set of metric
 // label values.
 //
@@ -18,22 +20,23 @@ package api
 // "batch" here never means an abandoned append tail: handleIngestMetrics
 // attempts every append even after one fails, so a failed write is always
 // "append". Only the Loki push path abandons a tail — see logRejectReason.
-// The full closed set is: name, timestamp, value, labels, other, append, batch.
+// The full closed set is observability.SampleRejectReasons: name, timestamp,
+// value, labels, other, append, batch.
 func metricRejectReason(field string) string {
 	switch field {
 	case "__name__":
-		return "name"
+		return observability.ReasonName
 	case "timestamp_ms":
-		return "timestamp"
+		return observability.ReasonTimestamp
 	case "value":
-		return "value"
+		return observability.ReasonValue
 	case "unknown":
 		// The handler's fallback for a non-ValidationError error.
-		return "other"
+		return observability.ReasonOther
 	default:
 		// Everything else NewLabels produces is either the literal "labels" or a
 		// label name, and both are label problems.
-		return "labels"
+		return observability.ReasonLabels
 	}
 }
 
@@ -47,19 +50,19 @@ func metricRejectReason(field string) string {
 // As with metricRejectReason, "append" and "batch" are assigned directly by the
 // push handler rather than through this function — see metricRejectReason's
 // comment for what each means. The full closed set is: values, timestamp, line,
-// labels, other, append, batch.
+// labels, other, append, batch (observability.LogLineRejectReasons).
 func logRejectReason(field string) string {
 	switch field {
 	case "values":
-		return "values"
+		return observability.ReasonValues
 	case "timestamp", "timestamp_ns":
-		return "timestamp"
+		return observability.ReasonTimestamp
 	case "line":
-		return "line"
+		return observability.ReasonLine
 	case "unknown":
-		return "other"
+		return observability.ReasonOther
 	default:
 		// "stream", or a client-supplied stream label name.
-		return "labels"
+		return observability.ReasonLabels
 	}
 }
