@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -166,4 +167,72 @@ func TestBuildServerStartupLogsCarryComponent(t *testing.T) {
 			t.Errorf("expected a %q log line, found none in:\n%s", msg, buf.String())
 		}
 	}
+}
+
+// TestBuildServerExposesEveryStorageGauge scrapes /metrics from the server
+// buildServer actually wires, and requires every storage gauge the dashboard
+// plots. The API fixture registers a single fake WAL and the Compose smoke test
+// accepts any obs_wal_bytes series, so before this, deleting the logs WAL or
+// the log-store collector from buildServer broke the Storage panels with every
+// test still green.
+//
+// Presence is the assertion, not just registration: a collector that fails to
+// read its directory omits its gauges (a gap, by design), so a missing series
+// here means either the source is not wired in or its read failed. On a fresh
+// data directory buildServer creates all three directories, so neither should
+// happen.
+func TestBuildServerExposesEveryStorageGauge(t *testing.T) {
+	cfg := &config.Config{
+		HTTPAddr:                ":0",
+		DataDir:                 t.TempDir(),
+		LogLevel:                "info",
+		WALSegmentMaxBytes:      1 << 20,
+		WALSyncEveryN:           1,
+		LogsFlushThresholdBytes: 1 << 20,
+	}
+	sc, err := buildServer(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("buildServer: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = sc.LogStore.Close()
+		_ = sc.BlockStore.Close()
+	})
+
+	rec := httptest.NewRecorder()
+	sc.Server.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/metrics = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+
+	for _, series := range []string{
+		`obs_wal_bytes{wal="metrics"}`,
+		`obs_wal_bytes{wal="logs"}`,
+		`obs_wal_segments{wal="metrics"}`,
+		`obs_wal_segments{wal="logs"}`,
+		`obs_log_streams_total`,
+		`obs_log_chunks_total`,
+		`obs_log_chunk_bytes`,
+	} {
+		if !seriesPresent(body, series) {
+			t.Errorf("production /metrics has no %s sample; its Storage panel would be empty", series)
+		}
+	}
+}
+
+// seriesPresent reports whether the exposition text has a sample line for
+// series, which is either a bare metric name or name{labels} written exactly as
+// the text format prints it. Comment lines are skipped, so a # HELP or # TYPE
+// line for the name does not count as a sample.
+func seriesPresent(body, series string) bool {
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, series+" ") {
+			return true
+		}
+	}
+	return false
 }
