@@ -51,11 +51,11 @@ Wait for all services healthy (usually ~10 seconds).
 
 ### First Health Check
 
-Both Prometheus instances expose an `up` metric. In the Grafana Explore tab:
+The scraping Prometheus records an `up` series for each target it scrapes. Only that instance has one: the backend's own TSDB (the `observability-platform` datasource) receives pushed samples and is never scraped, so `up` does not exist there. In the Grafana Explore tab:
 
 1. Select datasource **observability-platform-internals**
 2. Run instant query: `up{job="observability-platform-backend"}`
-3. Expected result: `{job="observability-platform-backend", service="observability-platform"}` = `1`
+3. Expected result: `{instance="backend:8080", job="observability-platform-backend", service="observability-platform"}` = `1`
 
 This confirms the backend's `/metrics` endpoint is reachable and its scrape succeeded.
 
@@ -234,8 +234,8 @@ All `obs_*` metrics exposed by the backend (scraped by the internals Prometheus)
 **Storage:**
 - `obs_blocks_total` — number of persisted metric blocks on disk
 - `obs_blocks_bytes` — total size of metric blocks in bytes
-- `obs_wal_bytes{wal="metrics"}` — size of metrics WAL segment files
-- `obs_wal_segments{wal="metrics"}` — number of metrics WAL segment files
+- `obs_wal_bytes{wal}` — size of the WAL segment files, one series per WAL: `wal="metrics"` for the metrics WAL and `wal="logs"` for the logs WAL
+- `obs_wal_segments{wal}` — number of WAL segment files, with the same two series
 - `obs_log_streams_total` — number of distinct log streams
 - `obs_log_chunks_total` — number of persisted log chunk files
 - `obs_log_chunk_bytes` — total size of log chunks in bytes
