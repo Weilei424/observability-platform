@@ -100,7 +100,8 @@ dashboards themselves come from an operator-created ConfigMap, not from this cha
 | `image.repository` | `grafana/grafana` | Upstream Grafana image. |
 | `image.tag` | `11.1.0` | Pinned to match the Compose demo's Grafana version. |
 | `service.port` | `3000` | |
-| `backend.url` | `http://observability-backend:8080` | The backend Service both provisioned datasources point at. Must match the backend chart's `fullnameOverride` and `service.port` — see Cross-chart contract above. |
+| `backend.url` | `http://observability-backend:8080` | The backend Service the two backend datasources, `obs-prometheus` and `obs-loki`, point at. Must match the backend chart's `fullnameOverride` and `service.port` — see Cross-chart contract above. |
+| `internals.url` | `http://observability-prometheus:9090` | The `prometheus` chart's Service that the `obs-internals` datasource points at — the self-observability dashboard's source. Like `backend.url`, a claim about a Service another chart owns: it must match the prometheus chart's `fullnameOverride` and `service.port`, and `tests/e2e/helm_test.go` fails if it does not. |
 | `dashboards.configMapName` | `grafana-dashboards` | Name of the ConfigMap the operator creates with `kubectl create configmap grafana-dashboards --from-file=observability/grafana/dashboards/` before installing this chart. The volume mount is **not** `optional`, so a missing ConfigMap of this name leaves the pod in `ContainerCreating`, naming exactly what's absent, rather than starting Grafana with no dashboards. |
 | `admin.user` | `admin` | |
 | `admin.password` | `""` (none) | No default on purpose — `CLAUDE.md` forbids secrets in git. Rendering fails with a clear message unless this or `admin.existingSecret` is set. |
