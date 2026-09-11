@@ -198,7 +198,15 @@ rate(obs_collector_errors_total[1m])
 If it's climbing, the collector cannot read its directory. The backend logs the reason as a `collector read failed` line carrying:
 
 - `component` — `wal` or `logs`, matching the counter's `collector` label
-- `source` — which directory failed. This matters for `wal`: the metrics WAL and the logs WAL both count under `collector="wal"`, so the counter alone cannot tell you which one broke.
+- `source` — a logical name for what failed (`metrics` or `logs`), not a path; the directory path is inside `error`. Read it together with `component`, because `source=logs` means two different things:
+
+  | `component` | `source` | What failed |
+  |---|---|---|
+  | `wal` | `metrics` | the metrics WAL |
+  | `wal` | `logs` | the logs WAL |
+  | `logs` | `logs` | the log chunk store |
+
+  This is what the counter alone cannot tell you: both WALs count under `collector="wal"`.
 - `error` — the underlying read error, such as a permission failure or a missing directory
 
 The line is logged **once, when the failure starts** — not on every scrape — and a matching `collector read recovered` line appears when it clears. So search the logs from around when the counter began climbing, not only the most recent lines.
