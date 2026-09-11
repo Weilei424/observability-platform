@@ -169,19 +169,27 @@ func TestBuildServerStartupLogsCarryComponent(t *testing.T) {
 	}
 }
 
-// TestBuildServerExposesEveryStorageGauge scrapes /metrics from the server
-// buildServer actually wires, and requires every storage gauge the dashboard
-// plots. The API fixture registers a single fake WAL and the Compose smoke test
-// accepts any obs_wal_bytes series, so before this, deleting the logs WAL or
-// the log-store collector from buildServer broke the Storage panels with every
-// test still green.
+// TestBuildServerExposesEveryPlottedStoreGauge scrapes /metrics from the server
+// buildServer actually wires, and requires every gauge the self-observability
+// dashboard plots from a store buildServer wires in: the block store (block
+// count and bytes, and active series via its cardinality), both WALs, and the
+// log store. The API fixture registers a single fake WAL and the Compose smoke
+// test accepts any obs_wal_bytes series, so before this, removing any of those
+// sources from buildServer blanked a panel with every test still green.
+//
+// The list was derived from the dashboard's own obs_* references, keeping the
+// gauges and dropping the handler- and compactor-driven counters and
+// histograms, which are covered elsewhere. An earlier version of this test
+// claimed "every storage gauge" and omitted both block gauges, so production
+// Storage: nil passed it; if the dashboard gains a store-backed gauge, add it
+// here.
 //
 // Presence is the assertion, not just registration: a collector that fails to
 // read its directory omits its gauges (a gap, by design), so a missing series
 // here means either the source is not wired in or its read failed. On a fresh
 // data directory buildServer creates all three directories, so neither should
 // happen.
-func TestBuildServerExposesEveryStorageGauge(t *testing.T) {
+func TestBuildServerExposesEveryPlottedStoreGauge(t *testing.T) {
 	cfg := &config.Config{
 		HTTPAddr:                ":0",
 		DataDir:                 t.TempDir(),
@@ -207,6 +215,9 @@ func TestBuildServerExposesEveryStorageGauge(t *testing.T) {
 	body := rec.Body.String()
 
 	for _, series := range []string{
+		`obs_blocks_total`,
+		`obs_blocks_bytes`,
+		`obs_active_series`,
 		`obs_wal_bytes{wal="metrics"}`,
 		`obs_wal_bytes{wal="logs"}`,
 		`obs_wal_segments{wal="metrics"}`,
@@ -216,7 +227,7 @@ func TestBuildServerExposesEveryStorageGauge(t *testing.T) {
 		`obs_log_chunk_bytes`,
 	} {
 		if !seriesPresent(body, series) {
-			t.Errorf("production /metrics has no %s sample; its Storage panel would be empty", series)
+			t.Errorf("production /metrics has no %s sample; the dashboard panel plotting it would be empty", series)
 		}
 	}
 }
