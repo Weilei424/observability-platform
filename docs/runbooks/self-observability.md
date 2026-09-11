@@ -195,9 +195,16 @@ If `obs_log_chunk_bytes` or WAL size panels show gaps (no data points), the coll
 rate(obs_collector_errors_total[1m])
 ```
 
-If it's climbing, the collector cannot read its directory:
-- Compose: check backend logs (`make local-logs`) for the exact permission error. The backend's data lives in the `obs-data` Docker volume at container path `/data/logs/` and `/data/metrics/wal/`.
-- Kubernetes: check PVC mount and pod logs
+If it's climbing, the collector cannot read its directory. The backend logs the reason as a `collector read failed` line carrying:
+
+- `component` — `wal` or `logs`, matching the counter's `collector` label
+- `source` — which directory failed. This matters for `wal`: the metrics WAL and the logs WAL both count under `collector="wal"`, so the counter alone cannot tell you which one broke.
+- `error` — the underlying read error, such as a permission failure or a missing directory
+
+The line is logged **once, when the failure starts** — not on every scrape — and a matching `collector read recovered` line appears when it clears. So search the logs from around when the counter began climbing, not only the most recent lines.
+
+- Compose: `make local-logs`, then look for `collector read failed`. The backend's data lives in the `obs-data` Docker volume at container paths `/data/logs/` and `/data/metrics/wal/`.
+- Kubernetes: the same line in the backend pod's logs; then check the PVC mount.
 
 ### Collector Error Climbing
 
@@ -240,8 +247,8 @@ All `obs_*` metrics exposed by the backend (scraped by the internals Prometheus)
 - `obs_compaction_failures_total` — block merges that failed
 - `obs_compaction_duration_seconds` — time spent in compaction (histogram)
 - `obs_retention_deleted_blocks_total` — blocks deleted by retention policy
-- `obs_flushes_total` — successful log/metrics head flushes
-- `obs_flush_failures_total` — failed flushes
+- `obs_flushes_total` — successful metrics head flushes (the compactor flushing the metrics head into a block)
+- `obs_flush_failures_total` — failed metrics head flushes. Log-store flushes are not instrumented, so a log flush can fail while this stays at zero.
 
 **Errors:**
 - `obs_collector_errors_total{collector}` — scrape-time collector failures (values: "wal", "logs")
