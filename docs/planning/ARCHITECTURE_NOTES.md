@@ -627,8 +627,8 @@ The backend exposes the following metrics at `/metrics`, scraped by a separate P
 - `obs_compaction_failures_total` — failed compactions
 - `obs_compaction_duration_seconds` — compaction duration histogram
 - `obs_retention_deleted_blocks_total` — blocks deleted by retention
-- `obs_flushes_total` — successful head flushes
-- `obs_flush_failures_total` — failed flushes
+- `obs_flushes_total` — successful metrics head flushes, incremented only by the compactor
+- `obs_flush_failures_total` — failed metrics head flushes; log-store flushes are not instrumented
 
 **Errors:**
 - `obs_collector_errors_total{collector}` — scrape-time collector failures
@@ -642,6 +642,8 @@ Platform telemetry (metrics **about** the backend) is stored by a separate Prome
 #### Collector Error Policy
 
 A failed collector read (e.g., WAL directory permissions error) emits **a gap plus an incremented `obs_collector_errors_total` counter, never a zero.** A zero in a storage gauge means the size was measured and is truly zero; a gap means the read failed. This distinction is critical for correct dashboard interpretation: if a storage panel suddenly goes from 100MB to zero, the operator needs to know whether the backend shed storage (zero) or whether a permissions issue caused the collector to fail (gap). Using `prometheus.NewInvalidMetric` was rejected because it causes the entire `/metrics` scrape to return HTTP 500, blanking all panels and hiding other metrics that scraped successfully.
+
+The counter says a read failed; it cannot say why, and both WALs share `collector="wal"`. So each collector also logs the underlying error, with a `source` field naming the directory — but only on state transitions: one line when a source starts failing and one when it recovers. Collectors run on every scrape, and logging each failure would repeat the same line every scrape interval for as long as a directory stays unreadable, burying the one line that says why. The transition is taken with `atomic.Bool.Swap`, so concurrent scrapes cannot log it twice.
 
 #### Route Label Rule
 
