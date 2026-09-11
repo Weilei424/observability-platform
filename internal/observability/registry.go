@@ -1,6 +1,10 @@
 package observability
 
-import "github.com/prometheus/client_golang/prometheus"
+import (
+	"log/slog"
+
+	"github.com/prometheus/client_golang/prometheus"
+)
 
 // CardinalitySource provides current label-cardinality counts at scrape time.
 type CardinalitySource interface {
@@ -35,6 +39,14 @@ type RegistryOptions struct {
 	Storage     StorageStatsSource
 	WALs        []WALSource
 	Logs        LogStatsSource
+
+	// Logger receives the collectors' read-failure and recovery lines. It
+	// must be component-free, for the same reason as api.Deps.Logger: each
+	// collector stamps its own component ("wal" or "logs", matching its
+	// obs_collector_errors_total label), and a pre-stamped logger would put
+	// two component keys on every one of those lines. Nil falls back to
+	// slog.Default(), so a failure is never silently discarded.
+	Logger *slog.Logger
 }
 
 // Metrics holds push-model instruments updated by the compactor.
@@ -90,22 +102,11 @@ func NewRegistry(opts RegistryOptions) (*prometheus.Registry, *Instruments) {
 	}
 
 	if len(opts.WALs) > 0 {
-		reg.MustRegister(&walCollector{
-			sources:  opts.WALs,
-			errors:   collectorErrors,
-			bytes:    prometheus.NewDesc("obs_wal_bytes", "Total size in bytes of the WAL segment files.", []string{"wal"}, nil),
-			segments: prometheus.NewDesc("obs_wal_segments", "Number of WAL segment files.", []string{"wal"}, nil),
-		})
+		reg.MustRegister(newWALCollector(opts.WALs, collectorErrors, opts.Logger))
 	}
 
 	if opts.Logs != nil {
-		reg.MustRegister(&logsCollector{
-			src:     opts.Logs,
-			errors:  collectorErrors,
-			streams: prometheus.NewDesc("obs_log_streams_total", "Number of distinct log streams.", nil, nil),
-			chunks:  prometheus.NewDesc("obs_log_chunks_total", "Number of persisted log chunk files.", nil, nil),
-			bytes:   prometheus.NewDesc("obs_log_chunk_bytes", "Total on-disk size of persisted log chunk files in bytes.", nil, nil),
-		})
+		reg.MustRegister(newLogsCollector(opts.Logs, collectorErrors, opts.Logger))
 	}
 
 	m := &Metrics{
