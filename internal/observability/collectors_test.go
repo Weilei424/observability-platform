@@ -1,14 +1,24 @@
 package observability
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 )
+
+// discardLog silences the collectors' failure lines in tests that fail a read on
+// purpose to check the metrics, not the logging.
+var discardLog = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 type fakeLogStats struct {
 	streams, chunks int
@@ -65,14 +75,9 @@ func TestWALCollectorOmitsGaugesAndCountsErrorOnFailure(t *testing.T) {
 		Name: "obs_collector_errors_total",
 		Help: "Total scrape-time collector failures by collector.",
 	}, []string{"collector"})
-	c := &walCollector{
-		sources: []WALSource{
-			{Name: "metrics", Stats: func() (int64, int, error) { return 0, 0, errors.New("permission denied") }},
-		},
-		errors:   errs,
-		bytes:    prometheus.NewDesc("obs_wal_bytes", "Total size in bytes of the WAL segment files.", []string{"wal"}, nil),
-		segments: prometheus.NewDesc("obs_wal_segments", "Number of WAL segment files.", []string{"wal"}, nil),
-	}
+	c := newWALCollector([]WALSource{
+		{Name: "metrics", Stats: func() (int64, int, error) { return 0, 0, errors.New("permission denied") }},
+	}, errs, discardLog)
 
 	if n := testutil.CollectAndCount(c, "obs_wal_bytes", "obs_wal_segments"); n != 0 {
 		t.Errorf("wal gauges emitted %d series on error, want 0 (a gap, not a zero)", n)
@@ -224,13 +229,7 @@ func TestLogsCollectorOmitsGaugesAndCountsErrorOnFailure(t *testing.T) {
 		Name: "obs_collector_errors_total",
 		Help: "Total scrape-time collector failures by collector.",
 	}, []string{"collector"})
-	c := &logsCollector{
-		src:     fakeLogStats{err: errors.New("disk gone")},
-		errors:  errs,
-		streams: prometheus.NewDesc("obs_log_streams_total", "Number of distinct log streams.", nil, nil),
-		chunks:  prometheus.NewDesc("obs_log_chunks_total", "Number of persisted log chunk files.", nil, nil),
-		bytes:   prometheus.NewDesc("obs_log_chunk_bytes", "Total on-disk size of persisted log chunk files in bytes.", nil, nil),
-	}
+	c := newLogsCollector(fakeLogStats{err: errors.New("disk gone")}, errs, discardLog)
 
 	if n := testutil.CollectAndCount(c, "obs_log_streams_total", "obs_log_chunks_total", "obs_log_chunk_bytes"); n != 0 {
 		t.Errorf("log gauges emitted %d series on error, want 0", n)
@@ -248,5 +247,196 @@ func TestOptionalSourcesAreOmittedEntirely(t *testing.T) {
 		if n := testutil.CollectAndCount(reg, name); n != 0 {
 			t.Errorf("%s emitted %d series with no source configured, want 0", name, n)
 		}
+	}
+}
+
+// toggleSource is a WAL source whose failure can be switched between scrapes.
+type toggleSource struct{ fail atomic.Bool }
+
+func (ts *toggleSource) Stats() (int64, int, error) {
+	if ts.fail.Load() {
+		return 0, 0, errors.New("open /data/metrics/wal: permission denied")
+	}
+	return 128, 1, nil
+}
+
+// syncBuffer lets concurrent scrapes write log lines without racing each other
+// on the buffer itself, so the race test below measures the collector only.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) lines(t *testing.T) []map[string]any {
+	t.Helper()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(b.buf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("log line is not JSON: %q: %v", line, err)
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+func gather(t *testing.T, reg *prometheus.Registry) {
+	t.Helper()
+	if _, err := reg.Gather(); err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+}
+
+// The runbook sends operators to the backend logs for the exact error when
+// obs_collector_errors_total climbs. Before this, the collectors discarded the
+// error entirely and no such line existed. This pins the whole lifecycle: one
+// line naming the source and error when a read starts failing, silence while it
+// keeps failing, and one line when it recovers.
+func TestCollectorLogsReadFailureOnceAndRecoveryOnce(t *testing.T) {
+	var buf syncBuffer
+	src := &toggleSource{}
+	reg, _ := NewRegistry(RegistryOptions{
+		Cardinality: fakeCard{},
+		WALs:        []WALSource{{Name: "metrics", Stats: src.Stats}},
+		Logger:      slog.New(slog.NewJSONHandler(&buf, nil)),
+	})
+
+	gather(t, reg) // healthy: nothing to say
+	if n := len(buf.lines(t)); n != 0 {
+		t.Fatalf("healthy scrape logged %d lines, want 0", n)
+	}
+
+	src.fail.Store(true)
+	gather(t, reg)
+	lines := buf.lines(t)
+	if len(lines) != 1 {
+		t.Fatalf("first failing scrape logged %d lines, want exactly 1", len(lines))
+	}
+	l := lines[0]
+	if l["component"] != CollectorWAL {
+		t.Errorf("component = %v, want %q (matching obs_collector_errors_total's label)", l["component"], CollectorWAL)
+	}
+	if l["source"] != "metrics" {
+		t.Errorf("source = %v, want \"metrics\" — it is what tells the two WALs apart", l["source"])
+	}
+	if e, _ := l["error"].(string); !strings.Contains(e, "permission denied") {
+		t.Errorf("error = %v, want the underlying read error so the runbook's diagnosis step works", l["error"])
+	}
+
+	// Still failing: the counter keeps climbing, but no new line.
+	gather(t, reg)
+	gather(t, reg)
+	if n := len(buf.lines(t)); n != 1 {
+		t.Errorf("after three failing scrapes there are %d lines, want still 1 — a persistent failure must not repeat every scrape", n)
+	}
+
+	// Recover, and read the counter from THIS scrape. It must not be read from a
+	// failing one: Gather has no barrier between a collector's Collect and the
+	// Write of an already-collected metric, so a scrape that increments the
+	// counter can report it either before or after its own increment. A healthy
+	// scrape increments nothing, so the three prior failures read exactly 3.
+	src.fail.Store(false)
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	if got := counterValue(families, "obs_collector_errors_total", "collector", CollectorWAL); got == nil || *got != 3 {
+		t.Errorf("obs_collector_errors_total{collector=wal} = %v, want 3 — the counter must still count every failed scrape", got)
+	}
+	lines = buf.lines(t)
+	if len(lines) != 2 {
+		t.Fatalf("after recovery there are %d lines, want 2", len(lines))
+	}
+	if msg, _ := lines[1]["msg"].(string); !strings.Contains(msg, "recovered") || lines[1]["source"] != "metrics" {
+		t.Errorf("recovery line = %v, want a recovered message for source metrics", lines[1])
+	}
+}
+
+// Both WALs report under collector="wal", so the counter alone cannot say which
+// one broke. The log line must, and must not blame the healthy one.
+func TestCollectorLogsOnlyTheFailingWALSource(t *testing.T) {
+	var buf syncBuffer
+	broken := &toggleSource{}
+	broken.fail.Store(true)
+	healthy := &toggleSource{}
+	reg, _ := NewRegistry(RegistryOptions{
+		Cardinality: fakeCard{},
+		WALs: []WALSource{
+			{Name: "metrics", Stats: healthy.Stats},
+			{Name: "logs", Stats: broken.Stats},
+		},
+		Logger: slog.New(slog.NewJSONHandler(&buf, nil)),
+	})
+	gather(t, reg)
+	lines := buf.lines(t)
+	if len(lines) != 1 || lines[0]["source"] != "logs" {
+		t.Fatalf("lines = %v, want exactly one, for source logs", lines)
+	}
+}
+
+func TestLogsCollectorLogsFailureWithItsOwnComponent(t *testing.T) {
+	var buf syncBuffer
+	reg, _ := NewRegistry(RegistryOptions{
+		Cardinality: fakeCard{},
+		Logs:        fakeLogStats{err: errors.New("readdir /data/logs/chunks: no such file or directory")},
+		Logger:      slog.New(slog.NewJSONHandler(&buf, nil)),
+	})
+	gather(t, reg)
+	lines := buf.lines(t)
+	if len(lines) != 1 {
+		t.Fatalf("logged %d lines, want 1", len(lines))
+	}
+	if lines[0]["component"] != CollectorLogs {
+		t.Errorf("component = %v, want %q", lines[0]["component"], CollectorLogs)
+	}
+	if n := strings.Count(func() string { b, _ := json.Marshal(lines[0]); return string(b) }(), `"component"`); n != 1 {
+		t.Errorf("line carries %d component keys, want exactly 1", n)
+	}
+}
+
+// Prometheus may scrape while a previous scrape is still in flight, so a newly
+// broken source can be read by several scrapes at once.
+//
+// What this test catches, verified by mutation: a missing transition guard (32
+// lines instead of 1), a missing log line, and — under -race — a plain bool in
+// place of atomic.Bool, which -race reports as a data race.
+//
+// What it does NOT catch, and cannot: an atomic Load followed by a separate
+// Store. That check-then-set race is real, but its window is two instructions
+// wide and the slow log call comes after the Store, so it could not be observed
+// even with 256 goroutines released simultaneously over 600 rounds. That
+// reportReadState uses Swap — one atomic read-modify-write — is therefore the
+// guarantee, established by reading the code, not by this test. Keep Swap.
+func TestConcurrentScrapesLogAFailureExactlyOnce(t *testing.T) {
+	var buf syncBuffer
+	src := &toggleSource{}
+	src.fail.Store(true)
+	reg, _ := NewRegistry(RegistryOptions{
+		Cardinality: fakeCard{},
+		WALs:        []WALSource{{Name: "metrics", Stats: src.Stats}},
+		Logger:      slog.New(slog.NewJSONHandler(&buf, nil)),
+	})
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = reg.Gather()
+		}()
+	}
+	wg.Wait()
+	if n := len(buf.lines(t)); n != 1 {
+		t.Errorf("32 concurrent scrapes of a failing source logged %d lines, want exactly 1", n)
 	}
 }
