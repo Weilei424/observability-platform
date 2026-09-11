@@ -606,8 +606,8 @@ The backend exposes the following metrics at `/metrics`, scraped by a separate P
 **Storage:**
 - `obs_blocks_total` — persisted metric blocks
 - `obs_blocks_bytes` — total metric block size in bytes
-- `obs_wal_bytes{wal="metrics"}` — metrics WAL size in bytes
-- `obs_wal_segments{wal="metrics"}` — metrics WAL segment count
+- `obs_wal_bytes{wal}` — WAL size in bytes; `wal="metrics"` and `wal="logs"`, one per WAL
+- `obs_wal_segments{wal}` — WAL segment count, same two series
 - `obs_log_streams_total` — distinct log streams
 - `obs_log_chunks_total` — persisted log chunk files
 - `obs_log_chunk_bytes` — total log chunk size in bytes
