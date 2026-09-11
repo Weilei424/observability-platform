@@ -282,19 +282,28 @@ func registeredMetricNames(t *testing.T) map[string]bool {
 	}
 	names := make(map[string]bool, len(families))
 	for _, f := range families {
-		names[f.GetName()] = true
-		// A histogram named X is queried as X_bucket, X_sum, and X_count. Only
-		// HISTOGRAM families get these aliases: adding them for every family
-		// regardless of type let a typo like obs_active_series_bucket (a
-		// gauge, not a histogram) pass this guard while rendering an empty
-		// panel, defeating the point of the test.
-		if f.GetType() == dto.MetricType_HISTOGRAM {
-			names[f.GetName()+"_bucket"] = true
-			names[f.GetName()+"_sum"] = true
-			names[f.GetName()+"_count"] = true
-		}
+		addQueryableNames(names, f.GetName(), f.GetType())
 	}
 	return names
+}
+
+// addQueryableNames records the series names a family actually exposes, which
+// is what a dashboard expression can match. The two cases are mutually
+// exclusive, and each half closes a hole:
+//
+//   - A classic histogram named X exposes only X_bucket, X_sum and X_count. Its
+//     base name is family metadata, not a series, so a panel querying bare X
+//     renders empty — the base name must NOT be recorded.
+//   - Every other type exposes its base name and nothing else, so a typo like
+//     obs_active_series_bucket (a gauge) must NOT be accepted either.
+func addQueryableNames(names map[string]bool, name string, typ dto.MetricType) {
+	if typ == dto.MetricType_HISTOGRAM {
+		names[name+"_bucket"] = true
+		names[name+"_sum"] = true
+		names[name+"_count"] = true
+		return
+	}
+	names[name] = true
 }
 
 // metricNamesIn pulls the metric identifiers out of a PromQL expression: bare
@@ -336,3 +345,74 @@ func (constStorage) StorageStats() (int, int64) { return 0, 0 }
 type constLogStats struct{}
 
 func (constLogStats) Stats() (int, int, int64, error) { return 0, 0, 0, nil }
+
+// TestAddQueryableNamesMatchesWhatPrometheusExposes pins both halves of the
+// type gate directly, rather than only through whichever names the dashboard
+// happens to use today. Each "must reject" case is a query that parses, passes
+// a naive guard, and renders an empty panel.
+func TestAddQueryableNamesMatchesWhatPrometheusExposes(t *testing.T) {
+	names := map[string]bool{}
+	addQueryableNames(names, "obs_http_request_duration_seconds", dto.MetricType_HISTOGRAM)
+	addQueryableNames(names, "obs_active_series", dto.MetricType_GAUGE)
+	addQueryableNames(names, "obs_samples_ingested_total", dto.MetricType_COUNTER)
+
+	for _, valid := range []string{
+		"obs_http_request_duration_seconds_bucket",
+		"obs_http_request_duration_seconds_sum",
+		"obs_http_request_duration_seconds_count",
+		"obs_active_series",
+		"obs_samples_ingested_total",
+	} {
+		if !names[valid] {
+			t.Errorf("%q is a real series but the guard rejects it", valid)
+		}
+	}
+	for _, invalid := range []string{
+		"obs_http_request_duration_seconds", // histogram base name: metadata, not a series
+		"obs_active_series_bucket",          // gauges have no buckets
+		"obs_active_series_sum",
+		"obs_samples_ingested_total_count", // counters have no _count series
+	} {
+		if names[invalid] {
+			t.Errorf("%q exposes no series, yet the guard accepts it — a panel querying it would render empty", invalid)
+		}
+	}
+}
+
+// TestInternalsDashboardHTTPErrorsIsCumulative pins the fix for rate()'s blind
+// spot on this panel. obs_http_requests_total cannot be preinitialized — its
+// route x method x status cross-product is unbounded in principle — so a 5xx
+// series first appears already at 1, and a windowed function over it reads
+// empty and then zero. Only the raw counter shows a first-and-only failure.
+// The old rate() form of this panel passed every other test in the suite.
+func TestInternalsDashboardHTTPErrorsIsCumulative(t *testing.T) {
+	const title = "Total HTTP Errors by Status"
+	var found bool
+	for _, p := range loadDashboard(t, internalsDashboardPath).Panels {
+		if p.Title != title {
+			continue
+		}
+		found = true
+		if len(p.Targets) == 0 {
+			t.Fatalf("panel %q has no targets", title)
+		}
+		for _, tgt := range p.Targets {
+			expr := tgt.Expr
+			if !strings.Contains(expr, "obs_http_requests_total") {
+				t.Errorf("panel %q target %s does not query obs_http_requests_total: %q", title, tgt.RefID, expr)
+			}
+			if !strings.Contains(expr, `status=~"5.."`) {
+				t.Errorf("panel %q target %s is not filtered to 5xx: %q", title, tgt.RefID, expr)
+			}
+			for _, windowed := range []string{"rate(", "irate(", "increase(", "delta(", "deriv("} {
+				if strings.Contains(expr, windowed) {
+					t.Errorf("panel %q target %s uses %s, which needs two samples and hides a first-and-only 5xx: %q",
+						title, tgt.RefID, strings.TrimSuffix(windowed, "("), expr)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no panel titled %q; the HTTP-error panel was renamed or removed", title)
+	}
+}
