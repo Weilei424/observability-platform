@@ -266,6 +266,9 @@ func buildServer(cfg *config.Config, log *slog.Logger) (*serverComponents, error
 			{Name: "logs", Stats: func() (int64, int, error) { return wal.DirStats(logsWALDir) }},
 		},
 		Logs: logStore,
+		// The plain logger, never a component-stamped one: each collector adds
+		// its own component (see RegistryOptions.Logger).
+		Logger: log,
 	})
 	srv := api.New(api.Deps{
 		Config:      cfg,
