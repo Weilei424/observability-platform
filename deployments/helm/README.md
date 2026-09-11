@@ -89,8 +89,9 @@ loop through liveness.
 
 ## `grafana` chart
 
-`deployments/helm/grafana/` — a stateless Deployment. Provisions two datasources
-(`obs-prometheus`, `obs-loki`) pointed at the backend, plus a dashboard provider; the
+`deployments/helm/grafana/` — a stateless Deployment. Provisions three datasources:
+`obs-prometheus` and `obs-loki` pointed at the backend, and `obs-internals` pointed at
+the `prometheus` chart's Service (`internals.url`), plus a dashboard provider; the
 dashboards themselves come from an operator-created ConfigMap, not from this chart.
 
 | Key | Default | Meaning |
