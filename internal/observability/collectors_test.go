@@ -273,6 +273,21 @@ func (b *syncBuffer) Write(p []byte) (int, error) {
 	return b.buf.Write(p)
 }
 
+// raw returns each log line exactly as written. Use it for anything that counts
+// keys: decoding into a map keeps only the last of a duplicated key, so a count
+// taken after decoding cannot see the duplicate it is looking for.
+func (b *syncBuffer) raw() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []string
+	for _, line := range strings.Split(strings.TrimSpace(b.buf.String()), "\n") {
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
 func (b *syncBuffer) lines(t *testing.T) []map[string]any {
 	t.Helper()
 	b.mu.Lock()
@@ -400,8 +415,11 @@ func TestLogsCollectorLogsFailureWithItsOwnComponent(t *testing.T) {
 	if lines[0]["component"] != CollectorLogs {
 		t.Errorf("component = %v, want %q", lines[0]["component"], CollectorLogs)
 	}
-	if n := strings.Count(func() string { b, _ := json.Marshal(lines[0]); return string(b) }(), `"component"`); n != 1 {
-		t.Errorf("line carries %d component keys, want exactly 1", n)
+	// Counted on the raw line. The earlier form re-encoded the decoded map, and
+	// decoding had already collapsed any duplicate to one key, so it read 1 even
+	// with component stamped twice — it passed against exactly the bug it names.
+	if n := strings.Count(buf.raw()[0], `"component"`); n != 1 {
+		t.Errorf("line carries %d component keys, want exactly 1: %s", n, buf.raw()[0])
 	}
 }
 
