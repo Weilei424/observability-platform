@@ -91,20 +91,44 @@ func TestNewRegistry_PushMetricsRegistered(t *testing.T) {
 func TestNewRegistry_FailureCountersScrapeZeroBeforeAnyFailure(t *testing.T) {
 	reg, inst := NewRegistry(RegistryOptions{Cardinality: fakeCard{}})
 
-	// Baseline scrape, before any failure has happened at all.
+	// Baseline scrape, before any failure has happened at all. EVERY bounded
+	// failure series must already exist at zero: one missing label value is
+	// that label's first failure invisible to rate(), which is the whole bug.
+	//
+	// The expected sets are literals on purpose, not the exported
+	// SampleRejectReasons / LogLineRejectReasons / CollectorNames. A test that
+	// reads the same list the preinitialization reads cannot notice the list
+	// itself being wrong; this pins what the sets must contain, so adding or
+	// dropping a value has to be a deliberate edit here as well.
 	baseline, err := reg.Gather()
 	if err != nil {
 		t.Fatalf("baseline Gather: %v", err)
 	}
-	if got := counterValue(baseline, "obs_samples_rejected_total", "reason", "value"); got == nil {
-		t.Fatal(`baseline: obs_samples_rejected_total{reason="value"} is absent, want present at 0`)
-	} else if *got != 0 {
-		t.Fatalf(`baseline obs_samples_rejected_total{reason="value"} = %v, want 0`, *got)
+	expected := []struct {
+		metric, label string
+		values        []string
+	}{
+		{"obs_samples_rejected_total", "reason", []string{"name", "timestamp", "value", "labels", "other", "append", "batch"}},
+		{"obs_log_lines_rejected_total", "reason", []string{"values", "timestamp", "line", "labels", "other", "append", "batch"}},
+		{"obs_collector_errors_total", "collector", []string{"wal", "logs"}},
 	}
-	if got := counterValue(baseline, "obs_log_lines_rejected_total", "reason", "line"); got == nil {
-		t.Fatal(`baseline: obs_log_lines_rejected_total{reason="line"} is absent, want present at 0`)
-	} else if *got != 0 {
-		t.Fatalf(`baseline obs_log_lines_rejected_total{reason="line"} = %v, want 0`, *got)
+	for _, e := range expected {
+		for _, v := range e.values {
+			got := counterValue(baseline, e.metric, e.label, v)
+			if got == nil {
+				t.Errorf("baseline: %s{%s=%q} is absent, want present at 0 — its first failure would be invisible to rate()", e.metric, e.label, v)
+			} else if *got != 0 {
+				t.Errorf("baseline: %s{%s=%q} = %v, want 0", e.metric, e.label, v, *got)
+			}
+		}
+		// And nothing beyond the pinned set: an extra preinitialized value is a
+		// series the dashboard legend shows that no code path can ever increment.
+		if n := seriesCount(baseline, e.metric); n != len(e.values) {
+			t.Errorf("baseline: %s has %d series, want exactly the %d pinned %s values", e.metric, n, len(e.values), e.label)
+		}
+	}
+	if t.Failed() {
+		t.FailNow()
 	}
 
 	// A single failure event of each kind.
@@ -131,6 +155,16 @@ func TestNewRegistry_FailureCountersScrapeZeroBeforeAnyFailure(t *testing.T) {
 // counterValue returns the value of the counter metric family "name" whose
 // labels include labelName=labelValue, or nil if no matching series exists
 // in families at all — as opposed to a series that exists but reads zero.
+// seriesCount returns how many series the named family carries in a Gather.
+func seriesCount(families []*dto.MetricFamily, name string) int {
+	for _, mf := range families {
+		if mf.GetName() == name {
+			return len(mf.GetMetric())
+		}
+	}
+	return 0
+}
+
 func counterValue(families []*dto.MetricFamily, name, labelName, labelValue string) *float64 {
 	for _, mf := range families {
 		if mf.GetName() != name {
