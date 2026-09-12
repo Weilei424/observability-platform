@@ -10,6 +10,7 @@ package e2e_test
 // sentence breaks a reader who never files a bug.
 
 import (
+	"errors"
 	"maps"
 	"net/http"
 	"os"
@@ -20,6 +21,8 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/masonwheeler/observability-platform/internal/logs"
+	"github.com/masonwheeler/observability-platform/internal/metrics"
 )
 
 const docsRoot = "../.."
@@ -209,4 +212,131 @@ func TestEveryRouteIsDocumented(t *testing.T) {
 			}
 		}
 	}
+}
+
+// Support tables are parsed, not read. Each row's Example cell is handed to the
+// same parser the HTTP handler uses, and the Status cell must agree with what
+// comes back. A row can otherwise be wrong for years: nothing else connects the
+// documented query forms to metrics.ParseExpr.
+const (
+	limitationsDoc = "docs/api/limitations.md"
+	promQLHeading  = "## PromQL subset"
+	logQLHeading   = "## LogQL subset"
+
+	// Row counts are asserted so that a formatting change which silently drops
+	// rows fails instead of passing with fewer checks. Update deliberately when
+	// adding a row.
+	wantPromQLRows = 10
+	wantLogQLRows  = 17
+
+	// A pipe inside a LogQL expression is escaped for Markdown. Splitting cells
+	// on "|" would split those too and silently skip every line-filter row, so
+	// escaped pipes are parked on this placeholder first.
+	escapedPipe = "\x00"
+)
+
+type supportRow struct {
+	Form    string
+	Example string
+	Status  string
+	File    string
+	Line    int
+}
+
+var tableRowRe = regexp.MustCompile(`(?m)^\|(.+)\|\s*$`)
+
+// supportRows returns the rows of the first Markdown table under heading.
+func supportRows(t *testing.T, file, heading string) []supportRow {
+	t.Helper()
+	body := repoFile(t, file)
+	start := strings.Index(body, heading)
+	if start < 0 {
+		t.Fatalf("%s has no %q section", file, heading)
+	}
+	section := body[start:]
+	if next := strings.Index(section[len(heading):], "\n## "); next >= 0 {
+		section = section[:len(heading)+next]
+	}
+	section = strings.ReplaceAll(section, `\|`, escapedPipe)
+
+	var out []supportRow
+	for _, m := range tableRowRe.FindAllStringSubmatchIndex(section, -1) {
+		cells := strings.Split(section[m[2]:m[3]], "|")
+		if len(cells) != 3 {
+			continue // not a three-column support row
+		}
+		for i := range cells {
+			cells[i] = strings.ReplaceAll(strings.TrimSpace(cells[i]), escapedPipe, "|")
+		}
+		form, example, status := cells[0], cells[1], cells[2]
+		if form == "Form" || strings.HasPrefix(form, "---") {
+			continue // header or separator
+		}
+		out = append(out, supportRow{
+			Form: form, Example: strings.Trim(example, "`"), Status: status,
+			File: file, Line: lineOf(body, start+m[0]),
+		})
+	}
+	if len(out) == 0 {
+		t.Fatalf("%s: no support rows parsed under %q; the table shape changed", file, heading)
+	}
+	return out
+}
+
+// parseLogQLAsHandlerDoes mirrors handleLokiQuery's dispatch exactly. Calling
+// ParseLogQL alone would reject every count_over_time row and report correct
+// documentation as broken.
+func parseLogQLAsHandlerDoes(q string) error {
+	if logs.IsLogExpression(q) {
+		_, err := logs.ParseLogQL(q)
+		return err
+	}
+	_, err := logs.ParseMetricQuery(q)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, logs.ErrNotMetricQuery) {
+		return err
+	}
+	// A constant expression such as vector(1): supported on the instant endpoint.
+	_, err = logs.ParseScalarQuery(q)
+	return err
+}
+
+func checkSupportRows(t *testing.T, rows []supportRow, wantRows int, parse func(string) error) {
+	t.Helper()
+	if len(rows) != wantRows {
+		t.Errorf("%s: parsed %d support rows, want %d. If you added or removed a row, update the constant in docs_test.go.",
+			rows[0].File, len(rows), wantRows)
+	}
+	for _, r := range rows {
+		err := parse(r.Example)
+		switch {
+		case strings.HasPrefix(r.Status, "Supported"):
+			if err != nil {
+				t.Errorf("%s:%d row %q documents %q as %s, but the parser rejects it: %v",
+					r.File, r.Line, r.Form, r.Example, r.Status, err)
+			}
+		case r.Status == "Returns 400":
+			if err == nil {
+				t.Errorf("%s:%d row %q documents %q as Returns 400, but the parser accepts it. Either the doc is stale or an unsupported form silently started working.",
+					r.File, r.Line, r.Form, r.Example)
+			}
+		default:
+			t.Errorf("%s:%d row %q has Status %q; it must begin with \"Supported\" or be exactly \"Returns 400\"",
+				r.File, r.Line, r.Form, r.Status)
+		}
+	}
+}
+
+func TestDocumentedQueryFormsMatchTheParser(t *testing.T) {
+	t.Run("promql", func(t *testing.T) {
+		checkSupportRows(t, supportRows(t, limitationsDoc, promQLHeading), wantPromQLRows, func(q string) error {
+			_, err := metrics.ParseExpr(q)
+			return err
+		})
+	})
+	t.Run("logql", func(t *testing.T) {
+		checkSupportRows(t, supportRows(t, limitationsDoc, logQLHeading), wantLogQLRows, parseLogQLAsHandlerDoes)
+	})
 }
