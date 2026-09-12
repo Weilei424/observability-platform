@@ -4,31 +4,15 @@ The logs counterpart to [`grafana-demo.md`](grafana-demo.md). Both demos run fro
 same backend process on port 8080 — one Go service speaking the Prometheus subset and
 the Loki subset at once.
 
-## Prerequisites
+**Setup:** follow [local-demo.md](local-demo.md) to start the stack. This runbook
+covers only the logs workflow. Two extra tools are needed here and not there: Go
+(for `make smoke-logs`) and `jq` (for `make smoke-compose`).
 
-- Docker and Docker Compose installed
-- Ports 8080, 3000, and 9090 free
-- Go (for `make smoke-logs`; the demo stack itself needs only Docker)
-- `jq` (for `make smoke-compose`, which parses Grafana's dataframe responses)
+## Confirm the sample app is producing
 
-## Start the stack
-
-```bash
-make local-up
-```
-
-This starts five services:
-- **backend** on port 8080 — the observability backend
-- **prometheus** on port 9090 — scrapes the backend's own `/metrics` for the self-observability dashboard (see [`self-observability.md`](self-observability.md))
-- **grafana** on port 3000 — Grafana with provisioned datasources and dashboards
-- **load-generator** — continuously posts metrics
-- **sample-app** — continuously pushes log streams (and its own metrics; see [`grafana-demo.md`](grafana-demo.md))
-
-## Wait for data
-
-Allow ~15 seconds. The sample app pushes two batches per second across five streams:
-`service` is `api` or `worker`, `level` is `info`, `warn`, or `error`, and every stream
-carries `env=local`.
+The sample app pushes two batches per second across five streams: `service` is `api`
+or `worker`, `level` is `info`, `warn`, or `error`, and every stream carries
+`env=local`.
 
 Confirm the sample app is actually producing before moving on:
 

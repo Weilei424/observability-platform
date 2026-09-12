@@ -28,19 +28,8 @@ The self-observability dashboard always uses `obs-internals`. A panel on the wro
 
 ## Local Stack (Docker Compose)
 
-### Start the Stack
-
-```bash
-make local-up
-```
-
-This starts:
-- Backend on `:8080`
-- Prometheus (internals scraper) on `:9090`
-- Grafana on `:3000`
-- Load generator and sample app
-
-Wait for all services healthy (usually ~10 seconds).
+**Setup:** follow [local-demo.md](local-demo.md) to start the stack. This runbook
+covers only the internals dashboard and the metrics behind it.
 
 ### View the Dashboard
 
