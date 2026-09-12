@@ -105,6 +105,34 @@ BODY=$(curl -s -G "$BACKEND/api/v1/query" \
     --data-urlencode "time=$NOW_S" || echo '{"status":"curl-error"}')
 check_success "Panel 5 — active_connections" "$BODY"
 
+# ---- Documented examples -------------------------------------------
+# These are the exact commands docs/api/metrics.md tells a reader to run. The Go
+# test TestDocumentedCurlExamplesTargetRealRoutes proves the URLs route; this
+# proves they answer. A reference whose examples fail is worse than no reference.
+echo ""
+echo "-- Documented examples (docs/api/metrics.md) --"
+
+BODY=$(curl -sG "$BACKEND/api/v1/query" \
+    --data-urlencode 'query=sum(rate(http_requests_total[1m]))' || echo '{"status":"curl-error"}')
+check_success "docs/api/metrics.md — instant query" "$BODY"
+
+BODY=$(curl -sG "$BACKEND/api/v1/query_range" \
+    --data-urlencode 'query=sum by (method)(rate(http_requests_total[1m]))' \
+    --data-urlencode "start=$START_S" \
+    --data-urlencode "end=$NOW_S" \
+    --data-urlencode 'step=30' || echo '{"status":"curl-error"}')
+check_success "docs/api/metrics.md — range query" "$BODY"
+
+BODY=$(curl -s "$BACKEND/api/v1/labels" || echo '{"status":"curl-error"}')
+check_success "docs/api/metrics.md — label names" "$BODY"
+
+BODY=$(curl -s "$BACKEND/api/v1/label/method/values" || echo '{"status":"curl-error"}')
+check_success "docs/api/metrics.md — label values" "$BODY"
+
+BODY=$(curl -sG "$BACKEND/api/v1/series" \
+    --data-urlencode 'match[]=http_requests_total' || echo '{"status":"curl-error"}')
+check_success "docs/api/metrics.md — series" "$BODY"
+
 # ---- Summary -------------------------------------------------------
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

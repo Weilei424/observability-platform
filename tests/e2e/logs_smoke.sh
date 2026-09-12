@@ -163,6 +163,26 @@ else
     log_fail "unsupported metric LogQL — expected HTTP 400, got $CODE"
 fi
 
+# ---- Documented examples --------------------------------------------
+# The commands docs/api/logs.md tells a reader to run, against the smoke-test
+# streams this script already pushed. The Go test proves these URLs route; this
+# proves they answer.
+echo ""
+echo "-- Documented examples (docs/api/logs.md) --"
+
+BODY=$(lokq 'sum by (level) (count_over_time({service="smoke-test"}[5m]))')
+check_contains "docs/api/logs.md — sum by over count_over_time" "$BODY" '"resultType":"matrix"'
+
+BODY=$(curl -s -G "$BACKEND/loki/api/v1/query" \
+    --data-urlencode 'query={service="smoke-test"} |= "timeout"' || echo 'curl-error')
+check_contains "docs/api/logs.md — instant query with a line filter" "$BODY" '"resultType":"streams"'
+
+BODY=$(curl -s "$BACKEND/loki/api/v1/labels" || echo 'curl-error')
+check_contains "docs/api/logs.md — label names" "$BODY" '"status":"success"'
+
+BODY=$(curl -s "$BACKEND/loki/api/v1/label/service/values" || echo 'curl-error')
+check_contains "docs/api/logs.md — label values" "$BODY" 'smoke-test'
+
 # ---- Summary --------------------------------------------------------
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
