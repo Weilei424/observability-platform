@@ -158,23 +158,24 @@ CI runs this on every push to `main` and every pull request.
 ## Known limitations
 
 Two different things are going on below, and they produce different HTTP statuses.
-Unsupported **query features** — forms the parser recognizes but the engine rejects —
-return an explicit `400`, per the project's rule that unsupported PromQL/LogQL always
-fails loudly instead of returning a plausible-looking wrong answer. Unimplemented
-**endpoints** are simpler: no route is registered for them at all, so the server
-answers with a plain `404`. Neither is a stub quietly returning zeros or empty results.
+Unsupported **query features** — forms the parser rejects — return an explicit `400`,
+per the project's rule that unsupported PromQL/LogQL always fails loudly instead of
+returning a plausible-looking wrong answer. Unimplemented **endpoints** are simpler:
+no route is registered for them at all, so the server answers with a plain `404`.
+Neither is a stub quietly returning zeros or empty results.
+
+The query forms are listed once, in [`../api/limitations.md`](../api/limitations.md),
+where every row is executed against the real parser. What follows is only what you
+will notice **in Grafana's UI** — behaviour that a list of query forms does not
+explain.
 
 | What you'll see | Why |
 |---|---|
 | The **Live** button fails | Live tailing needs a WebSocket at `/loki/api/v1/tail`. No route is registered for it, so the request returns 404. Use dashboard auto-refresh. |
 | No **query size estimate** in the query editor | Grafana calls `/loki/api/v1/index/stats`. No route is registered for it, so it returns 404. A stub returning zeros was rejected as a confident lie. |
 | **Label browser** narrowing (choosing a label to see its values in context of other selected labels) fails | Grafana's Loki language provider calls `/loki/api/v1/series` to narrow label values. No route is registered for it, so it returns 404. |
-| `\| json`, `\| logfmt`, `line_format`, `\| unwrap` return 400 | Log-parsing pipelines are out of the supported subset. `\| drop <labels>` is the one exception, because Grafana appends it to every log-volume query. |
-| `{service=~"api\|web"}` returns 400 | Label matchers are equality-only because they are index-backed. Regex applies to **lines**. |
 | Label dropdowns ignore the dashboard time range | The label endpoints accept and ignore `start`/`end`; the stream index is not time-partitioned for label discovery. |
-| `avg_over_time`, `quantile_over_time`, `\| unwrap` return 400 | Label-extraction range aggregations are out of the supported subset. Line-based ones — `count_over_time`, `rate`, `bytes_over_time`, `bytes_rate` — are supported. |
-| `sum(...) / sum(...)` returns 400 | Binary operations between metric queries are not implemented. |
-| `count(...)`, `topk(...)` return 400 | `sum` is the only supported vector aggregation. |
+| A query editor suggestion returns 400 | Grafana offers the full LogQL grammar; this backend implements a subset. See [`../api/limitations.md`](../api/limitations.md). |
 
 ## Stop the stack
 

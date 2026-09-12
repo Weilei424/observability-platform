@@ -6,6 +6,58 @@ A Grafana-compatible observability backend in Go demonstrating backend infrastru
 
 This is not a dashboard UI project. Grafana is the UI. The backend observability system is the project.
 
+## Quickstart
+
+```bash
+make local-up    # backend :8080 · Grafana :3000 · Prometheus :9090
+make smoke       # exercise the metrics and logs APIs against the running stack
+make local-down  # stop (keeps the data volumes)
+```
+
+Grafana is at http://localhost:3000 (`admin` / `admin`). Data appears within about
+15 seconds. The full ten-minute walkthrough, including a proof that ingested data
+survives a restart, is [`docs/runbooks/local-demo.md`](docs/runbooks/local-demo.md).
+
+Developing instead of demoing:
+
+```bash
+make build
+make test
+make lint
+make run         # run the backend directly, no Docker
+```
+
+## What you'll see
+
+Four dashboards are provisioned into Grafana at startup:
+
+| Dashboard | Shows |
+|---|---|
+| Observability Platform Metrics | Request rate, error rate, latency, and active connections from the load generator |
+| Observability Platform Sample App | The sample app's own `sample_app_*` series, deliberately disjoint from the load generator's |
+| Observability Platform Logs | Live log streams and log-volume panels from the sample app |
+| Observability Platform Internals | The platform observing itself — ingest rate, query latency, WAL size, block and chunk counts, compaction |
+
+The internals dashboard reads from a **separate Prometheus** that scrapes the
+backend's `/metrics`, not from the backend's own TSDB. Telemetry that shares
+storage with the workload it observes goes blind exactly when that storage breaks.
+
+## Documentation
+
+| Document | Purpose |
+|---|---|
+| [Local demo](docs/runbooks/local-demo.md) | Run the whole thing on a laptop, end to end |
+| [Kubernetes demo](docs/runbooks/kubernetes-demo.md) | The same stack on a cluster, via four Helm charts |
+| [Architecture](docs/architecture/README.md) | How metrics, logs, and queries actually flow |
+| [Storage layout](docs/architecture/storage-layout.md) | What the backend writes to disk, and why |
+| [API reference](docs/api/README.md) | Every endpoint, its parameters, and its responses |
+| [Limitations](docs/api/limitations.md) | What is supported, and what this does not do |
+| [Self-observability](docs/runbooks/self-observability.md) | The internals dashboard and the metrics behind it |
+| [Performance](PERFORMANCE.md) | Benchmark methodology and measured results |
+
+Per-surface runbooks: [metrics dashboard](docs/runbooks/grafana-demo.md) ·
+[logs and Explore](docs/runbooks/grafana-logs-demo.md).
+
 ## Stack
 
 | Layer | Technology |
@@ -20,143 +72,45 @@ This is not a dashboard UI project. Grafana is the UI. The backend observability
 | Local runtime | Docker Compose |
 | Kubernetes deployment | Helm + Kubernetes manifests |
 | Performance testing | k6 and Go benchmarks |
-| Optional object storage | MinIO/S3-compatible abstraction |
-| Optional GitOps | ArgoCD |
 | Secrets | Environment variables locally; Kubernetes Secrets/Vault later |
 
-## Quickstart
+## Query support at a glance
 
-```bash
-# Run locally
-make run
+Compatibility is a deliberate subset. Unsupported forms return `400` with an
+explicit message rather than being silently ignored.
 
-# Start the demo stack in Docker: backend + Prometheus + Grafana + load generator + sample app
-make local-up   # backend: http://localhost:8080  grafana: http://localhost:3000
-make local-down
-make local-logs # follow the stack's logs
-make local-reset # stop the demo and delete its data volumes
-make smoke      # API-level smoke test (requires backend running)
-
-# Development
-make build
-make test
-make lint
-```
-
-## Grafana Demo
-
-```bash
-make local-up
-```
-
-Opens `http://localhost:3000` (admin / admin). The provisioned **Observability Platform Metrics** dashboard shows live data from the load generator within ~15 seconds of startup. See [`docs/runbooks/grafana-demo.md`](docs/runbooks/grafana-demo.md) for the full walkthrough.
-
-The provisioned **Observability Platform Sample App** dashboard shows the sample app's
-own `sample_app_*` series — request rate, error rate, latency, and worker count. Its
-metric names are deliberately disjoint from the load generator's `http_*` series, so the
-two simulated workloads never mix in one panel.
-
-The provisioned **Observability Platform Logs** dashboard and Grafana Explore show live log streams from the sample app; see [`docs/runbooks/grafana-logs-demo.md`](docs/runbooks/grafana-logs-demo.md).
-
-### Platform Self-Observability
-
-The provisioned **Observability Platform Internals** dashboard shows metrics about the backend itself — ingestion rate, query latency, storage state, and compaction progress. It reaches these through a separate Prometheus instance (port 9090) that scrapes the backend's `/metrics` endpoint, ensuring backend telemetry is independent of the workload metrics storage.
-
-```bash
-make local-up
-# Then Grafana → Dashboards → Observability Platform Internals
-# Or check Prometheus directly at http://localhost:9090
-```
-
-See [`docs/runbooks/self-observability.md`](docs/runbooks/self-observability.md) for the full runbook and troubleshooting guide.
-
-## Kubernetes
-
-The Compose demo above remains the fastest way to see the project work; Kubernetes is
-the deployment demonstration, not a replacement for it. Four Helm charts —
-`deployments/helm/backend`, `deployments/helm/prometheus`, `deployments/helm/grafana`,
-`deployments/helm/producers` — install the same backend image as a StatefulSet, the
-internals-scraping Prometheus, Grafana, and the two producers into any cluster. See
-[`docs/runbooks/kubernetes-demo.md`](docs/runbooks/kubernetes-demo.md) for the full
-walkthrough and [`deployments/helm/README.md`](deployments/helm/README.md) for the
-per-chart values reference.
-
-## Local Metrics Demo (without Docker)
-
-**1. Start the backend:**
-```bash
-make run
-```
-
-**2. In a second terminal, start the load generator:**
-```bash
-go run examples/load-generator/main.go --rate 2 --duration 30
-```
-
-**3. Query ingested metrics:**
-```bash
-# Instant query — request rate by method
-curl -g 'http://localhost:8080/api/v1/query?query=sum+by+(method)(rate(http_requests_total[1m]))'
-
-# Range query — request duration over the last 60 seconds (Linux)
-curl "http://localhost:8080/api/v1/query_range?query=http_request_duration_seconds&start=$(date -d '60 seconds ago' +%s)&end=$(date +%s)&step=15"
-
-# Instant query — active connections gauge
-curl 'http://localhost:8080/api/v1/query?query=active_connections'
-```
-
-**4. Restart the backend (Ctrl+C in terminal 1, then `make run`) and re-query to confirm WAL replay:**
-```bash
-curl 'http://localhost:8080/api/v1/query?query=http_requests_total'
-# Same two series should appear — data recovered from WAL
-```
-
-## Supported Query Syntax
-
-The query API accepts a PromQL subset. Unsupported forms return `400 bad_data`.
+### Metrics
 
 | Form | Example | Status |
 |---|---|---|
 | Bare metric name | `http_requests_total` | Supported |
 | Label selector | `http_requests_total{job="api"}` | Supported |
-| `rate(selector[duration])` | `rate(http_requests_total[5m])` | Supported |
-| `sum(expr)` | `sum(http_requests_total)` | Supported |
-| `sum by (label,...)(expr)` | `sum by (job)(http_requests_total)` | Supported |
-| Any other function | `avg(...)`, `histogram_quantile(...)` | Returns 400 |
-| Numeric scalar arithmetic | `1+1`, `10/4` | Supported (returns `scalar`) |
-| Metric arithmetic | `a + b`, `a / b` | Returns 400 |
-| Subqueries | `rate(...)[5m:1m]` | Returns 400 |
+| `rate` over a range | `rate(http_requests_total[5m])` | Supported |
+| `sum by` | `sum by (job)(http_requests_total)` | Supported |
+| Any other function | `avg(http_requests_total)` | Returns 400 |
 
-Duration units accepted: `ms`, `s`, `m`, `h`, `d`, `w`, `y`.
-
-### LogQL subset
+### Logs
 
 | Form | Example | Status |
 |---|---|---|
-| Stream selector (equality only) | `{service="api", level="error"}` | Supported |
-| Line filters | `{service="api"} \|= "timeout" != "healthz"` | Supported |
-| Regex line filters | `{service="api"} \|~ "5\\d\\d"` | Supported |
+| Stream selector | `{service="api"}` | Supported |
+| Chained line filters | `{service="api"} \|= "timeout" != "healthz"` | Supported |
 | `count_over_time` | `count_over_time({service="api"}[5m])` | Supported |
-| `rate` | `rate({service="api"}[5m])` | Supported |
-| `bytes_over_time`, `bytes_rate` | `bytes_over_time({service="api"}[5m])` | Supported |
-| `sum`, `sum by`, `sum without` | `sum by (level) (count_over_time({service="api"}[5m]))` | Supported |
-| Regex label matchers | `{service=~"api\|web"}` | Returns 400 |
-| `\| drop <labels>` | `{service="api"} \| drop __error__` | Supported (last stage only) |
-| Other pipelines and formatters | `\| json`, `\| logfmt`, `line_format`, `\| unwrap` | Returns 400 |
-| `unwrap` and its aggregations | `avg_over_time({a="b"} \| unwrap d [5m])` | Returns 400 |
-| Other vector aggregations | `count(...)`, `topk(...)` | Returns 400 |
-| Binary operations | `sum(...) / sum(...)` | Returns 400 |
+| `sum by` over a metric query | `sum by (level) (count_over_time({service="api"}[5m]))` | Supported |
+| Regex label matcher | `{service=~"api\|web"}` | Returns 400 |
 
-Metric queries answer `resultType: "matrix"` on `query_range` and `"vector"` on the
-instant endpoint. Range durations accept both the Prometheus grammar (`5m`, `1d`,
-`1w`) and Go's (`1.5h`, `150ns`), as upstream LogQL does.
+Full list, including platform limits such as single-node operation and the
+absence of authentication: [`docs/api/limitations.md`](docs/api/limitations.md).
+Every row above is executed against the real parser by the test suite.
 
-## Performance
+## Kubernetes
 
-Benchmark methodology and measured results (ingestion throughput, query latency
-percentiles, compression ratios) are in [`PERFORMANCE.md`](PERFORMANCE.md). Run
-`make bench-go` for the in-process engine benchmarks and `make bench-k6` for the
-end-to-end k6 HTTP load tests.
+Four Helm charts — `deployments/helm/backend`, `prometheus`, `grafana`, and
+`producers` — install the same backend image as a StatefulSet with persistent
+storage, the internals-scraping Prometheus, Grafana, and the two producers. See
+[`docs/runbooks/kubernetes-demo.md`](docs/runbooks/kubernetes-demo.md) for the
+walkthrough and [`deployments/helm/README.md`](deployments/helm/README.md) for the
+per-chart values reference.
 
 ## Planning Docs
 

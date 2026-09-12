@@ -510,65 +510,28 @@ GET /loki/api/v1/label/{name}/values
 
 ## Supported Query Scope
 
-### Metrics query subset
+Prometheus and Loki compatibility is a deliberate subset, not an attempt at
+completeness. The rule that shapes it: an unsupported form must fail loudly with
+a `400` rather than be ignored or approximated, because a query that quietly
+returns a plausible-looking wrong answer is worse than one that refuses. That is
+why the Loki `interval` parameter is rejected instead of dropped — honouring the
+request partially would return *more* entries than asked for while looking like a
+working filter.
 
-Required:
+Label matchers inside `{...}` are equality-only because they are index-backed: a
+label pair maps directly to a posting list, and regex matching would mean scanning
+every value. Line filters carry no such constraint, so they take all four
+operators (`|=`, `!=`, `|~`, `!~`) and chain. Regex therefore applies to log
+*lines*, never to label values.
 
-```text
-metric_name
-metric_name{label="value"}
-rate(metric_name[5m])
-sum(metric_name)
-sum by (label)(metric_name)
-```
+`| drop <labels>` in final position is the one pipeline stage implemented, because
+Grafana appends it to every log-volume query; supporting it is the difference
+between a working log-volume panel and an error.
 
-Explicitly unsupported in v1:
-
-```text
-joins
-subqueries
-histogram functions
-recording rules
-alert rules
-complex binary operators
-regex matchers unless added deliberately later
-```
-
-### Logs query subset
-
-Required:
-
-```text
-{service="api"}
-{service="api", level="error"}
-{service="api"} |= "timeout"
-{service="api"} != "healthz"
-{service="api"} |~ "timeout|deadline"
-{service="api"} !~ "^debug"
-```
-
-Line filters take all four operators (`|=`, `!=`, `|~`, `!~`) and chain, so **regex
-applies to log *lines***. Label matchers inside `{...}` remain equality-only.
-
-Metric queries over logs arrived in Phase 4.6 — `count_over_time`, `rate`,
-`bytes_over_time`, and `bytes_rate`, optionally wrapped in `sum` / `sum by` /
-`sum without`, on both query endpoints. See "LogQL metric queries (introduced in 4.6)"
-above for the semantics.
-
-Explicitly unsupported:
-
-```text
-regex label matchers — {service=~"api|web"} and {service!~"..."}
-non-equality label matchers — {service!="api"}
-line formatting
-JSON parsing pipeline — and every other pipeline stage except final-position
-  | drop <labels>, which Grafana appends to every log-volume query
-unwrap and the label-extraction range aggregations — avg_over_time,
-  quantile_over_time, max_over_time, ...
-vector aggregations other than sum — count, avg, min, max, topk, ...
-binary operations — sum(...) / sum(...), count_over_time(...) * 2
-the offset modifier
-```
+**The authoritative list of supported and unsupported forms is
+[`docs/api/limitations.md`](../api/limitations.md)**, where every row is executed
+against the real parsers by `TestDocumentedQueryFormsMatchTheParser`. Do not
+re-enumerate it here — two lists drift, and only one of them is tested.
 
 ---
 

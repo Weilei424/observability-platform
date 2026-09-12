@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -235,6 +236,25 @@ const (
 	escapedPipe = "\x00"
 )
 
+
+// sectionAfter returns the body of a Markdown section and its start offset. The
+// section ends at the next heading of the same or higher level — stopping only at
+// "## " would make a "### Metrics" section swallow the "### Logs" table that
+// follows it.
+func sectionAfter(body, heading string) (string, int) {
+	start := strings.Index(body, heading)
+	if start < 0 {
+		return "", -1
+	}
+	level := len(heading) - len(strings.TrimLeft(heading, "#"))
+	rest := body[start+len(heading):]
+	next := regexp.MustCompile(`(?m)^#{1,` + strconv.Itoa(level) + `} `).FindStringIndex(rest)
+	if next == nil {
+		return body[start:], start
+	}
+	return body[start : start+len(heading)+next[0]], start
+}
+
 type supportRow struct {
 	Form    string
 	Example string
@@ -249,13 +269,9 @@ var tableRowRe = regexp.MustCompile(`(?m)^\|(.+)\|\s*$`)
 func supportRows(t *testing.T, file, heading string) []supportRow {
 	t.Helper()
 	body := repoFile(t, file)
-	start := strings.Index(body, heading)
+	section, start := sectionAfter(body, heading)
 	if start < 0 {
 		t.Fatalf("%s has no %q section", file, heading)
-	}
-	section := body[start:]
-	if next := strings.Index(section[len(heading):], "\n## "); next >= 0 {
-		section = section[:len(heading)+next]
 	}
 	section = strings.ReplaceAll(section, `\|`, escapedPipe)
 
@@ -339,4 +355,36 @@ func TestDocumentedQueryFormsMatchTheParser(t *testing.T) {
 	t.Run("logql", func(t *testing.T) {
 		checkSupportRows(t, supportRows(t, limitationsDoc, logQLHeading), wantLogQLRows, parseLogQLAsHandlerDoes)
 	})
+}
+
+// The README keeps a short table so the front door answers "can it do X" without
+// a click. It must not be able to contradict the canonical list: every row it
+// shows has to appear there verbatim.
+func TestREADMESupportTableIsASubsetOfLimitations(t *testing.T) {
+	canonical := map[string]string{} // example -> status
+	for _, heading := range []string{promQLHeading, logQLHeading} {
+		for _, r := range supportRows(t, limitationsDoc, heading) {
+			canonical[r.Example] = r.Status
+		}
+	}
+
+	var checked int
+	for _, heading := range []string{"### Metrics", "### Logs"} {
+		for _, r := range supportRows(t, "README.md", heading) {
+			checked++
+			status, ok := canonical[r.Example]
+			if !ok {
+				t.Errorf("README.md:%d shows %q, which is in no table in %s. The README summarises the canonical list; it does not extend it.",
+					r.Line, r.Example, limitationsDoc)
+				continue
+			}
+			if status != r.Status {
+				t.Errorf("README.md:%d shows %q as %q; %s says %q",
+					r.Line, r.Example, r.Status, limitationsDoc, status)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no README support rows were checked; the README table headings or shape changed")
+	}
 }
