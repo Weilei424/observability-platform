@@ -669,58 +669,62 @@ deliverable. So every factual claim a document makes about the system is diffed
 against the system by `go test ./...`.
 
 **Architecture docs** — `docs/architecture/`
-- [ ] `README.md` — system context diagram: producers → backend → Grafana's three datasources, with Prometheus scraping `/metrics`
-- [ ] `README.md` — metrics write path: ingest → normalize → fingerprint → WAL → head chunks → `FlushBlock` → `blocks/<id>/{meta.json,index,chunks,postings}` → checkpoint → compaction → retention
-- [ ] `README.md` — logs write path: push → stream lookup → logs WAL → per-stream buffer → threshold flush → compressed chunk → `streams.index`
-- [ ] `README.md` — query path: HTTP → `metrics.ParseExpr` or the `logs.IsLogExpression` dispatch → plan → head + block readers → merge → envelope
-- [ ] Mermaid, not images — text renders on GitHub, diffs in review, needs no build step. **Every node names a real symbol, file, or route**: a diagram of generic boxes cannot be checked against the tree and ages into decoration
-- [ ] `storage-layout.md` — the on-disk tree as the code actually writes it, per-file formats, and the WAL → block → retention lifecycle. Replaces `ARCHITECTURE_NOTES.md` §Storage Layout, which is headed "Recommended local data layout" and predates the code it describes: `blocks/<id>/postings` and `metrics/checkpoint` are on disk and in no document
+- [x] `README.md` — system context diagram: producers → backend → Grafana's three datasources, with Prometheus scraping `/metrics`
+- [x] `README.md` — metrics write path: ingest → normalize → fingerprint → WAL → head chunks → `FlushBlock` → `blocks/<id>/{meta.json,index,chunks,postings}` → checkpoint → compaction → retention
+- [x] `README.md` — logs write path: push → stream lookup → logs WAL → per-stream buffer → threshold flush → compressed chunk → `streams.index`
+- [x] `README.md` — query path: HTTP → `metrics.ParseExpr` or the `logs.IsLogExpression` dispatch → plan → head + block readers → merge → envelope
+- [x] Mermaid, not images — text renders on GitHub, diffs in review, needs no build step. **Every node names a real symbol, file, or route**: a diagram of generic boxes cannot be checked against the tree and ages into decoration
+- [x] `storage-layout.md` — the on-disk tree as the code actually writes it, per-file formats, and the WAL → block → retention lifecycle. Replaces `ARCHITECTURE_NOTES.md` §Storage Layout, which is headed "Recommended local data layout" and predates the code it describes: `blocks/<id>/postings` and `metrics/checkpoint` are on disk and in no document
 
 **API reference** — `docs/api/`
-- [ ] `README.md` — the conventions stated once: the `{status,data,warnings}` and `{status,errorType,error}` envelopes, `warnings` always present on success and always omitted on error, accepted time formats, and the `/healthz` `/readyz` `/metrics` trio
-- [ ] `README.md` — record that the Prometheus-style endpoints accept **GET and POST** while the Loki-compatible ones are GET-only except `push`. True in `router.go` today and stated in no document
-- [ ] `metrics.md` — the ingest API plus the five Prometheus-compatible endpoints
-- [ ] `logs.md` — the five Loki-compatible endpoints
-- [ ] Each endpoint introduced by a fenced `http` block listing every registered method — the convention `ARCHITECTURE_NOTES.md` §API Boundaries already uses, and what tests 1–2 parse. **Markdown over OpenAPI**: the reader this phase exists for opens a page and reads it, and faithful schemas for the polymorphic vector/matrix/scalar envelope are a large hand-written artifact serving no current consumer
-- [ ] Backlog an OpenAPI spec for the day something needs codegen
+- [x] `README.md` — the conventions stated once: the `{status,data,warnings}` and `{status,errorType,error}` envelopes, `warnings` always present on success and always omitted on error, accepted time formats, and the `/healthz` `/readyz` `/metrics` trio
+- [x] `README.md` — record that the Prometheus-style endpoints accept **GET and POST** while the Loki-compatible ones are GET-only except `push`. True in `router.go` today and stated in no document
+- [x] `metrics.md` — the ingest API plus the five Prometheus-compatible endpoints
+- [x] `logs.md` — the five Loki-compatible endpoints
+- [x] Each endpoint introduced by a fenced `http` block listing every registered method — the convention `ARCHITECTURE_NOTES.md` §API Boundaries already uses, and what tests 1–2 parse. **Markdown over OpenAPI**: the reader this phase exists for opens a page and reads it, and faithful schemas for the polymorphic vector/matrix/scalar envelope are a large hand-written artifact serving no current consumer
+- [x] Backlog an OpenAPI spec for the day something needs codegen — deferred, recorded under **Deferred from 5.4** below
 
 **Limitations** — `docs/api/limitations.md`, the canonical list
-- [ ] PromQL subset table — the README rows, plus any form the parser rejects that no document names
-- [ ] LogQL subset table — including the final-position `| drop <labels>` exception that Grafana's log-volume queries depend on
-- [ ] Platform limits, newly written and verified absent from the tree: single-node (no ring, replication, or fanout — Phase 6), **no authentication or authorization** (`internal/api/middleware/` holds `logger.go` and `metrics.go` and nothing else), no multi-tenancy, no Prometheus `remote_write`, no recording or alerting rules, no downsampling (compaction merges blocks, it does not reduce resolution), retention disabled by default (`retention` defaults to `0s`)
-- [ ] `README.md` keeps a condensed at-a-glance table whose every row must appear verbatim in the canonical tables (test 4) — the front door still answers "can it do X" without a click, and cannot contradict the reference
-- [ ] `ARCHITECTURE_NOTES.md` §Supported Query Scope keeps the reasoning and drops the enumeration; `grafana-logs-demo.md` §Known limitations links. Three copies that agree only by coincidence become one list with one place to extend
+- [x] PromQL subset table — the README rows, plus any form the parser rejects that no document names
+- [x] LogQL subset table — including the final-position `| drop <labels>` exception that Grafana's log-volume queries depend on
+- [x] Platform limits, newly written and verified absent from the tree: single-node (no ring, replication, or fanout — Phase 6), **no authentication or authorization** (`internal/api/middleware/` holds `logger.go` and `metrics.go` and nothing else), no multi-tenancy, no Prometheus `remote_write`, no recording or alerting rules, no downsampling (compaction merges blocks, it does not reduce resolution), retention disabled by default (`retention` defaults to `0s`)
+- [x] `README.md` keeps a condensed at-a-glance table whose every row must appear verbatim in the canonical tables (test 4) — the front door still answers "can it do X" without a click, and cannot contradict the reference
+- [x] `ARCHITECTURE_NOTES.md` §Supported Query Scope keeps the reasoning and drops the enumeration; `grafana-logs-demo.md` §Known limitations links. Three copies that agree only by coincidence become one list with one place to extend
 
 **Local demo runbook** — `docs/runbooks/local-demo.md`
-- [ ] One guided pass: prerequisites → `make local-up` → ports table → metrics dashboard → logs dashboard → internals dashboard → durability proof → `make smoke` → `make local-reset` → stop → troubleshooting
-- [ ] **The durability proof reads a pre-restart value back by value.** Phase 5.1 shipped a restart check that queried a live series the producers keep writing, so fresh samples satisfied it even if every pre-restart sample had been lost; 5.2 found and fixed that in `kind_smoke.sh`. The runbook must not reintroduce the weaker form as the human-facing version of the same proof
-- [ ] `grafana-demo.md`, `grafana-logs-demo.md`, `self-observability.md` — drop the duplicated start-the-stack preamble and link to this one's. Adds a document, removes three copies of the same setup
-- [ ] `docs/runbooks/kubernetes-demo.md` — **already shipped in 5.2** and exercised by `kind_smoke.sh` in CI; this phase only links it from the front door and lets the link and target checks run over it
-- [ ] `README.md` restructured as a front door: what it is → three-command quickstart → what you will see → links out → condensed support table → planning docs
+- [x] One guided pass: prerequisites → `make local-up` → ports table → metrics dashboard → logs dashboard → internals dashboard → durability proof → `make smoke` → `make local-reset` → stop → troubleshooting. Its `curl` commands and `make` targets are checked by the docs tests; the Docker steps are unwalked (see the fresh-clone line below)
+- [x] **The durability proof reads a pre-restart value back by value.** Phase 5.1 shipped a restart check that queried a live series the producers keep writing, so fresh samples satisfied it even if every pre-restart sample had been lost; 5.2 found and fixed that in `kind_smoke.sh`. The runbook must not reintroduce the weaker form as the human-facing version of the same proof
+- [x] `grafana-demo.md`, `grafana-logs-demo.md`, `self-observability.md` — drop the duplicated start-the-stack preamble and link to this one's. Adds a document, removes three copies of the same setup
+- [x] `docs/runbooks/kubernetes-demo.md` — **already shipped in 5.2** and exercised by `kind_smoke.sh` in CI; this phase only links it from the front door and lets the link and target checks run over it
+- [x] `README.md` restructured as a front door: what it is → three-command quickstart → what you will see → links out → condensed support table → planning docs
 
 **Docs tests** — `tests/e2e/docs_test.go` *(no Docker, no backend; runs in `go test ./...` beside `provisioning_test.go`)*
-- [ ] 1–2. `TestEveryRouteIsDocumented` / `TestEveryDocumentedRouteExists` — `chi.Walk` over a real `api.New(deps).Router()` against the documented endpoints, both directions
-- [ ] `internal/api/server.go` — export `Router() chi.Router`. Three lines beside the existing `ServeHTTP`, so the route diff reads what a configured server actually serves, including that `/metrics` is registered only when `Deps.Registry` is non-nil. Regexing `router.go` (the `TestBackendProbePathsExist` precedent) reports `/metrics` as unconditional and breaks the moment a route moves to a sub-router
-- [ ] 3. `TestDocumentedQueryFormsMatchTheParser` — every support-table row through the handlers' own entry points. **Must mirror the dispatch:** PromQL through `metrics.ParseExpr` (the only gate `handleQuery` and `handleQueryRange` apply); LogQL through `logs.IsLogExpression` → `ParseMetricQuery` or `ParseLogQL`, with `ParseScalarQuery` for the instant-only constants. A test calling `ParseLogQL` alone would reject every `count_over_time` row and report correct documentation as broken
-- [ ] 4. `TestREADMESupportTableIsASubsetOfLimitations`
-- [ ] 5. `TestDocsLinksResolve` — every relative link resolves to a file, and every `#anchor` to a heading in the target
-- [ ] 6. `TestDocumentedMakeTargetsExist`
-- [ ] 7. `TestDocumentedConfigKeysAreReal` — every `OBS_*` named in prose has a `SetDefault`. Viper ignores unknown env vars silently, so a typo'd key is invisible at runtime; 5.2's Helm ConfigMap rule extended to prose
-- [ ] 8. `TestDocumentedMetricNamesAreRegistered` — 5.3's dashboard rule extended to prose
-- [ ] 9. `TestDocumentedCurlExamplesTargetRealRoutes`
-- [ ] **Every extractor asserts a non-zero find count** — a regex that matches nothing passes silently, the same failure mode the `smoke-logs` comment already records for a `-run` filter. Each table also carries an expected-row-count constant, so a formatting change that drops rows fails instead of passing quietly
-- [ ] Every failure names the file, the line, and the fix — these tests fail for writers, not for the person who wrote them
+- [x] 1–2. `TestEveryRouteIsDocumented` / `TestEveryDocumentedRouteExists` — `chi.Walk` over a real `api.New(deps).Router()` against the documented endpoints, both directions
+- [x] `internal/api/server.go` — export `Router() chi.Router`. Three lines beside the existing `ServeHTTP`, so the route diff reads what a configured server actually serves, including that `/metrics` is registered only when `Deps.Registry` is non-nil. Regexing `router.go` (the `TestBackendProbePathsExist` precedent) reports `/metrics` as unconditional and breaks the moment a route moves to a sub-router
+- [x] 3. `TestDocumentedQueryFormsMatchTheParser` — every support-table row through the handlers' own entry points. **Must mirror the dispatch:** PromQL through `metrics.ParseExpr` (the only gate `handleQuery` and `handleQueryRange` apply); LogQL through `logs.IsLogExpression` → `ParseMetricQuery` or `ParseLogQL`, with `ParseScalarQuery` for the instant-only constants. A test calling `ParseLogQL` alone would reject every `count_over_time` row and report correct documentation as broken
+- [x] 4. `TestREADMESupportTableIsASubsetOfLimitations`
+- [x] 5. `TestDocsLinksResolve` — every relative link resolves to a file, and every `#anchor` to a heading in the target
+- [x] 6. `TestDocumentedMakeTargetsExist`
+- [x] 7. `TestDocumentedConfigKeysAreReal` — every `OBS_*` named in prose has a `SetDefault`. Viper ignores unknown env vars silently, so a typo'd key is invisible at runtime; 5.2's Helm ConfigMap rule extended to prose
+- [x] 8. `TestDocumentedMetricNamesAreRegistered` — 5.3's dashboard rule extended to prose
+- [x] 9. `TestDocumentedCurlExamplesTargetRealRoutes`
+- [x] **Every extractor asserts a non-zero find count** — a regex that matches nothing passes silently, the same failure mode the `smoke-logs` comment already records for a `-run` filter. Each table also carries an expected-row-count constant, so a formatting change that drops rows fails instead of passing quietly
+- [x] Every failure names the file, the line, and the fix — these tests fail for writers, not for the person who wrote them
 
 **Storage layout test** — `tests/integration/storage_layout_test.go`
-- [ ] 10. `TestStorageLayoutDocMatchesDisk` — ingest metrics and a log stream into a `t.TempDir()`, call `FlushBlock()` and `logs.Store.Flush()`, walk the resulting tree, and require every path produced to be documented and every path documented to be produced. The check the Phase-0 layout section never had, and the reason it drifted
+- [x] 10. `TestStorageLayoutDocMatchesDisk` — ingest metrics and a log stream into a `t.TempDir()`, call `FlushBlock()` and `logs.Store.Flush()`, walk the resulting tree, and require every path produced to be documented and every path documented to be produced. The check the Phase-0 layout section never had, and the reason it drifted
 
 **Executable examples**
-- [ ] `tests/e2e/smoke.sh` — a closing block running the documented curl examples verbatim (instant, range, labels, series, Loki push, Loki `query_range`), asserting `"status":"success"`. Test 9 keeps the URLs honest without Docker; this keeps them honest against a running backend
+- [x] `tests/e2e/smoke.sh` — a closing block running the documented curl examples verbatim (instant, range, labels, series, Loki push, Loki `query_range`), asserting `"status":"success"`. Test 9 keeps the URLs honest without Docker; this keeps them honest against a running backend
 
 **Verification**
-- [ ] `go test ./...` green, including all ten new checks
-- [ ] `make smoke` executes the documented examples against a running backend
-- [ ] Verify: a fresh-clone pass following only the README reaches a working demo without guessing — the tests prove the documents agree with the code; only a human finds the step that is true, verified, and still confusing
+- [x] `go test ./...` green, including all ten new checks — verified at `9353863`: 10 checks, 14 PASS lines with subtests, plus `go vet` clean. Each check was mutation-tested (a deliberately wrong row, link, target, key, metric name, and URL each produced the expected failure) so none of them passes vacuously
+- [x] `make smoke` executes the documented examples against a running backend — 11/11 in `smoke.sh` and 29/29 in `logs_smoke.sh` against a `go run ./cmd/server` backend, and the ingest and Loki push examples were additionally run **verbatim** from `docs/api/` (both 204). Not yet run against the Compose stack
+- [ ] Verify: a fresh-clone pass following only the README reaches a working demo without guessing — **partially closed.** A fresh `git clone` at `9353863` builds and passes the full suite including all ten docs checks, which also proves they carry no path assumptions. The `make local-up` walkthrough itself is **unverified**: Docker was unavailable in the implementing environment. Someone with Docker must walk `docs/runbooks/local-demo.md` top to bottom, including the durability proof, before this line closes
+
+**Deferred from 5.4**
+- [ ] OpenAPI 3.1 specification for the HTTP API — only when a consumer needs codegen or a Swagger UI. Markdown was chosen in 5.4 because the audience reads the reference rather than importing it, and faithful schemas for the polymorphic vector/matrix/scalar envelope are a large hand-written artifact serving nobody today. The route-coverage tests already give the drift protection a spec would.
+- [ ] A test that every symbol named in an architecture diagram exists — the 5.4 diagrams were checked by a one-off grep over `internal/`, not by anything that runs in CI.
 
 ---
 
