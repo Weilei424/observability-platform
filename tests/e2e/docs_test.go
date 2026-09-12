@@ -13,6 +13,7 @@ import (
 	"errors"
 	"maps"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -522,5 +523,141 @@ func TestDocumentedMakeTargetsExist(t *testing.T) {
 	}
 	if checked == 0 {
 		t.Fatal("no make targets were found in any document; the regexp changed shape")
+	}
+}
+
+// Viper ignores unknown env vars silently, so a typo'd OBS_* key in a runbook is
+// a setting the reader believes they changed and did not. Phase 5.2 enforces this
+// on the Helm ConfigMap; prose was the remaining place a key could be wrong for
+// free.
+var obsEnvRe = regexp.MustCompile(`OBS_[A-Z0-9_]+`)
+
+// OBS_* names that are correctly documented but are not backend Viper config.
+// Each carries its reason, because an unexplained exclusion is how a real typo
+// gets waved through later.
+var nonBackendEnvKeys = map[string]string{
+	"OBS_BACKEND_ADDR":    "the producers' target address, read by the sample app and load generator",
+	"OBS_COMPOSE_PROJECT": "tests/e2e/compose_smoke.sh",
+	"OBS_COMPOSE_KEEP_UP": "tests/e2e/compose_smoke.sh",
+	"OBS_INSTANCE":        "producers chart, set from the downward API (see TestProducersCarryPodInstanceLabel)",
+	"OBS_LOG_LEVLE":       "a deliberate misspelling in deployments/helm/README.md, showing that Viper ignores unknown keys; helm_test.go asserts that install succeeds with it",
+}
+
+func TestDocumentedConfigKeysAreReal(t *testing.T) {
+	configSrc := repoFile(t, "internal/config/config.go")
+	var checked int
+	for _, f := range allDocs(t) {
+		for _, m := range obsEnvRe.FindAllStringSubmatchIndex(f.Body, -1) {
+			key := f.Body[m[0]:m[1]]
+			if _, ok := nonBackendEnvKeys[key]; ok {
+				continue
+			}
+			checked++
+			want := `v.SetDefault("` + strings.ToLower(strings.TrimPrefix(key, "OBS_")) + `"`
+			if !strings.Contains(configSrc, want) {
+				t.Errorf("%s:%d documents %s, which has no %s) in internal/config/config.go. Viper ignores unknown env vars, so this setting would do nothing.",
+					f.Path, lineOf(f.Body, m[0]), key, want)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no OBS_* keys found in any document; the regexp or the docs changed shape")
+	}
+}
+
+// A document naming a metric the registry does not expose sends a reader to an
+// empty query. The dashboard is already held to this rule; prose was not.
+var obsMetricRe = regexp.MustCompile(`obs_[a-z0-9_]+`)
+
+// Planning documents record what was considered, including metrics that were
+// renamed or never built. They are excluded from this check for that reason, and
+// no reference or runbook is.
+var historicalMetricDocs = map[string]bool{
+	"docs/planning/BACKLOG.md":            true,
+	"docs/planning/ARCHITECTURE_NOTES.md": true,
+}
+
+// documentableMetricNames extends the queryable series names with histogram
+// family base names. registeredMetricNames deliberately omits those, because a
+// dashboard panel querying a bare histogram name renders empty — but prose
+// naming the metric family is correct, and a runbook should say
+// obs_http_request_duration_seconds, not obs_http_request_duration_seconds_bucket.
+func documentableMetricNames(t *testing.T) map[string]bool {
+	t.Helper()
+	names := registeredMetricNames(t)
+	out := maps.Clone(names)
+	for n := range names {
+		if base, ok := strings.CutSuffix(n, "_bucket"); ok {
+			out[base] = true
+		}
+	}
+	return out
+}
+
+func TestDocumentedMetricNamesAreRegistered(t *testing.T) {
+	registered := documentableMetricNames(t)
+	var checked int
+	for _, f := range allDocs(t) {
+		if historicalMetricDocs[f.Path] {
+			continue
+		}
+		for _, m := range obsMetricRe.FindAllStringSubmatchIndex(f.Body, -1) {
+			name := f.Body[m[0]:m[1]]
+			checked++
+			if !registered[name] {
+				t.Errorf("%s:%d names the metric %q, which the registry does not expose. A reader querying it gets nothing back.",
+					f.Path, lineOf(f.Body, m[0]), name)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no obs_* metric names found in any document; the regexp or the docs changed shape")
+	}
+}
+
+// Example URLs are the lines a reader pastes first. This checks each one against
+// the real router by asking whether it routes at all.
+var curlURLRe = regexp.MustCompile(`https?://localhost:8080(/[^\s'"` + "`" + `\\]*)`)
+
+func TestDocumentedCurlExamplesTargetRealRoutes(t *testing.T) {
+	dataDir := t.TempDir()
+	walDir := filepath.Join(dataDir, "metrics", "wal")
+	if err := os.MkdirAll(walDir, 0o755); err != nil {
+		t.Fatalf("mkdir walDir: %v", err)
+	}
+	srv, w := newTestServer(t, dataDir, walDir)
+	defer w.Close()
+
+	// routes reports whether the router answers this path at all. A handler may
+	// legitimately reply 400 (a missing query parameter); only 404 means the path
+	// reaches nothing.
+	routes := func(path string) bool {
+		for _, method := range []string{http.MethodGet, http.MethodPost} {
+			rr := httptest.NewRecorder()
+			srv.ServeHTTP(rr, httptest.NewRequest(method, path, nil))
+			if rr.Code != http.StatusNotFound {
+				return true
+			}
+		}
+		return false
+	}
+
+	var checked int
+	for _, f := range allDocs(t) {
+		for _, m := range curlURLRe.FindAllStringSubmatchIndex(f.Body, -1) {
+			raw := f.Body[m[2]:m[3]]
+			path, _, _ := strings.Cut(raw, "?")
+			if path == "" || strings.Contains(path, "$") {
+				continue // shell-interpolated path; nothing stable to check
+			}
+			checked++
+			if !routes(path) {
+				t.Errorf("%s:%d shows an example against %q, which the server does not route (404 on both GET and POST)",
+					f.Path, lineOf(f.Body, m[0]), path)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no localhost:8080 example URLs found; the regexp or the docs changed shape")
 	}
 }
