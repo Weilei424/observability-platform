@@ -98,63 +98,32 @@ A weak distributed demo is worse than a strong single-node TSDB/log backend. Dis
 
 ## Storage Layout
 
-Recommended local data layout:
+**The authoritative on-disk layout is
+[`docs/architecture/storage-layout.md`](../architecture/storage-layout.md)**,
+which is verified against a directory the code actually produced by
+`TestStorageLayoutDocMatchesDisk`. This section keeps only the decisions behind
+the layout.
 
-```text
-data/
-  metrics/
-    wal/
-      000001.wal
-      000002.wal
-    blocks/
-      <block-id>/
-        meta.json
-        index
-        chunks
-  logs/
-    wal/
-      000001.wal
-      000002.wal
-    chunks/
-      <chunk-id>
-    index/
-      streams.index
-  tmp/
-```
+The Phase-0 version of this section was headed "Recommended local data layout"
+and was written before any of it existed. It fell behind without anyone
+noticing: `blocks/<id>/postings` and `metrics/checkpoint` were on disk and in no
+document. A layout description that nothing executes is a layout description that
+drifts, which is why the replacement is a tested document and this one is a
+pointer.
 
-### Metrics block metadata
+**Metrics and logs get separate subtrees and separate write-ahead logs.** They
+have different record shapes, different flush triggers, and different failure
+modes; sharing a WAL would couple their durability and make a replay failure in
+one a startup failure for both.
 
-Each metrics block should include:
+**Blocks are immutable and content-addressed.** Nothing rewrites a block in
+place, so a reader never observes a partial mutation, and a block ID never
+depends on a counter a restart could reuse. Updates arrive as new blocks, and
+compaction merges them.
 
-```json
-{
-  "block_id": "example-block-id",
-  "min_time": 1710000000,
-  "max_time": 1710003600,
-  "num_series": 1200,
-  "num_samples": 90000,
-  "created_at": "2026-05-15T00:00:00Z"
-}
-```
-
-### Index expectations
-
-Metrics index should support:
-
-```text
-metric name -> series IDs
-label name -> label values
-label pair -> series IDs
-series ID -> chunk references
-```
-
-Logs index should support:
-
-```text
-label pair -> stream IDs
-stream ID -> chunk references
-time range -> candidate chunks
-```
+**Every durable write is temp file → fsync → atomic rename → directory fsync.**
+A half-written block or chunk is therefore never visible, which is what lets
+readers trust any file they can see without a validity check of their own.
 
 ### Introduced in Phase 4.3
 
