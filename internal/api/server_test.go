@@ -2,13 +2,17 @@ package api_test
 
 import (
 	"encoding/json"
+	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/masonwheeler/observability-platform/internal/api"
 	"github.com/masonwheeler/observability-platform/internal/config"
 	"github.com/masonwheeler/observability-platform/internal/logs"
@@ -121,5 +125,86 @@ func TestNewWithoutInstrumentsStillServesRequests(t *testing.T) {
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if rec.Code != http.StatusOK {
 		t.Errorf("/healthz = %d, want 200 with no instruments and no registry configured", rec.Code)
+	}
+}
+
+// The router is the only authority on what the server serves. Router() exists so
+// tests and tooling can enumerate it with chi.Walk instead of re-deriving it by
+// grepping router.go — a text search reports /metrics as unconditional (it is
+// registered only when Deps.Registry is non-nil) and goes blind the moment a
+// route moves to a sub-router.
+func TestRouterEnumeratesEveryRegisteredRoute(t *testing.T) {
+	srv := newTestServer(t, t.TempDir())
+
+	got := map[string]bool{}
+	err := chi.Walk(srv.Router(), func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+		got[method+" "+route] = true
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("chi.Walk: %v", err)
+	}
+
+	for _, want := range []string{
+		"GET /healthz",
+		"GET /readyz",
+		"POST /api/v1/ingest/metrics",
+		"GET /api/v1/query",
+		"POST /api/v1/query",
+		"GET /api/v1/query_range",
+		"GET /api/v1/labels",
+		"GET /api/v1/label/{name}/values",
+		"GET /api/v1/series",
+		"POST /loki/api/v1/push",
+		"GET /loki/api/v1/query_range",
+		"GET /loki/api/v1/label/{name}/values",
+	} {
+		if !got[want] {
+			t.Errorf("Router() does not serve %q; walked %d routes: %v", want, len(got), slices.Sorted(maps.Keys(got)))
+		}
+	}
+	if len(got) == 0 {
+		t.Fatal("chi.Walk found no routes at all; the walk callback or the router changed shape")
+	}
+}
+
+// /metrics is registered only when a Registry is supplied. A Deps without one is
+// normal in tests, and registering promhttp over a nil registry panics at request
+// time — so the route must genuinely be absent, not present and broken.
+func TestRouterServesMetricsOnlyWithARegistry(t *testing.T) {
+	store := metrics.NewMemoryStore()
+	srv := api.New(api.Deps{
+		Config:      &config.Config{HTTPAddr: ":0", DataDir: t.TempDir(), LogLevel: "info"},
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Ingester:    store,
+		Engine:      metrics.NewQueryEngine(store),
+		LogIngester: logs.NewMemoryStore(),
+	})
+
+	sawMetrics := false
+	if err := chi.Walk(srv.Router(), func(_, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+		if route == "/metrics" {
+			sawMetrics = true
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("chi.Walk: %v", err)
+	}
+	if sawMetrics {
+		t.Error("/metrics is registered without a Registry; promhttp over a nil registry panics at request time")
+	}
+
+	withReg := newTestServer(t, t.TempDir())
+	sawMetrics = false
+	if err := chi.Walk(withReg.Router(), func(_, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+		if route == "/metrics" {
+			sawMetrics = true
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("chi.Walk: %v", err)
+	}
+	if !sawMetrics {
+		t.Error("/metrics is not registered even with a Registry")
 	}
 }

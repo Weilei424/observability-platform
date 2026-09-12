@@ -80,3 +80,9 @@ func New(d Deps) *Server {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.router.ServeHTTP(w, r)
 }
+
+// Router exposes the built router so callers can enumerate what this server
+// actually serves (chi.Walk) rather than re-deriving it from source. The docs
+// route-coverage tests depend on seeing the real registrations, including the
+// conditional /metrics.
+func (s *Server) Router() chi.Router { return s.router }
