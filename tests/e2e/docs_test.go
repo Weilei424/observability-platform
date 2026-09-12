@@ -388,3 +388,139 @@ func TestREADMESupportTableIsASubsetOfLimitations(t *testing.T) {
 		t.Fatal("no README support rows were checked; the README table headings or shape changed")
 	}
 }
+
+// allDocs is every Markdown file a reader might follow: the README and
+// everything under docs/, plus the Helm values reference.
+func allDocs(t *testing.T) []docFile {
+	t.Helper()
+	var out []docFile
+	for _, glob := range []string{
+		"README.md", "PERFORMANCE.md",
+		"docs/api/*.md", "docs/architecture/*.md",
+		"docs/runbooks/*.md", "docs/planning/*.md",
+		"deployments/helm/README.md",
+	} {
+		if matches, _ := filepath.Glob(filepath.Join(docsRoot, glob)); len(matches) == 0 {
+			continue
+		}
+		out = append(out, docFiles(t, glob)...)
+	}
+	if len(out) < 10 {
+		t.Fatalf("allDocs found only %d documents; the globs no longer match the tree", len(out))
+	}
+	return out
+}
+
+// Markdown inline links. Image links share this shape and are checked the same
+// way — a broken image path is a broken link too.
+var linkRe = regexp.MustCompile(`\[[^\]]*\]\(([^)]+)\)`)
+
+// headingSlug mirrors GitHub's anchor generation closely enough for this repo:
+// lowercase, drop everything that is not alphanumeric, space, or hyphen, then
+// turn runs of spaces into single hyphens.
+var (
+	nonAnchorRe = regexp.MustCompile(`[^a-z0-9 -]`)
+	spaceRunRe  = regexp.MustCompile(`\s+`)
+)
+
+func headingSlug(text string) string {
+	s := nonAnchorRe.ReplaceAllString(strings.ToLower(text), "")
+	return strings.Trim(spaceRunRe.ReplaceAllString(strings.TrimSpace(s), "-"), "-")
+}
+
+func hasHeading(body, anchor string) bool {
+	want := strings.ToLower(anchor)
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, "#") {
+			continue
+		}
+		if headingSlug(strings.TrimSpace(strings.TrimLeft(line, "#"))) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestDocsLinksResolve(t *testing.T) {
+	var checked int
+	for _, f := range allDocs(t) {
+		dir := filepath.Dir(filepath.Join(docsRoot, f.Path))
+		for _, m := range linkRe.FindAllStringSubmatchIndex(f.Body, -1) {
+			target := f.Body[m[2]:m[3]]
+			if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") || strings.HasPrefix(target, "mailto:") {
+				continue
+			}
+			path, anchor, _ := strings.Cut(target, "#")
+			line := lineOf(f.Body, m[0])
+			checked++
+
+			if path == "" { // same-file anchor
+				if !hasHeading(f.Body, anchor) {
+					t.Errorf("%s:%d links to #%s, which is not a heading in this file", f.Path, line, anchor)
+				}
+				continue
+			}
+			resolved := filepath.Join(dir, path)
+			if _, err := os.Stat(resolved); err != nil {
+				t.Errorf("%s:%d links to %q, which does not exist", f.Path, line, target)
+				continue
+			}
+			if anchor == "" || !strings.HasSuffix(path, ".md") {
+				continue
+			}
+			b, err := os.ReadFile(resolved)
+			if err != nil {
+				t.Errorf("%s:%d links into %q, which cannot be read: %v", f.Path, line, path, err)
+				continue
+			}
+			if !hasHeading(string(b), anchor) {
+				t.Errorf("%s:%d links to %q, but %q has no heading with that anchor", f.Path, line, target, path)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no relative links were checked; the link regexp or the docs changed shape")
+	}
+}
+
+// commandSpans returns the text of every inline code span and fenced code block.
+// Commands are only looked for here: scanning prose would match "make sure" and
+// report `sure` as a missing target.
+var (
+	fenceRe     = regexp.MustCompile("(?s)```[a-z]*\n(.*?)```")
+	codeSpanRe  = regexp.MustCompile("`([^`\n]+)`")
+	makeUsageRe = regexp.MustCompile(`(?m)^\s*make ([a-z][a-z0-9-]*)`)
+)
+
+func commandSpans(body string) []string {
+	var out []string
+	for _, m := range fenceRe.FindAllStringSubmatch(body, -1) {
+		out = append(out, m[1])
+	}
+	for _, m := range codeSpanRe.FindAllStringSubmatch(body, -1) {
+		out = append(out, m[1])
+	}
+	return out
+}
+
+// Every `make <target>` a document tells a reader to run must exist. A runbook
+// naming a target that was renamed sends the reader to "No rule to make target".
+func TestDocumentedMakeTargetsExist(t *testing.T) {
+	makefile := repoFile(t, "Makefile")
+	var checked int
+	for _, f := range allDocs(t) {
+		for _, span := range commandSpans(f.Body) {
+			for _, m := range makeUsageRe.FindAllStringSubmatch(span, -1) {
+				target := m[1]
+				checked++
+				if !strings.Contains(makefile, "\n"+target+":") {
+					t.Errorf("%s tells the reader to run `make %s`, which is not a target in the Makefile",
+						f.Path, target)
+				}
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no make targets were found in any document; the regexp changed shape")
+	}
+}
