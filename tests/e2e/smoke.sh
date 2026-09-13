@@ -112,7 +112,9 @@ check_success "Panel 5 — active_connections" "$BODY"
 echo ""
 echo "-- Documented examples (docs/api/metrics.md) --"
 
-# The ingest example, verbatim from docs/api/metrics.md — fixed timestamp included.
+# The ingest example from docs/api/metrics.md: its method, path and body exactly,
+# including the literal timestamp. The flags differ — capturing a status code
+# needs -o /dev/null -w '%{http_code}' where the doc writes -sf.
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BACKEND/api/v1/ingest/metrics" \
     -H 'Content-Type: application/json' \
     -d '{"metrics":[

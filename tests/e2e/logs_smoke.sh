@@ -170,7 +170,8 @@ fi
 echo ""
 echo "-- Documented examples (docs/api/logs.md) --"
 
-# The push example, verbatim from docs/api/logs.md.
+# The push example from docs/api/logs.md: its method, path and body exactly. The
+# flags differ, for the same status-capture reason as smoke.sh.
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BACKEND/loki/api/v1/push" \
     -H 'Content-Type: application/json' \
     -d "{\"streams\":[{\"stream\":{\"service\":\"api\",\"level\":\"info\"},\"values\":[[\"$(date +%s)000000000\",\"request completed\"]]}]}")

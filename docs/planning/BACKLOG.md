@@ -715,7 +715,7 @@ against the system by `go test ./...`.
 - [x] 10. `TestStorageLayoutDocMatchesDisk` — ingest metrics and a log stream into a `t.TempDir()`, call `FlushBlock()` and `logs.Store.Flush()`, walk the resulting tree, and require every path produced to be documented and every path documented to be produced. The check the Phase-0 layout section never had, and the reason it drifted
 
 **Executable examples**
-- [x] `tests/e2e/smoke.sh` and `logs_smoke.sh` — closing blocks running **every** documented curl example verbatim, including the POST bodies (ingest, Loki push), asserting the documented status codes and error shapes. Test 9 keeps the URLs honest without Docker; these keep the behaviour honest against a running backend
+- [x] `tests/e2e/smoke.sh` and `logs_smoke.sh` — closing blocks covering **every** documented curl example, including both POST bodies (ingest, Loki push), asserting the documented status codes and error shapes. The GET examples run the documented flags as written; the POST examples send the documented method, path and body but swap `-sf` for `-o /dev/null -w '%{http_code}'`, because a status code cannot be captured otherwise. Behavioural equivalence, not a byte-for-byte replay. Test 9 keeps the URLs honest without Docker; these keep the behaviour honest against a running backend
 
 **Verification**
 - [x] `go test ./...` green, including all ten new checks — verified at `9353863`: 10 checks, 14 PASS lines with subtests, plus `go vet` clean. Each check was mutation-tested (a deliberately wrong row, link, target, key, metric name, and URL each produced the expected failure) so none of them passes vacuously

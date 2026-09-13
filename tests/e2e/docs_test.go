@@ -626,8 +626,10 @@ var (
 	// A curl invocation, including any backslash-continued lines.
 	curlCmdRe = regexp.MustCompile(`(?s)curl\s(?:[^\n]*\\\n)*[^\n]*`)
 	// The scheme is optional: runbooks write `curl -sf localhost:8080/readyz`, and
-	// a pattern that required http:// silently skipped every one of them.
-	curlURLRe  = regexp.MustCompile(`(?:https?://)?localhost:8080(/[^\s'"` + "`" + `\\]*)`)
+	// a pattern that required http:// silently skipped every one of them. The
+	// leading boundary is load-bearing — without it "notlocalhost:8080/readyz"
+	// matches from the sixth character and a typo'd host reads as a valid route.
+	curlURLRe  = regexp.MustCompile(`(?m)(?:^|[\s'"` + "`" + `=])(?:https?://)?localhost:8080(/[^\s'"` + "`" + `\\]*)`)
 	backendRef = "localhost:8080"
 	dashXRe    = regexp.MustCompile(`-X\s+([A-Z]+)`)
 )
@@ -739,5 +741,76 @@ func TestDocumentedCurlExamplesTargetRealRoutes(t *testing.T) {
 	}
 	if checked == 0 {
 		t.Fatal("no localhost:8080 curl examples found; the regexp or the docs changed shape")
+	}
+}
+
+// The extractors above decide what the documentation check sees, so they get
+// their own tests. A parser that quietly mis-reads a host or a method turns the
+// whole check into a formality that always passes.
+func TestCurlExtraction(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		cmd        string
+		wantPath   string // "" means: must not be read as a backend URL
+		wantMethod string
+	}{
+		{"scheme-less GET", "curl -sf localhost:8080/readyz", "/readyz", http.MethodGet},
+		{"scheme-qualified GET", "curl -sG 'http://localhost:8080/api/v1/query' --data-urlencode 'query=up'", "/api/v1/query", http.MethodGet},
+		{"explicit POST", "curl -sf -X POST 'http://localhost:8080/loki/api/v1/push' -d '{}'", "/loki/api/v1/push", http.MethodPost},
+		{"body implies POST", "curl -s localhost:8080/api/v1/ingest/metrics -d '{}'", "/api/v1/ingest/metrics", http.MethodPost},
+		{"-G keeps GET despite data", "curl -sG localhost:8080/api/v1/series --data-urlencode 'match[]=x'", "/api/v1/series", http.MethodGet},
+		{"query string is trimmed from the path", "curl 'http://localhost:8080/api/v1/query?query=up'", "/api/v1/query?query=up", http.MethodGet},
+		{"suffix host is not the backend", "curl http://notlocalhost:8080/readyz", "", ""},
+		{"prefixed host is not the backend", "curl http://localhost:8080.example.com/readyz", "", ""},
+		{"another port is not the backend", "curl localhost:9090/-/healthy", "", ""},
+		{"bare host with no path is not a usable example", "curl http://localhost:8080", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := curlURLRe.FindStringSubmatch(tc.cmd)
+			if tc.wantPath == "" {
+				if m != nil {
+					t.Errorf("%q was read as backend path %q; it does not address this backend", tc.cmd, m[1])
+				}
+				return
+			}
+			if m == nil {
+				t.Fatalf("%q was not recognised as a backend URL; want path %q", tc.cmd, tc.wantPath)
+			}
+			if m[1] != tc.wantPath {
+				t.Errorf("path = %q, want %q", m[1], tc.wantPath)
+			}
+			if got := curlMethod(tc.cmd); got != tc.wantMethod {
+				t.Errorf("method = %q, want %q", got, tc.wantMethod)
+			}
+		})
+	}
+}
+
+// curlCmdRe decides what counts as a command, and every count derived from it is
+// blind to what it misses. This checks it against a deliberately simpler notion
+// of "a curl invocation", so a command the span extractor cannot capture fails
+// here rather than silently shrinking the coverage numbers.
+func TestEveryCurlInvocationIsInsideAParsedCommand(t *testing.T) {
+	invocationRe := regexp.MustCompile(`curl\s+\S`)
+	var found int
+	for _, f := range allDocs(t) {
+		spans := curlCmdRe.FindAllStringIndex(f.Body, -1)
+		for _, loc := range invocationRe.FindAllStringIndex(f.Body, -1) {
+			found++
+			inside := false
+			for _, sp := range spans {
+				if loc[0] >= sp[0] && loc[0] < sp[1] {
+					inside = true
+					break
+				}
+			}
+			if !inside {
+				line := lineOf(f.Body, loc[0])
+				t.Errorf("%s:%d has a curl invocation that curlCmdRe does not capture, so no check sees it", f.Path, line)
+			}
+		}
+	}
+	if found == 0 {
+		t.Fatal("no curl invocations found in any document; the invocation pattern changed shape")
 	}
 }

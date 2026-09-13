@@ -129,13 +129,20 @@ demo_durability() {
   # 2. Note which container is serving, and when it last started.
   CID=$($COMPOSE ps -q backend) || { echo "INCONCLUSIVE: could not list the backend container."; return 1; }
   [ -n "$CID" ] || { echo "INCONCLUSIVE: no backend container is running."; return 1; }
-  BEFORE=$(docker inspect -f '{{.State.StartedAt}}' "$CID")
+  BEFORE=$(docker inspect -f '{{.State.StartedAt}}' "$CID") \
+    || { echo "INCONCLUSIVE: could not read the container's start time."; return 1; }
+  [ -n "$BEFORE" ] || { echo "INCONCLUSIVE: the container's start time came back empty."; return 1; }
 
   # 3. Restart it — and prove it restarted. An unchecked restart that fails
   #    leaves the original process running with the marker still in memory, and
   #    every step below would then pass while proving nothing at all.
   $COMPOSE restart backend || { echo "INCONCLUSIVE: the restart command failed."; return 1; }
-  AFTER=$(docker inspect -f '{{.State.StartedAt}}' "$CID")
+  AFTER=$(docker inspect -f '{{.State.StartedAt}}' "$CID") \
+    || { echo "INCONCLUSIVE: could not re-read the container's start time."; return 1; }
+  [ -n "$AFTER" ] || { echo "INCONCLUSIVE: the container's start time came back empty after the restart."; return 1; }
+  # Both values are known non-empty here, so this compares two real timestamps.
+  # An unguarded assignment that failed would leave one empty, and "" != "<time>"
+  # would read as a successful restart.
   [ "$BEFORE" != "$AFTER" ] || { echo "INCONCLUSIVE: the container's start time did not change, so it never restarted."; return 1; }
 
   # 4. Wait for it to come back. The container is up well before the process is:
