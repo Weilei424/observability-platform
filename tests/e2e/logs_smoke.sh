@@ -193,8 +193,8 @@ fi
 check_contains "docs/api/logs.md — push validation error is a JSON errors array" "$(cat "$ERR_BODY")" '"errors"'
 rm -f "$ERR_BODY"
 
-# Verbatim from docs/api/logs.md, literal epoch values and all; $BACKEND for the
-# host is the only substitution.
+# The documented command's own method, path, query and epoch values. $BACKEND
+# replaces the literal host because BACKEND_ADDR is overridable.
 BODY=$(curl -s -G "$BACKEND/loki/api/v1/query_range" \
     --data-urlencode 'query=sum by (level) (count_over_time({service="api"}[5m]))' \
     --data-urlencode 'start=1710000000000000000' \
@@ -206,7 +206,7 @@ BODY=$(lokq 'sum by (level) (count_over_time({service="smoke-test"}[5m]))')
 check_contains "sum by over count_over_time — smoke streams" "$BODY" '"resultType":"matrix"'
 
 BODY=$(curl -s -G "$BACKEND/loki/api/v1/query" \
-    --data-urlencode 'query={service="smoke-test"} |= "timeout"' || echo 'curl-error')
+    --data-urlencode 'query={service="api"} |= "timeout"' || echo 'curl-error')
 check_contains "docs/api/logs.md — instant query with a line filter" "$BODY" '"resultType":"streams"'
 
 BODY=$(curl -s "$BACKEND/loki/api/v1/labels" || echo 'curl-error')

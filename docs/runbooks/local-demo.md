@@ -112,49 +112,64 @@ This is the part worth doing slowly. Ingest a marker whose value is unique to th
 run, restart the backend, and read the marker back **by value**:
 
 ```bash
-MARKER=$RANDOM$RANDOM
-NOW_MS=$(( $(date +%s) * 1000 ))
+demo_durability() {
+  local COMPOSE="docker compose -f deployments/docker/docker-compose.yml"
+  local MARKER=$RANDOM$RANDOM
+  local NOW_MS=$(( $(date +%s) * 1000 ))
+  local CID BEFORE AFTER RESPONSE
 
-# 1. Ingest a marker with a run-unique value. Everything below is gated on this:
-#    if the marker was never stored, there is nothing to prove either way.
-if ! curl -sf -X POST localhost:8080/api/v1/ingest/metrics \
-      -H 'Content-Type: application/json' \
-      -d "{\"metrics\":[{\"name\":\"demo_restart_marker\",\"labels\":{\"run\":\"local\"},\"timestamp_ms\":$NOW_MS,\"value\":$MARKER}]}" >/dev/null; then
-  echo "INCONCLUSIVE: the backend did not accept the marker, so nothing was tested."
-  echo "Check 'make local-logs' and start again."
-else
+  # 1. Ingest a marker with a run-unique value. If it was never stored, there is
+  #    nothing to prove either way.
+  curl -sf -X POST localhost:8080/api/v1/ingest/metrics \
+    -H 'Content-Type: application/json' \
+    -d "{\"metrics\":[{\"name\":\"demo_restart_marker\",\"labels\":{\"run\":\"local\"},\"timestamp_ms\":$NOW_MS,\"value\":$MARKER}]}" \
+    >/dev/null || { echo "INCONCLUSIVE: the backend did not accept the marker."; return 1; }
   echo "ingested marker $MARKER"
 
-  # 2. Restart only the backend.
-  docker compose -f deployments/docker/docker-compose.yml restart backend
+  # 2. Note which container is serving, and when it last started.
+  CID=$($COMPOSE ps -q backend) || { echo "INCONCLUSIVE: could not list the backend container."; return 1; }
+  [ -n "$CID" ] || { echo "INCONCLUSIVE: no backend container is running."; return 1; }
+  BEFORE=$(docker inspect -f '{{.State.StartedAt}}' "$CID")
 
-  # 3. Wait for it to come back before asking it anything. The container is up
-  #    well before the process is: WAL replay runs first, and /readyz answers
-  #    only once the data directory is writable again.
+  # 3. Restart it — and prove it restarted. An unchecked restart that fails
+  #    leaves the original process running with the marker still in memory, and
+  #    every step below would then pass while proving nothing at all.
+  $COMPOSE restart backend || { echo "INCONCLUSIVE: the restart command failed."; return 1; }
+  AFTER=$(docker inspect -f '{{.State.StartedAt}}' "$CID")
+  [ "$BEFORE" != "$AFTER" ] || { echo "INCONCLUSIVE: the container's start time did not change, so it never restarted."; return 1; }
+
+  # 4. Wait for it to come back. The container is up well before the process is:
+  #    WAL replay runs first, and /readyz answers only once the data directory is
+  #    writable again.
   for i in $(seq 1 60); do
     curl -sf localhost:8080/readyz >/dev/null 2>&1 && break
     sleep 1
   done
 
-  # 4. Read the marker back BY VALUE.
-  if ! RESPONSE=$(curl -sf -G localhost:8080/api/v1/query \
-        --data-urlencode 'query=demo_restart_marker' 2>/dev/null); then
-    echo "INCONCLUSIVE: the backend did not answer. This is not a data-loss result —"
-    echo "check 'make local-logs' and run step 4 again once it is ready."
-  elif echo "$RESPONSE" | grep -q "$MARKER"; then
-    echo "durable: marker $MARKER survived the restart"
+  # 5. Read the marker back BY VALUE.
+  RESPONSE=$(curl -sf -G localhost:8080/api/v1/query \
+    --data-urlencode 'query=demo_restart_marker' 2>/dev/null) \
+    || { echo "INCONCLUSIVE: the backend did not answer. This is not a data-loss result."; return 1; }
+
+  if echo "$RESPONSE" | grep -q "$MARKER"; then
+    echo "durable: marker $MARKER survived a real restart"
   else
     echo "LOST: the backend answered, but marker $MARKER is not in the response"
   fi
-fi
+}
+
+demo_durability
 ```
 
-The three outcomes are deliberately distinct. A marker that was never accepted,
-and a query that failed because the backend is still replaying its WAL, are both
-**inconclusive** — neither is evidence of data loss. `LOST` is printed only when
-the backend answered a query and the marker was genuinely absent. A proof that
-cannot tell those apart is not a proof; it just prints a scary word at a race it
-lost, or at a step that never ran.
+`LOST` is printed in exactly one situation: the marker was accepted, the
+container demonstrably restarted, the backend answered, and the value was not
+there. Every other outcome is **inconclusive**, including the one that matters
+most — a restart that did not happen. Phase 5.2 found this exact hole in
+`kind_smoke.sh`: the `kubectl delete pod` exit status was unchecked, and because
+a StatefulSet pod keeps its name across a reschedule, a delete that never
+happened would have left every later check passing. Comparing the container's
+start time before and after is the same fix, which is why step 3 is not just
+`restart`.
 
 **Why it is written this way.** Phase 5.1 shipped a restart check that queried a
 live series the producers keep writing. Fresh post-restart samples satisfied it

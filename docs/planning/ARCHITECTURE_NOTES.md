@@ -123,9 +123,22 @@ arrive as new blocks and compaction merges them. The ID is 8 bytes of
 survive restarts to avoid reusing the name of a block that was just deleted, and
 content addressing would buy deduplication this system has no use for.
 
-**Every durable write is temp file → fsync → atomic rename → directory fsync.**
-A half-written block or chunk is therefore never visible, which is what lets
-readers trust any file they can see without a validity check of their own.
+**Immutable files are published by rename; the WAL is not.** A block directory
+and a log chunk file are written to a temporary path, fsynced, atomically renamed
+into place, and their parent directory fsynced, so a half-written one is never
+visible under its final name. The WAL is necessarily the exception: records are
+appended to the open segment and fsynced in place — every record by default, or
+every Nth under `wal_sync_every_n`. A log that could only be published by rename
+could not acknowledge a write until its segment rolled, which is the opposite of
+what a write-ahead log is for.
+
+**Publication order is not a substitute for validation, and readers do not skip
+it.** A log chunk is checked on every read against its magic, version, header
+CRC, uncompressed-size cap, declared compressed length, payload CRC, and whether
+the decoded entries' bounds match the header. WAL replay tolerates exactly one
+fault: a torn record at the tail of the final segment, which it truncates and
+fsyncs before opening a newer one. Anything else is an error rather than a
+repair, because anything else means something other than a crash-at-write.
 
 ### Introduced in Phase 4.3
 

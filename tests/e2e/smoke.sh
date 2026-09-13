@@ -139,10 +139,15 @@ BODY=$(curl -sG "$BACKEND/api/v1/query" \
     --data-urlencode 'query=sum(rate(http_requests_total[1m]))' || echo '{"status":"curl-error"}')
 check_success "docs/api/metrics.md — instant query" "$BODY"
 
-# Verbatim from the doc, including its literal epoch values — the ingest example
-# above writes at timestamp 1710000000000, inside this window. The only
-# substitution anywhere in this block is $BACKEND for the literal host, because
-# BACKEND_ADDR is overridable.
+# The documented command's own query and literal epoch values — the ingest example
+# above writes at timestamp 1710000000000, inside this window. $BACKEND replaces
+# the literal host because BACKEND_ADDR is overridable.
+#
+# Note on fidelity: the GET examples run the documented flags as written. The two
+# POST examples necessarily differ — capturing a status code needs
+# -o /dev/null -w '%{http_code}' where the doc uses -sf — so they send the
+# documented method, path and body, and assert the documented status. That is
+# behavioural equivalence, not a byte-for-byte replay.
 BODY=$(curl -sG "$BACKEND/api/v1/query_range" \
     --data-urlencode 'query=sum by (method)(rate(http_requests_total[1m]))' \
     --data-urlencode 'start=1710000000' \

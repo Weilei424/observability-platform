@@ -625,8 +625,11 @@ func TestDocumentedMetricNamesAreRegistered(t *testing.T) {
 var (
 	// A curl invocation, including any backslash-continued lines.
 	curlCmdRe = regexp.MustCompile(`(?s)curl\s(?:[^\n]*\\\n)*[^\n]*`)
-	curlURLRe = regexp.MustCompile(`https?://localhost:8080(/[^\s'"` + "`" + `\\]*)`)
-	dashXRe   = regexp.MustCompile(`-X\s+([A-Z]+)`)
+	// The scheme is optional: runbooks write `curl -sf localhost:8080/readyz`, and
+	// a pattern that required http:// silently skipped every one of them.
+	curlURLRe  = regexp.MustCompile(`(?:https?://)?localhost:8080(/[^\s'"` + "`" + `\\]*)`)
+	backendRef = "localhost:8080"
+	dashXRe    = regexp.MustCompile(`-X\s+([A-Z]+)`)
 )
 
 // curlMethod derives the HTTP method curl would use: an explicit -X wins; -G
@@ -684,6 +687,13 @@ func TestDocumentedCurlExamplesTargetRealRoutes(t *testing.T) {
 			cmd := f.Body[cm[0]:cm[1]]
 			u := curlURLRe.FindStringSubmatch(cmd)
 			if u == nil {
+				// A curl that talks to the backend but whose URL this cannot parse
+				// must fail rather than be skipped. Silent skipping is how a check
+				// that claims to cover every example ends up covering a subset.
+				if strings.Contains(cmd, backendRef) {
+					t.Errorf("%s:%d has a curl against %s whose URL could not be parsed; fix the example or the pattern:\n%s",
+						f.Path, lineOf(f.Body, cm[0]), backendRef, strings.TrimSpace(cmd))
+				}
 				continue
 			}
 			path, _, _ := strings.Cut(u[1], "?")
@@ -712,6 +722,20 @@ func TestDocumentedCurlExamplesTargetRealRoutes(t *testing.T) {
 					f.Path, lineOf(f.Body, cm[0]), method, path, code)
 			}
 		}
+	}
+	// Every curl in the documentation that names the backend must have been
+	// checked. Counting both sides catches a pattern that quietly stops matching.
+	var mentioned int
+	for _, f := range allDocs(t) {
+		for _, cm := range curlCmdRe.FindAllString(f.Body, -1) {
+			if strings.Contains(cm, backendRef) {
+				mentioned++
+			}
+		}
+	}
+	if checked != mentioned {
+		t.Errorf("checked %d curl examples but %d name %s; the difference was skipped silently",
+			checked, mentioned, backendRef)
 	}
 	if checked == 0 {
 		t.Fatal("no localhost:8080 curl examples found; the regexp or the docs changed shape")
