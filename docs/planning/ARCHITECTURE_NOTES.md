@@ -116,10 +116,12 @@ have different record shapes, different flush triggers, and different failure
 modes; sharing a WAL would couple their durability and make a replay failure in
 one a startup failure for both.
 
-**Blocks are immutable and content-addressed.** Nothing rewrites a block in
-place, so a reader never observes a partial mutation, and a block ID never
-depends on a counter a restart could reuse. Updates arrive as new blocks, and
-compaction merges them.
+**Blocks are immutable, and their IDs are random rather than derived.** Nothing
+rewrites a block in place, so a reader never observes a partial mutation; updates
+arrive as new blocks and compaction merges them. The ID is 8 bytes of
+`crypto/rand` — not a content hash and not a counter. A counter would have to
+survive restarts to avoid reusing the name of a block that was just deleted, and
+content addressing would buy deduplication this system has no use for.
 
 **Every durable write is temp file → fsync → atomic rename → directory fsync.**
 A half-written block or chunk is therefore never visible, which is what lets

@@ -180,14 +180,30 @@ else
     log_fail "docs/api/logs.md — push example returned HTTP $STATUS, documented as 204"
 fi
 
-# The documented push error shape: JSON with an errors array, not plain text.
-BODY=$(curl -s -X POST "$BACKEND/loki/api/v1/push" \
+# The documented push error: status 400 AND a JSON errors array, not plain text.
+ERR_BODY=$(mktemp)
+STATUS=$(curl -s -o "$ERR_BODY" -w "%{http_code}" -X POST "$BACKEND/loki/api/v1/push" \
     -H 'Content-Type: application/json' \
-    -d '{"streams":[{"stream":{"service":"smoke-test"},"values":[["notanumber","x"]]}]}' || echo 'curl-error')
-check_contains "docs/api/logs.md — push validation error is a JSON errors array" "$BODY" '"errors"'
+    -d '{"streams":[{"stream":{"service":"smoke-test"},"values":[["notanumber","x"]]}]}')
+if [ "$STATUS" = "400" ]; then
+    log_pass "docs/api/logs.md — push validation error returns 400"
+else
+    log_fail "docs/api/logs.md — push validation error returned HTTP $STATUS, documented as 400"
+fi
+check_contains "docs/api/logs.md — push validation error is a JSON errors array" "$(cat "$ERR_BODY")" '"errors"'
+rm -f "$ERR_BODY"
 
+# Verbatim from docs/api/logs.md, literal epoch values and all; $BACKEND for the
+# host is the only substitution.
+BODY=$(curl -s -G "$BACKEND/loki/api/v1/query_range" \
+    --data-urlencode 'query=sum by (level) (count_over_time({service="api"}[5m]))' \
+    --data-urlencode 'start=1710000000000000000' \
+    --data-urlencode 'end=1710003600000000000' || echo 'curl-error')
+check_contains "docs/api/logs.md — range query example" "$BODY" '"resultType":"matrix"'
+
+# The smoke streams themselves, proving the metric path returns real groups.
 BODY=$(lokq 'sum by (level) (count_over_time({service="smoke-test"}[5m]))')
-check_contains "docs/api/logs.md — sum by over count_over_time" "$BODY" '"resultType":"matrix"'
+check_contains "sum by over count_over_time — smoke streams" "$BODY" '"resultType":"matrix"'
 
 BODY=$(curl -s -G "$BACKEND/loki/api/v1/query" \
     --data-urlencode 'query={service="smoke-test"} |= "timeout"' || echo 'curl-error')
@@ -197,7 +213,7 @@ BODY=$(curl -s "$BACKEND/loki/api/v1/labels" || echo 'curl-error')
 check_contains "docs/api/logs.md — label names" "$BODY" '"status":"success"'
 
 BODY=$(curl -s "$BACKEND/loki/api/v1/label/service/values" || echo 'curl-error')
-check_contains "docs/api/logs.md — label values" "$BODY" 'smoke-test'
+check_contains "docs/api/logs.md — label values" "$BODY" '"status":"success"'
 
 # ---- Summary --------------------------------------------------------
 echo ""

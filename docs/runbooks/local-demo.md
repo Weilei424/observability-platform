@@ -22,6 +22,7 @@ done the **Start the stack** section below.
 ## Prerequisites
 
 - Docker with Compose v2 (`docker compose version` should print v2.x)
+- `make` — every lifecycle command here is a Make target
 - Ports 3000, 8080, and 9090 free
 - `curl`
 - Go, **only** for `make smoke` — that target also runs `go test ./tests/e2e/` to
@@ -111,40 +112,49 @@ This is the part worth doing slowly. Ingest a marker whose value is unique to th
 run, restart the backend, and read the marker back **by value**:
 
 ```bash
-# 1. Ingest a marker with a run-unique value.
 MARKER=$RANDOM$RANDOM
 NOW_MS=$(( $(date +%s) * 1000 ))
-curl -sf -X POST localhost:8080/api/v1/ingest/metrics \
-  -H 'Content-Type: application/json' \
-  -d "{\"metrics\":[{\"name\":\"demo_restart_marker\",\"labels\":{\"run\":\"local\"},\"timestamp_ms\":$NOW_MS,\"value\":$MARKER}]}" \
-  && echo "ingested marker $MARKER"
 
-# 2. Restart only the backend.
-docker compose -f deployments/docker/docker-compose.yml restart backend
-
-# 3. Wait for it to come back before asking it anything. The container is up well
-#    before the process is: WAL replay runs first, and /readyz answers only once
-#    the data directory is writable again.
-for i in $(seq 1 60); do
-  curl -sf localhost:8080/readyz >/dev/null 2>&1 && break
-  sleep 1
-done
-
-# 4. Read the marker back BY VALUE.
-if ! RESPONSE=$(curl -sf -G localhost:8080/api/v1/query \
-      --data-urlencode 'query=demo_restart_marker' 2>/dev/null); then
-  echo "INCONCLUSIVE: the backend did not answer. This is not a data-loss result —"
-  echo "check 'make local-logs' and run step 4 again once it is ready."
-elif echo "$RESPONSE" | grep -q "$MARKER"; then
-  echo "durable: marker $MARKER survived the restart"
+# 1. Ingest a marker with a run-unique value. Everything below is gated on this:
+#    if the marker was never stored, there is nothing to prove either way.
+if ! curl -sf -X POST localhost:8080/api/v1/ingest/metrics \
+      -H 'Content-Type: application/json' \
+      -d "{\"metrics\":[{\"name\":\"demo_restart_marker\",\"labels\":{\"run\":\"local\"},\"timestamp_ms\":$NOW_MS,\"value\":$MARKER}]}" >/dev/null; then
+  echo "INCONCLUSIVE: the backend did not accept the marker, so nothing was tested."
+  echo "Check 'make local-logs' and start again."
 else
-  echo "LOST: the backend answered, but marker $MARKER is not in the response"
+  echo "ingested marker $MARKER"
+
+  # 2. Restart only the backend.
+  docker compose -f deployments/docker/docker-compose.yml restart backend
+
+  # 3. Wait for it to come back before asking it anything. The container is up
+  #    well before the process is: WAL replay runs first, and /readyz answers
+  #    only once the data directory is writable again.
+  for i in $(seq 1 60); do
+    curl -sf localhost:8080/readyz >/dev/null 2>&1 && break
+    sleep 1
+  done
+
+  # 4. Read the marker back BY VALUE.
+  if ! RESPONSE=$(curl -sf -G localhost:8080/api/v1/query \
+        --data-urlencode 'query=demo_restart_marker' 2>/dev/null); then
+    echo "INCONCLUSIVE: the backend did not answer. This is not a data-loss result —"
+    echo "check 'make local-logs' and run step 4 again once it is ready."
+  elif echo "$RESPONSE" | grep -q "$MARKER"; then
+    echo "durable: marker $MARKER survived the restart"
+  else
+    echo "LOST: the backend answered, but marker $MARKER is not in the response"
+  fi
 fi
 ```
 
-Steps 3 and 4 are separate on purpose. A query that fails because the backend is
-still replaying its WAL is not evidence of data loss, and a proof that cannot tell
-those two apart is not a proof — it just prints a scary word at a race it lost.
+The three outcomes are deliberately distinct. A marker that was never accepted,
+and a query that failed because the backend is still replaying its WAL, are both
+**inconclusive** — neither is evidence of data loss. `LOST` is printed only when
+the backend answered a query and the marker was genuinely absent. A proof that
+cannot tell those apart is not a proof; it just prints a scary word at a race it
+lost, or at a step that never ran.
 
 **Why it is written this way.** Phase 5.1 shipped a restart check that queried a
 live series the producers keep writing. Fresh post-restart samples satisfied it

@@ -97,8 +97,14 @@ These are properties of the whole system, not of the query languages.
   render unless you supply `admin.password` or `admin.existingSecret`. The Compose
   demo does the opposite on purpose — `deployments/docker/docker-compose.yml` sets
   `GF_SECURITY_ADMIN_PASSWORD: admin` so the local walkthrough needs no setup.
-  That stack is for localhost only; do not expose it, and do not carry that
-  pattern into anything deployed.
+- **The Compose demo listens on every host interface, not just loopback.** Its
+  port mappings are written `"8080:8080"`, `"3000:3000"`, and `"9090:9090"`, which
+  Docker publishes on `0.0.0.0`. An unauthenticated backend, a Prometheus with no
+  access control, and a Grafana whose password is `admin` are therefore reachable
+  from anything that can route to the host — not only from localhost. Run it on a
+  network you trust, or bind it down first by rewriting those three mappings as
+  `"127.0.0.1:8080:8080"` and so on. Nothing in this repository needs the demo to
+  be reachable off-host.
 - **Log structured metadata is rejected, not dropped.** A Loki push carrying a
   third element per entry fails rather than silently discarding it.
 

@@ -139,10 +139,14 @@ BODY=$(curl -sG "$BACKEND/api/v1/query" \
     --data-urlencode 'query=sum(rate(http_requests_total[1m]))' || echo '{"status":"curl-error"}')
 check_success "docs/api/metrics.md — instant query" "$BODY"
 
+# Verbatim from the doc, including its literal epoch values — the ingest example
+# above writes at timestamp 1710000000000, inside this window. The only
+# substitution anywhere in this block is $BACKEND for the literal host, because
+# BACKEND_ADDR is overridable.
 BODY=$(curl -sG "$BACKEND/api/v1/query_range" \
     --data-urlencode 'query=sum by (method)(rate(http_requests_total[1m]))' \
-    --data-urlencode "start=$START_S" \
-    --data-urlencode "end=$NOW_S" \
+    --data-urlencode 'start=1710000000' \
+    --data-urlencode 'end=1710003600' \
     --data-urlencode 'step=30' || echo '{"status":"curl-error"}')
 check_success "docs/api/metrics.md — range query" "$BODY"
 

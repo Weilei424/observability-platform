@@ -707,7 +707,7 @@ against the system by `go test ./...`.
 - [x] 6. `TestDocumentedMakeTargetsExist`
 - [x] 7. `TestDocumentedConfigKeysAreReal` — every `OBS_*` named in prose has a `SetDefault`. Viper ignores unknown env vars silently, so a typo'd key is invisible at runtime; 5.2's Helm ConfigMap rule extended to prose
 - [x] 8. `TestDocumentedMetricNamesAreRegistered` — 5.3's dashboard rule extended to prose
-- [x] 9. `TestDocumentedCurlExamplesTargetRealRoutes`
+- [x] 9. `TestDocumentedCurlExamplesTargetRealRoutes` — parses each `curl` invocation for the **method it would use** (`-X`, `-G`, `--data`) and issues exactly that, against a **fully wired** server. 404, 405, and any 5xx all fail: a path that answers GET proves nothing about a documented POST, and an endpoint that 500s because the server is not wired to serve it is one no reader can run
 - [x] **Every extractor asserts a non-zero find count** — a regex that matches nothing passes silently, the same failure mode the `smoke-logs` comment already records for a `-run` filter. Each table also carries an expected-row-count constant, so a formatting change that drops rows fails instead of passing quietly
 - [x] Every failure names the file, the line, and the fix — these tests fail for writers, not for the person who wrote them
 
@@ -719,11 +719,12 @@ against the system by `go test ./...`.
 
 **Verification**
 - [x] `go test ./...` green, including all ten new checks — verified at `9353863`: 10 checks, 14 PASS lines with subtests, plus `go vet` clean. Each check was mutation-tested (a deliberately wrong row, link, target, key, metric name, and URL each produced the expected failure) so none of them passes vacuously
-- [x] `make smoke` executes the documented examples against a running backend — every example in `docs/api/` is now automated, including the ingest and Loki push bodies, the documented optional-`labels` behaviour, and the documented JSON push-error shape: 13/13 in `smoke.sh` and 31/31 in `logs_smoke.sh` against a `go run ./cmd/server` backend. Not yet run against the Compose stack
+- [x] `make smoke` executes the documented examples against a running backend — every `curl` in `docs/api/` is run with its own literal command line, the only substitution being `$BACKEND` for the host (`BACKEND_ADDR` is overridable). That includes both POST bodies, the documented optional-`labels` behaviour, and the push error's documented **400 status and JSON `errors` array**: 13/13 in `smoke.sh`, 33/33 in `logs_smoke.sh`, against a `go run ./cmd/server` backend. Not yet run against the Compose stack
 - [ ] Verify: a fresh-clone pass following only the README reaches a working demo without guessing — **partially closed.** A fresh `git clone` at `9353863` builds and passes the full suite including all ten docs checks, which also proves they carry no path assumptions. The `make local-up` walkthrough itself is **unverified**: Docker was unavailable in the implementing environment. Someone with Docker must walk `docs/runbooks/local-demo.md` top to bottom, including the durability proof, before this line closes
 
 **Deferred from 5.4**
 - [ ] OpenAPI 3.1 specification for the HTTP API — only when a consumer needs codegen or a Swagger UI. Markdown was chosen in 5.4 because the audience reads the reference rather than importing it, and faithful schemas for the polymorphic vector/matrix/scalar envelope are a large hand-written artifact serving nobody today. The route-coverage tests already give the drift protection a spec would.
+- [ ] Bind the Compose demo's published ports to loopback — `"127.0.0.1:8080:8080"` and the same for 3000 and 9090. Today they publish on `0.0.0.0`, which puts an unauthenticated backend and an `admin`/`admin` Grafana on the local network. 5.4 documented the exposure rather than changing it, because altering a Phase 5.1 runtime deliverable is outside a documentation phase — but the fix is one line per service and nothing here needs off-host access.
 - [ ] A docs check for parameter *semantics* — the Phase 5.4 checks compare names (routes, keys, metrics, links) and execute query strings, but cannot derive from prose which value formats a parameter accepts or what an error body looks like. Codex's review found three such errors that every check passed over. The smoke scripts now assert the specific behaviours; the class is still unguarded.
 - [ ] A test that every symbol named in an architecture diagram exists — the 5.4 diagrams were checked by a one-off grep over `internal/`, not by anything that runs in CI.
 

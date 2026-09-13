@@ -11,7 +11,8 @@ package e2e_test
 
 import (
 	"errors"
-	"fmt"
+	"io"
+	"log/slog"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -24,8 +25,11 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/masonwheeler/observability-platform/internal/api"
+	"github.com/masonwheeler/observability-platform/internal/config"
 	"github.com/masonwheeler/observability-platform/internal/logs"
 	"github.com/masonwheeler/observability-platform/internal/metrics"
+	"github.com/masonwheeler/observability-platform/internal/observability"
 )
 
 const docsRoot = "../.."
@@ -237,7 +241,6 @@ const (
 	// escaped pipes are parked on this placeholder first.
 	escapedPipe = "\x00"
 )
-
 
 // sectionAfter returns the body of a Markdown section and its start offset. The
 // section ends at the next heading of the same or higher level — stopping only at
@@ -616,54 +619,101 @@ func TestDocumentedMetricNamesAreRegistered(t *testing.T) {
 	}
 }
 
-// Example URLs are the lines a reader pastes first. This checks each one against
-// the real router by asking whether it routes at all.
-var curlURLRe = regexp.MustCompile(`https?://localhost:8080(/[^\s'"` + "`" + `\\]*)`)
+// Example URLs are the lines a reader pastes first. This runs each documented
+// curl against the real router **with the method that curl would use**, because
+// a path that answers GET proves nothing about a documented POST.
+var (
+	// A curl invocation, including any backslash-continued lines.
+	curlCmdRe = regexp.MustCompile(`(?s)curl\s(?:[^\n]*\\\n)*[^\n]*`)
+	curlURLRe = regexp.MustCompile(`https?://localhost:8080(/[^\s'"` + "`" + `\\]*)`)
+	dashXRe   = regexp.MustCompile(`-X\s+([A-Z]+)`)
+)
+
+// curlMethod derives the HTTP method curl would use: an explicit -X wins; -G
+// forces the data into the query string and keeps GET; a body flag otherwise
+// implies POST.
+func curlMethod(cmd string) string {
+	if m := dashXRe.FindStringSubmatch(cmd); m != nil {
+		return m[1]
+	}
+	if regexp.MustCompile(`(^|\s)-[a-zA-Z]*G`).MatchString(cmd) {
+		return http.MethodGet
+	}
+	if strings.Contains(cmd, "--data") || regexp.MustCompile(`(^|\s)-[a-zA-Z]*d(\s|$)`).MatchString(cmd) {
+		return http.MethodPost
+	}
+	return http.MethodGet
+}
+
+// fullyWiredServer builds a server with every collaborator populated, including
+// the logs query engine. A Deps missing LogQuery makes every Loki query endpoint
+// answer 500, which would let this check pass on endpoints no reader can use.
+func fullyWiredServer(t *testing.T) *api.Server {
+	t.Helper()
+	dir := t.TempDir()
+	logStore, err := logs.NewStore(
+		filepath.Join(dir, "logs", "wal"),
+		filepath.Join(dir, "logs", "chunks"),
+		filepath.Join(dir, "logs", "index"),
+		1<<20, 1, 8<<20,
+	)
+	if err != nil {
+		t.Fatalf("new logs store: %v", err)
+	}
+	t.Cleanup(func() { _ = logStore.Close() })
+
+	mstore := metrics.NewMemoryStore()
+	reg, _ := observability.NewRegistry(observability.RegistryOptions{Cardinality: mstore})
+	return api.New(api.Deps{
+		Config:      &config.Config{HTTPAddr: ":0", DataDir: dir, LogLevel: "info"},
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Ingester:    mstore,
+		Engine:      metrics.NewQueryEngine(mstore),
+		Registry:    reg,
+		LogIngester: logStore,
+		LogQuery:    logs.NewQueryEngine(logStore),
+	})
+}
 
 func TestDocumentedCurlExamplesTargetRealRoutes(t *testing.T) {
-	dataDir := t.TempDir()
-	walDir := filepath.Join(dataDir, "metrics", "wal")
-	if err := os.MkdirAll(walDir, 0o755); err != nil {
-		t.Fatalf("mkdir walDir: %v", err)
-	}
-	srv, w := newTestServer(t, dataDir, walDir)
-	defer w.Close()
-
-	// routes reports whether the router answers this path on a method a documented
-	// example could use, and the statuses it saw. A handler may legitimately reply
-	// 400 to a request with no parameters, so 400 counts as reached. 404 (no such
-	// path) and 405 (path exists, but not for this method) do not: every example in
-	// these documents is a GET or a POST, so a path answering neither is one no
-	// reader can exercise as written.
-	routes := func(path string) (bool, string) {
-		var seen []string
-		for _, method := range []string{http.MethodGet, http.MethodPost} {
-			rr := httptest.NewRecorder()
-			srv.ServeHTTP(rr, httptest.NewRequest(method, path, nil))
-			seen = append(seen, fmt.Sprintf("%s=%d", method, rr.Code))
-			if rr.Code != http.StatusNotFound && rr.Code != http.StatusMethodNotAllowed {
-				return true, strings.Join(seen, " ")
-			}
-		}
-		return false, strings.Join(seen, " ")
-	}
+	srv := fullyWiredServer(t)
 
 	var checked int
 	for _, f := range allDocs(t) {
-		for _, m := range curlURLRe.FindAllStringSubmatchIndex(f.Body, -1) {
-			raw := f.Body[m[2]:m[3]]
-			path, _, _ := strings.Cut(raw, "?")
+		for _, cm := range curlCmdRe.FindAllStringIndex(f.Body, -1) {
+			cmd := f.Body[cm[0]:cm[1]]
+			u := curlURLRe.FindStringSubmatch(cmd)
+			if u == nil {
+				continue
+			}
+			path, _, _ := strings.Cut(u[1], "?")
 			if path == "" || strings.Contains(path, "$") {
 				continue // shell-interpolated path; nothing stable to check
 			}
+			method := curlMethod(cmd)
 			checked++
-			if ok, seen := routes(path); !ok {
-				t.Errorf("%s:%d shows an example against %q, which no reader can exercise as written (%s)",
-					f.Path, lineOf(f.Body, m[0]), path, seen)
+
+			rr := httptest.NewRecorder()
+			srv.ServeHTTP(rr, httptest.NewRequest(method, path, nil))
+			// The request carries no parameters, so 400 is the expected answer from
+			// an endpoint with required ones and means the example reached its
+			// handler. 404 (no such path), 405 (not that method) and any 5xx (the
+			// server is not wired to serve it) all mean a reader cannot run this
+			// line as written.
+			switch code := rr.Code; {
+			case code == http.StatusNotFound:
+				t.Errorf("%s:%d documents `curl ... %s %s`, which the server does not route",
+					f.Path, lineOf(f.Body, cm[0]), method, path)
+			case code == http.StatusMethodNotAllowed:
+				t.Errorf("%s:%d documents `curl ... %s %s`, but that path does not accept %s",
+					f.Path, lineOf(f.Body, cm[0]), method, path, method)
+			case code >= 500:
+				t.Errorf("%s:%d documents `curl ... %s %s`, which answers %d — a reader running it gets a server error",
+					f.Path, lineOf(f.Body, cm[0]), method, path, code)
 			}
 		}
 	}
 	if checked == 0 {
-		t.Fatal("no localhost:8080 example URLs found; the regexp or the docs changed shape")
+		t.Fatal("no localhost:8080 curl examples found; the regexp or the docs changed shape")
 	}
 }
