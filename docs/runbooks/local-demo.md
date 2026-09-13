@@ -23,7 +23,11 @@ done the **Start the stack** section below.
 
 - Docker with Compose v2 (`docker compose version` should print v2.x)
 - Ports 3000, 8080, and 9090 free
-- No Go toolchain needed for this path
+- `curl`
+- Go, **only** for `make smoke` — that target also runs `go test ./tests/e2e/` to
+  check the Grafana provisioning files. Without Go, run the two scripts directly
+  (`bash tests/e2e/smoke.sh` and `bash tests/e2e/logs_smoke.sh`); they need only
+  `curl` and hit the running backend. Everything else here is Docker-only.
 
 ## Start the stack
 
@@ -112,17 +116,35 @@ MARKER=$RANDOM$RANDOM
 NOW_MS=$(( $(date +%s) * 1000 ))
 curl -sf -X POST localhost:8080/api/v1/ingest/metrics \
   -H 'Content-Type: application/json' \
-  -d "{\"metrics\":[{\"name\":\"demo_restart_marker\",\"labels\":{\"run\":\"local\"},\"timestamp_ms\":$NOW_MS,\"value\":$MARKER}]}"
+  -d "{\"metrics\":[{\"name\":\"demo_restart_marker\",\"labels\":{\"run\":\"local\"},\"timestamp_ms\":$NOW_MS,\"value\":$MARKER}]}" \
+  && echo "ingested marker $MARKER"
 
 # 2. Restart only the backend.
 docker compose -f deployments/docker/docker-compose.yml restart backend
 
-# 3. Read it back BY VALUE. The same number means the WAL replayed it.
-curl -sG localhost:8080/api/v1/query --data-urlencode 'query=demo_restart_marker' \
-  | grep -q "$MARKER" \
-  && echo "durable: marker $MARKER survived the restart" \
-  || echo "LOST: marker $MARKER is gone"
+# 3. Wait for it to come back before asking it anything. The container is up well
+#    before the process is: WAL replay runs first, and /readyz answers only once
+#    the data directory is writable again.
+for i in $(seq 1 60); do
+  curl -sf localhost:8080/readyz >/dev/null 2>&1 && break
+  sleep 1
+done
+
+# 4. Read the marker back BY VALUE.
+if ! RESPONSE=$(curl -sf -G localhost:8080/api/v1/query \
+      --data-urlencode 'query=demo_restart_marker' 2>/dev/null); then
+  echo "INCONCLUSIVE: the backend did not answer. This is not a data-loss result —"
+  echo "check 'make local-logs' and run step 4 again once it is ready."
+elif echo "$RESPONSE" | grep -q "$MARKER"; then
+  echo "durable: marker $MARKER survived the restart"
+else
+  echo "LOST: the backend answered, but marker $MARKER is not in the response"
+fi
 ```
+
+Steps 3 and 4 are separate on purpose. A query that fails because the backend is
+still replaying its WAL is not evidence of data loss, and a proof that cannot tell
+those two apart is not a proof — it just prints a scary word at a race it lost.
 
 **Why it is written this way.** Phase 5.1 shipped a restart check that queried a
 live series the producers keep writing. Fresh post-restart samples satisfied it

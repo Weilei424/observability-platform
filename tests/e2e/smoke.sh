@@ -112,6 +112,29 @@ check_success "Panel 5 — active_connections" "$BODY"
 echo ""
 echo "-- Documented examples (docs/api/metrics.md) --"
 
+# The ingest example, verbatim from docs/api/metrics.md — fixed timestamp included.
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BACKEND/api/v1/ingest/metrics" \
+    -H 'Content-Type: application/json' \
+    -d '{"metrics":[
+        {"name":"http_requests_total","labels":{"service":"api","method":"GET","status":"200"},"timestamp_ms":1710000000000,"value":10},
+        {"name":"active_connections","labels":{"service":"api"},"timestamp_ms":1710000000000,"value":14}
+      ]}')
+if [ "$STATUS" = "204" ]; then
+    log_pass "docs/api/metrics.md — ingest example (HTTP 204)"
+else
+    log_fail "docs/api/metrics.md — ingest example returned HTTP $STATUS, documented as 204"
+fi
+
+# labels is documented as optional; a sample without it must be accepted.
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BACKEND/api/v1/ingest/metrics" \
+    -H 'Content-Type: application/json' \
+    -d "{\"metrics\":[{\"name\":\"smoke_no_labels\",\"timestamp_ms\":$NOW_MS,\"value\":1}]}")
+if [ "$STATUS" = "204" ]; then
+    log_pass "docs/api/metrics.md — labels omitted is accepted (HTTP 204)"
+else
+    log_fail "docs/api/metrics.md — labels omitted returned HTTP $STATUS; the doc says the field is optional"
+fi
+
 BODY=$(curl -sG "$BACKEND/api/v1/query" \
     --data-urlencode 'query=sum(rate(http_requests_total[1m]))' || echo '{"status":"curl-error"}')
 check_success "docs/api/metrics.md — instant query" "$BODY"

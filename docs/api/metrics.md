@@ -23,8 +23,8 @@ data survives a crash.
 
 | Field | Required | Notes |
 |---|---|---|
-| `name` | yes | Metric name |
-| `labels` | yes | Label set; may be empty |
+| `name` | yes | Metric name; becomes the `__name__` label |
+| `labels` | no | Label set. May be omitted or `{}` — the sample is then identified by its name alone |
 | `timestamp_ms` | yes | Unix milliseconds |
 | `value` | yes | Float |
 
@@ -69,7 +69,7 @@ Evaluates an expression at a single point in time.
 | Parameter | Required | Default | Notes |
 |---|---|---|---|
 | `query` | yes | — | PromQL subset; see [limitations.md](limitations.md) |
-| `time` | no | now | Unix seconds or a Prometheus duration |
+| `time` | no | now | Unix seconds or RFC3339; not a duration |
 
 **Example**
 
@@ -101,8 +101,8 @@ time-series panels call.
 | Parameter | Required | Default | Notes |
 |---|---|---|---|
 | `query` | yes | — | PromQL subset |
-| `start` | yes | — | No default — an absent `start` is an error, not "the beginning of time" |
-| `end` | yes | — | Must be >= `start` |
+| `start` | yes | — | Unix seconds or RFC3339. No default — an absent `start` is an error, not "the beginning of time" |
+| `end` | yes | — | Unix seconds or RFC3339; must be >= `start` |
 | `step` | yes | — | Duration; must be greater than zero |
 
 **Example**

@@ -4,9 +4,14 @@ A Loki-compatible subset: Grafana's Loki datasource talks to these endpoints
 unmodified. Conventions are in [README.md](README.md); supported query forms are
 in [limitations.md](limitations.md).
 
-Errors on this surface are **plain text** (`text/plain; charset=utf-8`), not the
-Prometheus JSON envelope — that is what upstream Loki does, and Grafana surfaces
-the message directly.
+Error shapes differ between push and query, so check the one you are calling:
+
+| Endpoint | Error body |
+|---|---|
+| `push` | JSON — `{"errors":[...]}` for validation failures, `{"error":"..."}` for an internal failure |
+| every query and label endpoint | **Plain text** (`text/plain; charset=utf-8`), which is what upstream Loki does and what Grafana surfaces directly |
+
+Neither uses the Prometheus `{"status":"error","errorType":...}` envelope.
 
 ---
 
@@ -53,7 +58,9 @@ curl -sf -X POST 'http://localhost:8080/loki/api/v1/push' \
 | Status | Body | When |
 |---|---|---|
 | 204 | empty | Every entry accepted and written to the WAL |
-| 400 | error list | Any entry invalid, unsupported content type, or malformed JSON |
+| 400 | `{"errors":[{"index":0,"field":"...","message":"..."}]}` | One or more entries failed validation |
+| 400 | `{"error":"..."}` | Malformed JSON, unsupported `Content-Type`, or an empty body |
+| 500 | `{"error":"internal error"}` | An entry passed validation but the append failed. Earlier entries in the batch may already have landed; the handler stops at the first failure and does not attempt the rest |
 
 ---
 

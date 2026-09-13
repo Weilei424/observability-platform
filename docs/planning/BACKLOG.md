@@ -715,15 +715,16 @@ against the system by `go test ./...`.
 - [x] 10. `TestStorageLayoutDocMatchesDisk` — ingest metrics and a log stream into a `t.TempDir()`, call `FlushBlock()` and `logs.Store.Flush()`, walk the resulting tree, and require every path produced to be documented and every path documented to be produced. The check the Phase-0 layout section never had, and the reason it drifted
 
 **Executable examples**
-- [x] `tests/e2e/smoke.sh` — a closing block running the documented curl examples verbatim (instant, range, labels, series, Loki push, Loki `query_range`), asserting `"status":"success"`. Test 9 keeps the URLs honest without Docker; this keeps them honest against a running backend
+- [x] `tests/e2e/smoke.sh` and `logs_smoke.sh` — closing blocks running **every** documented curl example verbatim, including the POST bodies (ingest, Loki push), asserting the documented status codes and error shapes. Test 9 keeps the URLs honest without Docker; these keep the behaviour honest against a running backend
 
 **Verification**
 - [x] `go test ./...` green, including all ten new checks — verified at `9353863`: 10 checks, 14 PASS lines with subtests, plus `go vet` clean. Each check was mutation-tested (a deliberately wrong row, link, target, key, metric name, and URL each produced the expected failure) so none of them passes vacuously
-- [x] `make smoke` executes the documented examples against a running backend — 11/11 in `smoke.sh` and 29/29 in `logs_smoke.sh` against a `go run ./cmd/server` backend, and the ingest and Loki push examples were additionally run **verbatim** from `docs/api/` (both 204). Not yet run against the Compose stack
+- [x] `make smoke` executes the documented examples against a running backend — every example in `docs/api/` is now automated, including the ingest and Loki push bodies, the documented optional-`labels` behaviour, and the documented JSON push-error shape: 13/13 in `smoke.sh` and 31/31 in `logs_smoke.sh` against a `go run ./cmd/server` backend. Not yet run against the Compose stack
 - [ ] Verify: a fresh-clone pass following only the README reaches a working demo without guessing — **partially closed.** A fresh `git clone` at `9353863` builds and passes the full suite including all ten docs checks, which also proves they carry no path assumptions. The `make local-up` walkthrough itself is **unverified**: Docker was unavailable in the implementing environment. Someone with Docker must walk `docs/runbooks/local-demo.md` top to bottom, including the durability proof, before this line closes
 
 **Deferred from 5.4**
 - [ ] OpenAPI 3.1 specification for the HTTP API — only when a consumer needs codegen or a Swagger UI. Markdown was chosen in 5.4 because the audience reads the reference rather than importing it, and faithful schemas for the polymorphic vector/matrix/scalar envelope are a large hand-written artifact serving nobody today. The route-coverage tests already give the drift protection a spec would.
+- [ ] A docs check for parameter *semantics* — the Phase 5.4 checks compare names (routes, keys, metrics, links) and execute query strings, but cannot derive from prose which value formats a parameter accepts or what an error body looks like. Codex's review found three such errors that every check passed over. The smoke scripts now assert the specific behaviours; the class is still unguarded.
 - [ ] A test that every symbol named in an architecture diagram exists — the 5.4 diagrams were checked by a one-off grep over `internal/`, not by anything that runs in CI.
 
 ---

@@ -37,8 +37,12 @@ Variable segments are written `<like-this>`. Directory rows end in `/`.
 | `data/logs/index/` | `logs.NewStore` | Stream index |
 | `data/logs/index/streams.index` | `logs.Store.Flush` | Label pair → stream IDs, and stream ID → chunk references |
 
-A block ID and a log chunk name are both content-derived, so neither depends on
-wall-clock ordering or a counter that a restart could reuse.
+Neither a block ID nor a log chunk name is derived from its contents. A block ID
+is 8 bytes of `crypto/rand` as hex; a log chunk name is
+`<stream-id>-<min-ts>-<4 random bytes>.chunk`. Randomness rather than a counter is
+the point: a counter would have to survive restarts to avoid reusing a name that a
+just-deleted file still occupies, and a timestamp alone collides when two chunks
+for one stream share a minimum timestamp.
 
 ## File formats
 
@@ -76,9 +80,16 @@ crash-at-write happened.
 
 `level` is the compaction level: 1 is a freshly flushed head block, higher values
 are the result of merges. `sources` lists the block IDs merged into a compacted
-block. `max_gen` is the highest per-sample write generation in the block; at
-startup it seeds the in-memory generation counter so replayed and new writes
-always outrank persisted data under last-write-wins.
+block.
+
+`max_gen` is the highest per-sample write generation in the block, and it is
+**not** what seeds the generation counter at startup. That floor is reconstructed
+by decoding each block's chunks, so it can never depend on a `meta.json` field
+that corruption could have altered. `max_gen` is used instead as a cross-check on
+compaction survivors: a block with `sources` whose stored `max_gen` disagrees with
+the generations actually in its chunks is demoted to failed rather than trusted,
+because trusting it would authorize deleting the source blocks it claims to
+replace. For an ordinary flushed block, a stale `max_gen` is harmless.
 
 ### Block `index`, `postings`, `chunks`
 
@@ -89,7 +100,16 @@ an index lookup rather than a scan.
 
 ### Log chunk file
 
-A 41-byte header followed by a DEFLATE-compressed entry block:
+A chunk file is **two headers and a payload**. The outer header carries stream
+identity so a chunk can be attributed without consulting the index:
+
+```text
+magic(4) · version(1) · streamID(8) · labelCount(1)
+then per label: nameLen(1) · name · valueLen(2) · value
+```
+
+The magic is `0x9C 'L' 'F' 0x01` and the file version is 1. After it comes the
+chunk itself — a 41-byte header followed by a DEFLATE-compressed entry block:
 
 ```text
 magic(4) · version(1) · minTs(8) · maxTs(8) · numEntries(4)
@@ -101,8 +121,9 @@ bounds and counts are **authenticated by a header-only read** — the index can
 trust a chunk's range without decompressing it. `payloadCRC` covers the
 compressed body.
 
-Version 1 chunks (which lacked the header CRC) are rejected with a version error
-rather than decoded, matching the metrics chunk format's policy of refusing
+Note that the two versions are independent: the chunk-file wrapper is at version
+1 while the chunk format inside it is at version 2. Chunk format version 1 (which
+lacked the header CRC) is rejected with a version error rather than decoded, matching the metrics chunk format's policy of refusing
 superseded layouts instead of carrying multi-version decoders.
 
 A chunk's uncompressed size is capped at 128 MiB, which bounds the buffer a

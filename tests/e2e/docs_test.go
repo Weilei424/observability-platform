@@ -11,6 +11,7 @@ package e2e_test
 
 import (
 	"errors"
+	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -628,18 +629,23 @@ func TestDocumentedCurlExamplesTargetRealRoutes(t *testing.T) {
 	srv, w := newTestServer(t, dataDir, walDir)
 	defer w.Close()
 
-	// routes reports whether the router answers this path at all. A handler may
-	// legitimately reply 400 (a missing query parameter); only 404 means the path
-	// reaches nothing.
-	routes := func(path string) bool {
+	// routes reports whether the router answers this path on a method a documented
+	// example could use, and the statuses it saw. A handler may legitimately reply
+	// 400 to a request with no parameters, so 400 counts as reached. 404 (no such
+	// path) and 405 (path exists, but not for this method) do not: every example in
+	// these documents is a GET or a POST, so a path answering neither is one no
+	// reader can exercise as written.
+	routes := func(path string) (bool, string) {
+		var seen []string
 		for _, method := range []string{http.MethodGet, http.MethodPost} {
 			rr := httptest.NewRecorder()
 			srv.ServeHTTP(rr, httptest.NewRequest(method, path, nil))
-			if rr.Code != http.StatusNotFound {
-				return true
+			seen = append(seen, fmt.Sprintf("%s=%d", method, rr.Code))
+			if rr.Code != http.StatusNotFound && rr.Code != http.StatusMethodNotAllowed {
+				return true, strings.Join(seen, " ")
 			}
 		}
-		return false
+		return false, strings.Join(seen, " ")
 	}
 
 	var checked int
@@ -651,9 +657,9 @@ func TestDocumentedCurlExamplesTargetRealRoutes(t *testing.T) {
 				continue // shell-interpolated path; nothing stable to check
 			}
 			checked++
-			if !routes(path) {
-				t.Errorf("%s:%d shows an example against %q, which the server does not route (404 on both GET and POST)",
-					f.Path, lineOf(f.Body, m[0]), path)
+			if ok, seen := routes(path); !ok {
+				t.Errorf("%s:%d shows an example against %q, which no reader can exercise as written (%s)",
+					f.Path, lineOf(f.Body, m[0]), path, seen)
 			}
 		}
 	}

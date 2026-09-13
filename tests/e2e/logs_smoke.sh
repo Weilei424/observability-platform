@@ -170,6 +170,22 @@ fi
 echo ""
 echo "-- Documented examples (docs/api/logs.md) --"
 
+# The push example, verbatim from docs/api/logs.md.
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BACKEND/loki/api/v1/push" \
+    -H 'Content-Type: application/json' \
+    -d "{\"streams\":[{\"stream\":{\"service\":\"api\",\"level\":\"info\"},\"values\":[[\"$(date +%s)000000000\",\"request completed\"]]}]}")
+if [ "$STATUS" = "204" ]; then
+    log_pass "docs/api/logs.md — push example (HTTP 204)"
+else
+    log_fail "docs/api/logs.md — push example returned HTTP $STATUS, documented as 204"
+fi
+
+# The documented push error shape: JSON with an errors array, not plain text.
+BODY=$(curl -s -X POST "$BACKEND/loki/api/v1/push" \
+    -H 'Content-Type: application/json' \
+    -d '{"streams":[{"stream":{"service":"smoke-test"},"values":[["notanumber","x"]]}]}' || echo 'curl-error')
+check_contains "docs/api/logs.md — push validation error is a JSON errors array" "$BODY" '"errors"'
+
 BODY=$(lokq 'sum by (level) (count_over_time({service="smoke-test"}[5m]))')
 check_contains "docs/api/logs.md — sum by over count_over_time" "$BODY" '"resultType":"matrix"'
 

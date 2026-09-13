@@ -92,9 +92,13 @@ These are properties of the whole system, not of the query languages.
   deletes whole blocks.
 - **Retention is off by default.** `retention` defaults to `0s`, which means keep
   everything forever. Set `OBS_RETENTION` to enable deletion.
-- **Grafana credentials come from the environment.** No password is committed
-  anywhere; the Helm chart fails to render if you supply neither `admin.password`
-  nor `admin.existingSecret`.
+- **Grafana credentials differ by runtime, and the Compose demo ships a
+  throwaway password.** The Kubernetes path commits none: the Helm chart fails to
+  render unless you supply `admin.password` or `admin.existingSecret`. The Compose
+  demo does the opposite on purpose — `deployments/docker/docker-compose.yml` sets
+  `GF_SECURITY_ADMIN_PASSWORD: admin` so the local walkthrough needs no setup.
+  That stack is for localhost only; do not expose it, and do not carry that
+  pattern into anything deployed.
 - **Log structured metadata is rejected, not dropped.** A Loki push carrying a
   third element per entry fails rather than silently discarding it.
 

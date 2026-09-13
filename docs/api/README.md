@@ -44,12 +44,23 @@ envelope; each surface documents its own.
 
 ## Time parameters
 
-`time`, `start`, and `end` on the Prometheus-compatible endpoints accept a unix
-timestamp in seconds (fractional allowed) or a Prometheus duration. `step`
-accepts a duration. Accepted units: `ms`, `s`, `m`, `h`, `d`, `w`, `y`.
+Timestamps and durations are not interchangeable, and the two surfaces differ.
 
-The Loki-compatible endpoints take nanosecond unix timestamps or RFC3339, and
-additionally accept `since` as a relative window.
+| Parameter | Accepts |
+|---|---|
+| `time`, `start`, `end` (Prometheus) | Unix seconds as an integer or float, or RFC3339 / RFC3339Nano. **Not a duration** |
+| `step` (Prometheus) | Float seconds, or a Prometheus duration |
+| `time`, `start`, `end` (Loki) | Unix nanoseconds, Unix seconds, float seconds, or RFC3339 / RFC3339Nano |
+| `since` (Loki) | A Prometheus duration, measured back from the anchor |
+| `step` (Loki) | Float seconds or a Prometheus duration |
+
+Prometheus duration units are `ms`, `s`, `m`, `h`, `d`, `w`, `y`; Go's forms
+(`1.5h`, `150ns`) are not accepted for `since`.
+
+On the Loki endpoints a bare integer is read by its **string length**, as
+upstream Loki does: 10 characters or fewer is seconds, longer is nanoseconds. A
+float (one containing `.`) is always seconds, and its precision is rounded to
+milliseconds.
 
 ## Methods
 
