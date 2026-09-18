@@ -40,6 +40,16 @@ spec:
               containerPort: {{ .Values.service.port }}
               protocol: TCP
           env:
+            # Grafana listens on 3000 unless told otherwise, so service.port has
+            # to reach the process and not only the manifest. Without this,
+            # --set service.port=3100 renamed the containerPort and retargeted
+            # the readiness probe while Grafana kept listening on 3000: the
+            # chart rendered and installed fine, and `helm install --wait` then
+            # timed out probing a port nothing was bound to. Same rule the
+            # backend chart states for OBS_HTTP_ADDR — service.port is the sole
+            # owner of the listen port.
+            - name: GF_SERVER_HTTP_PORT
+              value: {{ .Values.service.port | quote }}
             - name: GF_SECURITY_ADMIN_USER
               value: {{ .Values.admin.user | quote }}
             - name: GF_SECURITY_ADMIN_PASSWORD
