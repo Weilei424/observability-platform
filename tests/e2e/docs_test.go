@@ -544,7 +544,12 @@ var nonBackendEnvKeys = map[string]string{
 	"OBS_COMPOSE_PROJECT": "tests/e2e/compose_smoke.sh",
 	"OBS_COMPOSE_KEEP_UP": "tests/e2e/compose_smoke.sh",
 	"OBS_INSTANCE":        "producers chart, set from the downward API (see TestProducersCarryPodInstanceLabel)",
-	"OBS_LOG_LEVLE":       "a deliberate misspelling in deployments/helm/README.md, showing that Viper ignores unknown keys; helm_test.go asserts that install succeeds with it",
+	"OBS_KIND_KEEP_UP":    "tests/e2e/kind_smoke.sh",
+	// OBS_KIND_REPLACE_CLUSTER opts into deleting a pre-existing kind cluster.
+	// The script refuses one by default, so the runbook has to name the escape
+	// hatch for anyone who hits the refusal.
+	"OBS_KIND_REPLACE_CLUSTER": "tests/e2e/kind_smoke.sh",
+	"OBS_LOG_LEVLE":            "a deliberate misspelling in deployments/helm/README.md, showing that Viper ignores unknown keys; helm_test.go asserts that install succeeds with it",
 }
 
 func TestDocumentedConfigKeysAreReal(t *testing.T) {
