@@ -46,6 +46,9 @@ type k8sObject struct {
 		Ports []struct {
 			Port int    `yaml:"port"`
 			Name string `yaml:"name"`
+			// TargetPort is a port name or a number, so it decodes as any and is
+			// resolved against the pod's declared container ports.
+			TargetPort any `yaml:"targetPort"`
 		} `yaml:"ports"`
 		// Selector is a Service's pod selector: a flat map[string]string. A
 		// Deployment/StatefulSet also has a spec.selector key, but shaped as
@@ -61,7 +64,11 @@ type k8sObject struct {
 			} `yaml:"metadata"`
 			Spec struct {
 				Containers []struct {
-					Name           string `yaml:"name"`
+					Name  string `yaml:"name"`
+					Ports []struct {
+						Name          string `yaml:"name"`
+						ContainerPort int    `yaml:"containerPort"`
+					} `yaml:"ports"`
 					StartupProbe   *probe `yaml:"startupProbe"`
 					ReadinessProbe *probe `yaml:"readinessProbe"`
 					LivenessProbe  *probe `yaml:"livenessProbe"`
@@ -91,6 +98,8 @@ type k8sObject struct {
 type probe struct {
 	HTTPGet *struct {
 		Path string `yaml:"path"`
+		// Like a Service targetPort: a name or a number.
+		Port any `yaml:"port"`
 	} `yaml:"httpGet"`
 	Exec map[string]any `yaml:"exec"`
 }
