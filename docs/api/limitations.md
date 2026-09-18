@@ -97,16 +97,43 @@ These are properties of the whole system, not of the query languages.
   render unless you supply `admin.password` or `admin.existingSecret`. The Compose
   demo does the opposite on purpose — `deployments/docker/docker-compose.yml` sets
   `GF_SECURITY_ADMIN_PASSWORD: admin` so the local walkthrough needs no setup.
-- **The Compose demo listens on every host interface, not just loopback.** Its
-  port mappings are written `"8080:8080"`, `"3000:3000"`, and `"9090:9090"`, which
-  Docker publishes on `0.0.0.0`. An unauthenticated backend, a Prometheus with no
-  access control, and a Grafana whose password is `admin` are therefore reachable
-  from anything that can route to the host — not only from localhost. Run it on a
-  network you trust, or bind it down first by rewriting those three mappings as
-  `"127.0.0.1:8080:8080"` and so on. Nothing in this repository needs the demo to
-  be reachable off-host.
+- **The Compose demo is reachable only from the host.** Its three published
+  ports are written `"127.0.0.1:8080:8080"`, `"127.0.0.1:3000:3000"`, and
+  `"127.0.0.1:9090:9090"`, so Docker binds them to loopback rather than
+  `0.0.0.0`. Nothing in this repository needs off-host access — the in-container
+  clients reach the backend as `backend:8080` over the Compose network, which
+  host publishing does not affect — and the three things being published are an
+  unauthenticated backend, a Prometheus with no access control, and a Grafana
+  whose password is `admin`. Dropping the `127.0.0.1:` prefixes puts all three on
+  every network the host can route to; if you need that, treat it as a
+  deliberate act and set a real Grafana password first.
 - **Log structured metadata is rejected, not dropped.** A Loki push carrying a
   third element per entry fails rather than silently discarding it.
+
+## Durability
+
+Both ingest paths — `POST /api/v1/ingest/metrics` and `POST /loki/api/v1/push` —
+append to a write-ahead log before answering `204`, and both share one knob:
+`OBS_WAL_SYNC_EVERY_N`, which defaults to `1`.
+
+- **At the default, an acknowledgement is durable.** The active WAL segment is
+  fsynced before the response is written, so a `204` survives a host crash or a
+  power cut, not merely the process being killed.
+- **Above the default, the tail is not.** `OBS_WAL_SYNC_EVERY_N=N` fsyncs once
+  per `N` records, so up to `N-1` already-acknowledged records live only in the
+  OS page cache. `kill -9`, a panic, or a container restart still loses none of
+  them — the page cache outlives the process. A kernel panic, a power loss, or a
+  yanked VM can take all of them, and the client was told `204`. That is a
+  throughput trade, and it is only ever made deliberately.
+- **The exposure is bounded by that tail, not by the log.** Segment rotation
+  fsyncs the outgoing segment before sealing it, and `0` is rejected at config
+  load rather than silently disabling fsync altogether, so the window is at most
+  the `N-1` most recent records of the open segment — never anything older, and
+  never a sealed one.
+
+Replay on startup reads every record that reached the disk, so anything inside
+the fsync guarantee comes back. `docs/runbooks/local-demo.md` has a runnable
+proof of the restart half of this.
 
 ## See also
 
