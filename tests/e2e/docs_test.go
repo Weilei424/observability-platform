@@ -543,8 +543,11 @@ var nonBackendEnvKeys = map[string]string{
 	"OBS_BACKEND_ADDR":    "the producers' target address, read by the sample app and load generator",
 	"OBS_COMPOSE_PROJECT": "tests/e2e/compose_smoke.sh",
 	"OBS_COMPOSE_KEEP_UP": "tests/e2e/compose_smoke.sh",
-	"OBS_INSTANCE":        "producers chart, set from the downward API (see TestProducersCarryPodInstanceLabel)",
-	"OBS_KIND_KEEP_UP":    "tests/e2e/kind_smoke.sh",
+	// Opts into removing a pre-existing compose stack. The smoke test refuses
+	// one by default, so the runbook has to name the escape hatch.
+	"OBS_COMPOSE_REPLACE_STACK": "tests/e2e/compose_smoke.sh",
+	"OBS_INSTANCE":              "producers chart, set from the downward API (see TestProducersCarryPodInstanceLabel)",
+	"OBS_KIND_KEEP_UP":          "tests/e2e/kind_smoke.sh",
 	// OBS_KIND_REPLACE_CLUSTER opts into deleting a pre-existing kind cluster.
 	// The script refuses one by default, so the runbook has to name the escape
 	// hatch for anyone who hits the refusal.
