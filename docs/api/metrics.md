@@ -18,8 +18,13 @@ POST /api/v1/ingest/metrics
 Appends samples. This is the endpoint the sample app and load generator use.
 Prometheus `remote_write` is not implemented; see [limitations.md](limitations.md).
 
-Each sample is written to the WAL before it is acknowledged, so a `204` means the
-data survives a crash.
+Each sample is appended to the WAL before it is acknowledged, so a `204` means
+the sample is recorded rather than only buffered for queries. How far that
+reaches depends on `OBS_WAL_SYNC_EVERY_N`, which defaults to `1`: at the default
+the WAL is fsynced before every acknowledgement, and a `204` survives a host
+crash or power loss. Raise it and up to `N-1` acknowledged samples can be left
+in the OS page cache — safe from a killed process, lost to a host crash. See
+[limitations.md](limitations.md#durability).
 
 | Field | Required | Notes |
 |---|---|---|
