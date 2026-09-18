@@ -6,6 +6,11 @@ image:
   pullPolicy: IfNotPresent
 
 service:
+  # Owns Grafana's HTTP port outright: the Service, the containerPort, the
+  # readiness probe and the container's GF_SERVER_HTTP_PORT are all derived from
+  # it. Grafana listens on 3000 unless GF_SERVER_HTTP_PORT says otherwise, which
+  # is why that env var is in the Deployment — without it an override moved
+  # every manifest port and left the process where it was.
   port: 3000
 
 backend:
