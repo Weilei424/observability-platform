@@ -158,11 +158,20 @@ demo_durability() {
     --data-urlencode 'query=demo_restart_marker' 2>/dev/null) \
     || { echo "INCONCLUSIVE: the backend did not answer. This is not a data-loss result."; return 1; }
 
-  if echo "$RESPONSE" | grep -q "$MARKER"; then
+  #    Compare the sample VALUE, not the whole body. A bare `grep -q "$MARKER"`
+  #    matches anywhere in the JSON, and the response carries each sample's own
+  #    timestamp as a bare number — so a short $RANDOM$RANDOM marker such as
+  #    17897 matches the timestamp 1789700100 and reports "durable" for a marker
+  #    that was never read back at all. A Prometheus vector renders every sample
+  #    as "value":[<ts>,"<value>"], so anchoring the marker as the quoted second
+  #    element is what makes this a comparison of the value.
+  if echo "$RESPONSE" | grep -Eq "\"value\":\[[0-9.]+,\"$MARKER\"\]"; then
     echo "durable: marker $MARKER survived a real restart"
-  else
-    echo "LOST: the backend answered, but marker $MARKER is not in the response"
+    return 0
   fi
+  echo "LOST: the backend answered, but $MARKER is not the value of any"
+  echo "      demo_restart_marker sample. Response: $RESPONSE"
+  return 1
 }
 
 demo_durability
@@ -171,7 +180,13 @@ demo_durability
 `LOST` is printed in exactly one situation: the marker was accepted, the
 container demonstrably restarted, the backend answered, and the value was not
 there. Every other outcome is **inconclusive**, including the one that matters
-most — a restart that did not happen. Phase 5.2 found this exact hole in
+most — a restart that did not happen.
+
+**Every path also sets the exit status**, so `demo_durability && echo ok` is safe
+to put in a script: `0` only for a proven durable read, `1` for `LOST` and for
+each `INCONCLUSIVE` branch. An earlier version of this function printed `LOST`
+and then returned the `echo`'s own status, which is `0` — a data-loss result
+that any caller read as a pass. Phase 5.2 found this exact hole in
 `kind_smoke.sh`: the `kubectl delete pod` exit status was unchecked, and because
 a StatefulSet pod keeps its name across a reschedule, a delete that never
 happened would have left every later check passing. Comparing the container's
