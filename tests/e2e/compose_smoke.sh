@@ -185,11 +185,17 @@ teardown() {
         echo "  docker compose -p $PROJECT -f $COMPOSE_FILE down -v"
         return
     fi
+    # `down -v` destroys named volumes, so only a stack this run brought up may
+    # reach it. See the ownership block below for what the states mean.
+    if [ "$STACK_OWNERSHIP" != "ours" ]; then
+        echo ""
+        echo "-- Leaving project '$PROJECT' alone: this run does not own it (ownership: $STACK_OWNERSHIP) --"
+        return
+    fi
     echo ""
     echo "-- Tearing down --"
     dc down -v --remove-orphans >/dev/null 2>&1
 }
-trap teardown EXIT
 
 # wait_for <label> <timeout-seconds> <command...> — polls until the command
 # succeeds. Every readiness wait is bounded and reports its own failure, so a
@@ -233,21 +239,92 @@ sample_app_metrics_up() {
 echo "=== Compose stack test: project=$PROJECT (run_id=$RUN_ID) ==="
 
 # ---- Preflight ------------------------------------------------------
+#
+# Everything here runs BEFORE `trap teardown EXIT` is installed, and that
+# ordering is the point. It used to run after, so a preflight that refused —
+# most easily by finding a port busy — exited straight into a teardown whose
+# `down -v` destroys named volumes. The stack it destroyed was, in the common
+# case, the one whose busy port caused the refusal: a stack a previous
+# OBS_COMPOSE_KEEP_UP=1 run had deliberately left running. With
+# OBS_COMPOSE_PROJECT pointed at the everyday demo project, it destroyed the
+# demo's data volumes instead. Reproduced with a listener on port 3000 and a
+# docker stub: refuse, then `down -v --remove-orphans`.
 if ! docker compose version >/dev/null 2>&1; then
     echo "FATAL: 'docker compose' is not available; this test needs Docker with the Compose plugin." >&2
     exit 2
 fi
+
+# Stack ownership, mirroring tests/e2e/kind_smoke.sh's cluster ownership and for
+# the same reason: never destroy state this run did not create.
+#
+#   unknown — nothing established; teardown removes nothing.
+#   free    — the project provably has no containers and no volumes, so anything
+#             under it afterwards belongs to this run.
+#   ours    — `up` has been attempted against a project proven free.
+#
+# Enumeration failing is not evidence of emptiness. Both queries are checked, so
+# a docker that cannot answer stops the run rather than licensing a `down -v`.
+STACK_OWNERSHIP=unknown
+
+if ! EXISTING_CONTAINERS="$(dcq ps -aq 2>/dev/null)"; then
+    echo "FATAL: could not list containers for project '$PROJECT', so this test cannot tell" >&2
+    echo "       whether a stack is already there — and it will not run 'down -v' on a guess." >&2
+    echo "       Run: docker compose -p $PROJECT -f $COMPOSE_FILE ps -a" >&2
+    exit 2
+fi
+if ! EXISTING_VOLUMES="$(docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null)"; then
+    echo "FATAL: could not list volumes for project '$PROJECT'; refusing to continue." >&2
+    echo "       Run: docker volume ls --filter label=com.docker.compose.project=$PROJECT" >&2
+    exit 2
+fi
+
+if [ -n "$EXISTING_CONTAINERS" ] || [ -n "$EXISTING_VOLUMES" ]; then
+    if [ "${OBS_COMPOSE_REPLACE_STACK:-0}" = "1" ]; then
+        echo "-- OBS_COMPOSE_REPLACE_STACK=1: removing the existing '$PROJECT' stack and its volumes --"
+        if ! dc down -v --remove-orphans; then
+            echo "FATAL: could not remove the existing '$PROJECT' stack; nothing else was changed" >&2
+            exit 2
+        fi
+        STACK_OWNERSHIP=free
+    else
+        echo "FATAL: compose project '$PROJECT' already has containers or volumes." >&2
+        echo "       This test will not run 'down -v' on a stack it did not create — that" >&2
+        echo "       deletes named volumes. Either:" >&2
+        echo "         - remove it yourself:     docker compose -p $PROJECT -f $COMPOSE_FILE down -v" >&2
+        echo "         - use a different name:   OBS_COMPOSE_PROJECT=<other-name> $0" >&2
+        echo "         - opt in to replacing it: OBS_COMPOSE_REPLACE_STACK=1 $0" >&2
+        exit 2
+    fi
+else
+    STACK_OWNERSHIP=free
+fi
+
 for port in 3000 8080 9090; do
     if curl -s -o /dev/null --connect-timeout 2 --max-time 5 "http://localhost:$port" 2>/dev/null; then
-        echo "FATAL: port $port is already serving. Stop the other stack (make local-down) and retry." >&2
+        echo "FATAL: port $port is already serving, and this test needs it." >&2
+        echo "       Project '$PROJECT' is empty, so the listener belongs to something else —" >&2
+        echo "       most likely 'make local-up'. Stop it (make local-down) and retry." >&2
         exit 2
     fi
 done
 
+trap teardown EXIT
+
 # ---- Bring the stack up ---------------------------------------------
 echo ""
 echo "-- Starting the stack (building images; this can take a few minutes) --"
-dc down -v --remove-orphans >/dev/null 2>&1
+# No `down -v` here any more. The project was proven empty above, so there is
+# nothing to remove, and an unconditional destructive command ahead of the work
+# is the exact shape of the bug this preflight exists to prevent.
+#
+# Claimed before `up`, not after: a partial `up` leaves containers and volumes
+# behind and teardown has to be allowed to remove them. Safe only because the
+# project was proven free.
+if [ "$STACK_OWNERSHIP" != "free" ]; then
+    echo "FATAL: stack ownership is '$STACK_OWNERSHIP', not 'free'; refusing to start '$PROJECT'" >&2
+    exit 2
+fi
+STACK_OWNERSHIP=ours
 # Build output goes to a file rather than /dev/null: a build failure leaves no
 # containers, so the container logs printed on teardown would be empty and the
 # compiler error that actually caused it would be the one thing not shown.
