@@ -134,11 +134,13 @@ done
 # reach the teardown at all: it neither deletes a cluster nor dumps the state of
 # whatever cluster kubectl's current context happens to name.
 #
-# One window is knowingly left open: another process could create $CLUSTER
-# between the enumeration below and the create. A lock file was weighed and
-# rejected — the only thing that realistically races for this name is a second
-# run of this same script, both clusters are disposable, and stale-lock handling
-# would be more machinery than the exposure warrants.
+# The enumeration below is a snapshot, so something could create $CLUSTER
+# between it and the create. That window is closed at the create itself rather
+# than with a lock: kind refuses a name already in use, and a create that is
+# refused for that reason is proof the cluster is not ours — see the create
+# below. A lock file would only exclude other runs of this same script; keying
+# off kind's own refusal also covers a cluster that appeared by any other means,
+# and carries no stale-lock state to clean up.
 CLUSTER_OWNERSHIP=unknown
 
 # Exit status read on its own, not through a pipeline: `kind get clusters | grep`
@@ -198,7 +200,8 @@ teardown() {
     # Delete only what this run created. Only the `ours` state authorises it,
     # and that state is reachable only after an enumeration that succeeded and
     # showed the name free — so a create that failed halfway has its wreckage
-    # cleaned up, while a cluster that predates this run is never touched.
+    # cleaned up, while a cluster that predates this run, or one another run
+    # created in the gap (`raced`), is never touched.
     if [ "$CLUSTER_OWNERSHIP" != "ours" ]; then
         echo ""
         echo "-- Leaving the cluster alone: this run does not own it (ownership: $CLUSTER_OWNERSHIP) --"
@@ -229,13 +232,40 @@ if [ "$CLUSTER_OWNERSHIP" != "free" ]; then
     exit 2
 fi
 # Claimed before the create, not after: a create that fails partway leaves
-# containers behind, and teardown must be allowed to remove them. Safe only
-# because the name was proven free above.
+# containers behind, and teardown must be allowed to remove them.
 CLUSTER_OWNERSHIP=ours
-if ! kind create cluster --name "$CLUSTER" --wait 120s; then
-    echo "FATAL: kind create cluster failed" >&2
+
+# The create's output is teed rather than swallowed, because how it failed
+# decides whether the cluster is ours to delete. Two runs that both saw the name
+# free will both reach this line; one wins, and kind refuses the other with
+# "node(s) already exist for a cluster with the name". That refusal is proof the
+# cluster belongs to the winner — it is untouched by the refusal — so the loser
+# disowns the name and its teardown leaves the winner's cluster alone. Without
+# this, the loser tore down the winner's cluster mid-run.
+#
+# Any other failure is a create of ours that got partway, so the name stays
+# claimed and teardown removes the containers it left.
+#
+# PIPESTATUS[0] rather than the pipeline's status: tee succeeds regardless, and
+# the file keeps the output available for matching while the reader still sees
+# the create's progress live over its two-minute run.
+CREATE_LOG="$(mktemp -t kind-create.XXXXXX)"
+kind create cluster --name "$CLUSTER" --wait 120s 2>&1 | tee "$CREATE_LOG"
+CREATE_RC=${PIPESTATUS[0]}
+if [ "$CREATE_RC" -ne 0 ]; then
+    if grep -qi "already exist" "$CREATE_LOG"; then
+        CLUSTER_OWNERSHIP=raced
+        echo "FATAL: a cluster named '$CLUSTER' appeared between this run's check and its" >&2
+        echo "       create — most likely a second run of this script. It is not ours, so" >&2
+        echo "       it will be left alone. Re-run with KIND_CLUSTER=<other-name> to work" >&2
+        echo "       alongside it." >&2
+    else
+        echo "FATAL: kind create cluster failed" >&2
+    fi
+    rm -f "$CREATE_LOG"
     exit 2
 fi
+rm -f "$CREATE_LOG"
 kubectl create namespace "$NS"
 
 echo ""
