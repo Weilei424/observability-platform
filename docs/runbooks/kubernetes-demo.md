@@ -202,6 +202,7 @@ remove it, which is the point.
 | `kubectl create configmap grafana-dashboards` fails with `already exists` | re-running this runbook in a namespace from a previous, incompletely cleaned-up run | `kubectl delete configmap grafana-dashboards -n obs` (also covered by Cleanup below), then re-run the create command |
 | **Observability Platform Internals** dashboard shows "No data" on every panel, other dashboards work | the `obs-internals` datasource points at the `observability-prometheus` Service, but step 2 (installing the Prometheus chart) was skipped or installed after Grafana | `helm install prometheus deployments/helm/prometheus -n obs --wait`, then wait ~15s for its first scrape; no Grafana restart needed — the datasource resolves the Service once it exists |
 | `make smoke-kind` exits immediately with `a kind cluster named 'obs-e2e' already exists` | a previous run was kept (`OBS_KIND_KEEP_UP=1`) or died before its teardown; the script will not delete a cluster it did not create | `kind delete cluster --name obs-e2e`, or re-run with `KIND_CLUSTER=<other>` or `OBS_KIND_REPLACE_CLUSTER=1` |
+| `make smoke-kind` exits immediately with ``` `kind get clusters` failed ``` | cluster enumeration did not run, usually a stopped Docker daemon, so the script cannot tell whether `obs-e2e` exists and refuses to create or delete one on a guess | start Docker, then run `kind get clusters` yourself to confirm it answers |
 
 ## Cleanup
 
