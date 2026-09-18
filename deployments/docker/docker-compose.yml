@@ -10,8 +10,14 @@ services:
       context: ../../
       dockerfile: deployments/docker/Dockerfile
       target: backend
+    # Loopback only, on purpose. A bare "8080:8080" publishes on 0.0.0.0, which
+    # puts this unauthenticated backend on every network the host can route to.
+    # Nothing in this repository needs the demo reachable off-host: Grafana,
+    # Prometheus and the two producers reach the backend as `backend:8080` over
+    # the Compose network, which host publishing does not affect at all, and
+    # every runbook, Make target and smoke script uses localhost.
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     environment:
       OBS_DATA_DIR: /data
       OBS_LOG_LEVEL: info
@@ -34,8 +40,10 @@ services:
   prometheus:
     restart: unless-stopped
     image: prom/prometheus:v2.53.0
+    # Loopback only; see the backend service above. This Prometheus has no
+    # authentication and no access control of any kind.
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
@@ -60,8 +68,10 @@ services:
   grafana:
     restart: unless-stopped
     image: grafana/grafana:11.1.0
+    # Loopback only; see the backend service above. This one matters most: the
+    # demo password below is `admin`.
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       GF_SECURITY_ADMIN_PASSWORD: admin
     volumes:
