@@ -185,6 +185,13 @@ a disposable `kind` cluster, plus a pod-restart persistence check and a check th
 producers are actually reaching the backend — it is CI's `helm-k8s-e2e` job, runnable
 locally the same way.
 
+It creates and deletes its own cluster, `obs-e2e` (override with `KIND_CLUSTER`), and
+**refuses to start if a cluster of that name already exists** rather than deleting one
+it did not create. Delete it yourself, point `KIND_CLUSTER` somewhere else, or pass
+`OBS_KIND_REPLACE_CLUSTER=1` to opt into replacing it. `OBS_KIND_KEEP_UP=1` keeps the
+cluster after a run so you can inspect it — the next run will then refuse until you
+remove it, which is the point.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -194,6 +201,7 @@ locally the same way.
 | Backend pod `ImagePullBackOff` | the image was never loaded into the cluster | `kind load docker-image observability-platform/backend:dev --name <cluster>` |
 | `kubectl create configmap grafana-dashboards` fails with `already exists` | re-running this runbook in a namespace from a previous, incompletely cleaned-up run | `kubectl delete configmap grafana-dashboards -n obs` (also covered by Cleanup below), then re-run the create command |
 | **Observability Platform Internals** dashboard shows "No data" on every panel, other dashboards work | the `obs-internals` datasource points at the `observability-prometheus` Service, but step 2 (installing the Prometheus chart) was skipped or installed after Grafana | `helm install prometheus deployments/helm/prometheus -n obs --wait`, then wait ~15s for its first scrape; no Grafana restart needed — the datasource resolves the Service once it exists |
+| `make smoke-kind` exits immediately with `a kind cluster named 'obs-e2e' already exists` | a previous run was kept (`OBS_KIND_KEEP_UP=1`) or died before its teardown; the script will not delete a cluster it did not create | `kind delete cluster --name obs-e2e`, or re-run with `KIND_CLUSTER=<other>` or `OBS_KIND_REPLACE_CLUSTER=1` |
 
 ## Cleanup
 
@@ -203,7 +211,7 @@ helm uninstall grafana -n obs
 helm uninstall prometheus -n obs
 helm uninstall backend -n obs
 kubectl delete configmap grafana-dashboards -n obs
-kubectl delete pvc -n obs --all
+kubectl delete pvc data-observability-backend-0 -n obs
 kind delete cluster --name obs-demo
 ```
 
@@ -215,3 +223,11 @@ if you ever reuse the namespace without deleting the cluster.
 The PVC is not removed by `helm uninstall` — StatefulSet volumes are left behind on
 purpose, so an accidental uninstall cannot silently delete a WAL. Delete it explicitly,
 or leave it and reinstall the backend chart to pick the data back up.
+
+**The PVC is named, not `--all`.** This line used to read `kubectl delete pvc -n obs
+--all`, which deletes every claim in the namespace rather than this demo's one — and
+the Create-a-cluster step above offers `default` as an alternative namespace, where
+`--all` means every PVC on the cluster that nothing else has isolated. The backend
+StatefulSet declares one claim template, `data`, and runs a single replica, so
+`data-observability-backend-0` is the complete set of volumes these four charts create.
+`kubectl get pvc -n obs` before deleting anything, if you want to confirm that.
