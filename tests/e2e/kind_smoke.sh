@@ -108,6 +108,33 @@ for tool in kind kubectl helm docker jq curl; do
     command -v "$tool" >/dev/null 2>&1 || { echo "FATAL: $tool is required" >&2; exit 2; }
 done
 
+# Refuse a cluster this run did not create, rather than deleting it.
+#
+# This check replaces an unconditional `kind delete cluster --name "$CLUSTER"`
+# that used to sit immediately before the create. It made the script
+# self-healing after a crashed run, and it also meant that a KIND_CLUSTER
+# pointed at a cluster someone cared about was destroyed without being asked —
+# as was the cluster a previous `OBS_KIND_KEEP_UP=1` run had deliberately left
+# behind to debug in. A test suite may delete state it created and no other.
+#
+# Checked here, before `trap teardown EXIT` is installed, so the refusal path
+# cannot reach the teardown at all: it neither deletes the cluster nor dumps
+# the state of whatever cluster kubectl's current context happens to name.
+CREATED_CLUSTER=0
+if kind get clusters 2>/dev/null | grep -qxF "$CLUSTER"; then
+    if [ "${OBS_KIND_REPLACE_CLUSTER:-0}" = "1" ]; then
+        echo "-- OBS_KIND_REPLACE_CLUSTER=1: deleting the existing '$CLUSTER' cluster --"
+        kind delete cluster --name "$CLUSTER" >/dev/null 2>&1
+    else
+        echo "FATAL: a kind cluster named '$CLUSTER' already exists." >&2
+        echo "       This script will not delete a cluster it did not create. Either:" >&2
+        echo "         - delete it yourself:     kind delete cluster --name $CLUSTER" >&2
+        echo "         - use a different name:   KIND_CLUSTER=<other-name> $0" >&2
+        echo "         - opt in to replacing it: OBS_KIND_REPLACE_CLUSTER=1 $0" >&2
+        exit 2
+    fi
+fi
+
 teardown() {
     local rc=$?
     if [ "$FAIL" -ne 0 ] || [ "$rc" -ne 0 ]; then
@@ -126,6 +153,15 @@ teardown() {
     fi
     # Always stop the port-forward; it outlives the script otherwise.
     [ -n "${PF_PID:-}" ] && kill "$PF_PID" 2>/dev/null
+    # Delete only what this run created. CREATED_CLUSTER is set immediately
+    # before `kind create cluster`, so a create that fails halfway still has its
+    # wreckage cleaned up, while a cluster that was already there when the
+    # script started is never touched.
+    if [ "$CREATED_CLUSTER" != "1" ]; then
+        echo ""
+        echo "-- Leaving the cluster alone: this run did not create it --"
+        return
+    fi
     if [ "$KEEP_UP" = "1" ]; then
         echo ""
         echo "OBS_KIND_KEEP_UP=1 — leaving the cluster; delete it with: kind delete cluster --name $CLUSTER"
@@ -142,7 +178,9 @@ echo "=== Phase 5.2 kind cluster test: cluster=$CLUSTER namespace=$NS ==="
 # ---- Cluster and images ---------------------------------------------
 echo ""
 echo "-- Creating cluster --"
-kind delete cluster --name "$CLUSTER" >/dev/null 2>&1
+# Claim the name before the create, not after: a create that fails partway
+# leaves containers behind, and teardown must be allowed to remove them.
+CREATED_CLUSTER=1
 if ! kind create cluster --name "$CLUSTER" --wait 120s; then
     echo "FATAL: kind create cluster failed" >&2
     exit 2
