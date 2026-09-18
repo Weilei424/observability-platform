@@ -108,23 +108,63 @@ for tool in kind kubectl helm docker jq curl; do
     command -v "$tool" >/dev/null 2>&1 || { echo "FATAL: $tool is required" >&2; exit 2; }
 done
 
-# Refuse a cluster this run did not create, rather than deleting it.
+# Cluster ownership. The invariant is that this script never deletes a cluster
+# that existed before it started, and three states are what it takes to hold it:
 #
-# This check replaces an unconditional `kind delete cluster --name "$CLUSTER"`
-# that used to sit immediately before the create. It made the script
-# self-healing after a crashed run, and it also meant that a KIND_CLUSTER
-# pointed at a cluster someone cared about was destroyed without being asked —
-# as was the cluster a previous `OBS_KIND_KEEP_UP=1` run had deliberately left
-# behind to debug in. A test suite may delete state it created and no other.
+#   unknown — nothing has been established. Teardown deletes nothing.
+#   free    — `kind get clusters` SUCCEEDED and did not list $CLUSTER, so the
+#             name was provably not in use and anything bearing it from here on
+#             belongs to this run.
+#   ours    — a create has been attempted against a name proven free. Teardown
+#             may delete it, which is what removes the containers a create that
+#             fails halfway leaves behind.
 #
-# Checked here, before `trap teardown EXIT` is installed, so the refusal path
-# cannot reach the teardown at all: it neither deletes the cluster nor dumps
-# the state of whatever cluster kubectl's current context happens to name.
-CREATED_CLUSTER=0
-if kind get clusters 2>/dev/null | grep -qxF "$CLUSTER"; then
+# Two earlier versions of this got it wrong in the same direction, so both are
+# recorded. The first ran an unconditional `kind delete cluster` before the
+# create, which destroyed a cluster KIND_CLUSTER happened to name and silently
+# destroyed the one `OBS_KIND_KEEP_UP=1` had left behind to debug in. The second
+# added an existence check but read a FAILED enumeration as "absent" and claimed
+# the name with a plain flag: with a broken `kind get clusters` and a real
+# cluster of that name it went on to attempt a create, which kind refuses
+# ("node(s) already exist for a cluster with the name"), then reached teardown
+# with the name claimed and deleted the pre-existing cluster. A failed
+# enumeration is absence of evidence, not evidence of absence.
+#
+# Checked here, before `trap teardown EXIT` is installed, so no refusal path can
+# reach the teardown at all: it neither deletes a cluster nor dumps the state of
+# whatever cluster kubectl's current context happens to name.
+#
+# One window is knowingly left open: another process could create $CLUSTER
+# between the enumeration below and the create. A lock file was weighed and
+# rejected — the only thing that realistically races for this name is a second
+# run of this same script, both clusters are disposable, and stale-lock handling
+# would be more machinery than the exposure warrants.
+CLUSTER_OWNERSHIP=unknown
+
+# Exit status read on its own, not through a pipeline: `kind get clusters | grep`
+# makes grep the decider, and grep reports "no match" for an enumeration that
+# never ran. stdout is captured for the match; kind's own error text is dropped
+# because the reader gets an actionable message instead.
+if ! EXISTING_CLUSTERS="$(kind get clusters 2>/dev/null)"; then
+    echo "FATAL: \`kind get clusters\` failed, so this script cannot tell whether a" >&2
+    echo "       cluster named '$CLUSTER' already exists — and it will not create or" >&2
+    echo "       delete one on a guess." >&2
+    echo "       Run \`kind get clusters\` to see why; a stopped Docker daemon is the" >&2
+    echo "       usual cause." >&2
+    exit 2
+fi
+
+if printf '%s\n' "$EXISTING_CLUSTERS" | grep -qxF "$CLUSTER"; then
     if [ "${OBS_KIND_REPLACE_CLUSTER:-0}" = "1" ]; then
         echo "-- OBS_KIND_REPLACE_CLUSTER=1: deleting the existing '$CLUSTER' cluster --"
-        kind delete cluster --name "$CLUSTER" >/dev/null 2>&1
+        # Checked, unlike before: a delete that fails leaves the cluster in
+        # place, and creating into it is how the "already exist" path above is
+        # reached with the name claimed.
+        if ! kind delete cluster --name "$CLUSTER"; then
+            echo "FATAL: could not delete the existing '$CLUSTER' cluster; nothing was changed" >&2
+            exit 2
+        fi
+        CLUSTER_OWNERSHIP=free
     else
         echo "FATAL: a kind cluster named '$CLUSTER' already exists." >&2
         echo "       This script will not delete a cluster it did not create. Either:" >&2
@@ -133,6 +173,8 @@ if kind get clusters 2>/dev/null | grep -qxF "$CLUSTER"; then
         echo "         - opt in to replacing it: OBS_KIND_REPLACE_CLUSTER=1 $0" >&2
         exit 2
     fi
+else
+    CLUSTER_OWNERSHIP=free
 fi
 
 teardown() {
@@ -153,13 +195,13 @@ teardown() {
     fi
     # Always stop the port-forward; it outlives the script otherwise.
     [ -n "${PF_PID:-}" ] && kill "$PF_PID" 2>/dev/null
-    # Delete only what this run created. CREATED_CLUSTER is set immediately
-    # before `kind create cluster`, so a create that fails halfway still has its
-    # wreckage cleaned up, while a cluster that was already there when the
-    # script started is never touched.
-    if [ "$CREATED_CLUSTER" != "1" ]; then
+    # Delete only what this run created. Only the `ours` state authorises it,
+    # and that state is reachable only after an enumeration that succeeded and
+    # showed the name free — so a create that failed halfway has its wreckage
+    # cleaned up, while a cluster that predates this run is never touched.
+    if [ "$CLUSTER_OWNERSHIP" != "ours" ]; then
         echo ""
-        echo "-- Leaving the cluster alone: this run did not create it --"
+        echo "-- Leaving the cluster alone: this run does not own it (ownership: $CLUSTER_OWNERSHIP) --"
         return
     fi
     if [ "$KEEP_UP" = "1" ]; then
@@ -178,9 +220,18 @@ echo "=== Phase 5.2 kind cluster test: cluster=$CLUSTER namespace=$NS ==="
 # ---- Cluster and images ---------------------------------------------
 echo ""
 echo "-- Creating cluster --"
-# Claim the name before the create, not after: a create that fails partway
-# leaves containers behind, and teardown must be allowed to remove them.
-CREATED_CLUSTER=1
+# Unreachable as the script stands, and deliberately here anyway: it states the
+# precondition for claiming the name, so a later rearrangement that reaches the
+# create without proving the name free fails closed instead of authorising a
+# delete.
+if [ "$CLUSTER_OWNERSHIP" != "free" ]; then
+    echo "FATAL: cluster ownership is '$CLUSTER_OWNERSHIP', not 'free'; refusing to create '$CLUSTER'" >&2
+    exit 2
+fi
+# Claimed before the create, not after: a create that fails partway leaves
+# containers behind, and teardown must be allowed to remove them. Safe only
+# because the name was proven free above.
+CLUSTER_OWNERSHIP=ours
 if ! kind create cluster --name "$CLUSTER" --wait 120s; then
     echo "FATAL: kind create cluster failed" >&2
     exit 2
