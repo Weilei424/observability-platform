@@ -230,6 +230,8 @@ Use `local-reset` when you want a clean first-run experience.
 | `docker compose: unknown command` | Compose v1 | Install Compose v2; the Makefile targets use `docker compose`, not `docker-compose` |
 | Grafana shows "datasource not found" | Provisioning did not mount | `make local-reset && make local-up`; check the `grafana` volume mounts |
 | Internals dashboard empty, others fine | Prometheus is not scraping | Open http://localhost:9090/targets and check the `backend` target is `UP` |
+| `make smoke-compose` exits with `compose project 'obs-compose-e2e' already has containers or volumes` | a previous run was kept (`OBS_COMPOSE_KEEP_UP=1`) or died before its teardown; the test will not run `down -v` on a stack it did not create, because that deletes named volumes | `docker compose -p obs-compose-e2e -f deployments/docker/docker-compose.yml down -v`, or re-run with `OBS_COMPOSE_PROJECT=<other>` or `OBS_COMPOSE_REPLACE_STACK=1` |
+| `make smoke-compose` exits with `could not list containers` or `could not list volumes` | Docker could not answer, so the test cannot tell whether a stack is already there and refuses to guess | start Docker, then run `docker compose -p obs-compose-e2e ps -a` yourself to confirm it answers |
 
 ## See also
 
