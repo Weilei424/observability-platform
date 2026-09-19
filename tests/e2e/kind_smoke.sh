@@ -101,7 +101,18 @@ loki_entry_count() {
 # cluster; the helpers above do not, and a helper that silently counts zero for
 # every valid response is exactly the failure this hook exists to catch.
 if [ "${OBS_KIND_SMOKE_LIB_ONLY:-0}" = "1" ]; then
-    return 0 2>/dev/null || exit 0
+    # Library mode is for tests that SOURCE this file. Executed directly, the
+    # `return` fails and the old fallback ran `exit 0` — so the script reported
+    # success having asserted nothing at all. `make smoke-kind` inherits the
+    # environment, which makes a stray export of this variable a silent green
+    # across the whole suite. Refuse rather than honour it.
+    if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+        echo "FATAL: OBS_KIND_SMOKE_LIB_ONLY=1 is set, but this script was executed," >&2
+        echo "       not sourced. Library mode would exit 0 here having run no assertions." >&2
+        echo "       Unset the variable to run the suite." >&2
+        exit 2
+    fi
+    return 0
 fi
 
 for tool in kind kubectl helm docker jq curl; do
