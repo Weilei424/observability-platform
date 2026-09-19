@@ -132,7 +132,8 @@ it — Compose up, Grafana provisioned, panels rendering — run:
 make smoke-compose
 ```
 
-This one owns its stack: it uses its own Compose project name (`obs-compose-e2e`)
+This one owns its stack: it uses a Compose project name of its own, unique to each
+run (`obs-compose-e2e-<run-id>`; override the prefix with `OBS_COMPOSE_PROJECT`)
 and removes its volumes at the end, so it will not touch a stack you started with
 `make local-up`. It does need ports 3000, 8080, and 9090 free, and fails immediately
 with a clear message if any is taken.
