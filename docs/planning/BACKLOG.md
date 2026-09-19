@@ -533,7 +533,7 @@ Design: `docs/superpowers/specs/2026-08-23-phase-5.1-docker-compose-demo-design.
 - [x] `deployments/docker/docker-compose.yml` — `healthcheck: ["CMD","/server","-healthcheck"]` on `backend`; both producers move to `depends_on: {backend: {condition: service_healthy}}`. Grafana stays ungated — its datasources are `access: proxy` and resolved lazily on first query
 
 **Packaging hygiene**
-- [x] `deployments/docker/docker-compose.yml` — `name: observability-platform` (it currently defaults to `docker`, the compose file's directory basename); `restart: unless-stopped` on `backend` and `grafana`. `compose_smoke.sh`'s explicit `-p obs-compose-e2e` outranks the file's `name:`, so its isolation is unchanged
+- [x] `deployments/docker/docker-compose.yml` — `name: observability-platform` (it currently defaults to `docker`, the compose file's directory basename); `restart: unless-stopped` on `backend` and `grafana`. `compose_smoke.sh`'s explicit `-p` outranks the file's `name:`, so its isolation is unchanged. **Changed in Phase 5 review:** that project is now `obs-compose-e2e-<run-id>`, unique per run, so two concurrent runs cannot share a project and tear down each other's stack; `OBS_COMPOSE_PROJECT` overrides the prefix rather than the whole name
 - [x] `Makefile` — `local-logs` (`logs -f`) and `local-reset` (`down -v`). `local-down` keeps volumes on purpose: data surviving a stack restart is the durability story the demo tells, so discarding it must be explicit
 
 **Grafana**
