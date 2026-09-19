@@ -59,8 +59,33 @@ COMPOSE_FILE="$REPO_ROOT/deployments/docker/docker-compose.yml"
 # no atomic "remove only if still stale" for the takeover. Making a collision
 # impossible is what removes the whole class, so there is no lock here now.
 # The prefix keeps kept stacks greppable with `docker compose ls`.
-RUN_ID="run$(date +%s%N | tr 0-9 a-j)"
+#
+# $$ is the load-bearing field. A collision only does harm between runs that
+# overlap in time, and the OS guarantees no two LIVE processes share a pid.
+# The clock alone was not enough: `date +%s%N` is GNU, and any BSD or macOS
+# date has no %N and emits a literal "N", so the suffix silently degraded to
+# whole-second resolution and every run started in the same second shared an
+# identity. `tr -dc 0-9` now drops that stray "N" instead of embedding it.
+#
+# The other two fields cover what a pid cannot. The clock separates runs that do
+# not overlap, where a pid is legitimately reused. The urandom nonce separates
+# runs that could share a pid despite overlapping — two containers on one Docker
+# socket, each pid 1 in its own namespace — and falls back to $RANDOM where
+# /dev/urandom cannot be read.
+#
+# p/s/r are field separators, and none of them is in a-j, so the fields cannot
+# alias: "12"+"3456" and "123"+"456" must not both render as "123456".
+RUN_NONCE="$(od -An -tu4 -N4 /dev/urandom 2>/dev/null | tr -dc 0-9)"
+[ -n "$RUN_NONCE" ] || RUN_NONCE="$RANDOM$RANDOM"
+RUN_ID="runp$(printf '%s' "$$" | tr 0-9 a-j)s$(date +%s | tr -dc 0-9 | tr 0-9 a-j)r$(printf '%s' "$RUN_NONCE" | tr 0-9 a-j)"
 PROJECT="${OBS_COMPOSE_PROJECT:-obs-compose-e2e}-$RUN_ID"
+
+# Sourcing hook for tests/e2e/compose_naming_test.go, which asserts that two
+# processes cannot derive the same project name even with the clock pinned.
+# Everything past this point needs Docker; the naming above does not.
+if [ "${OBS_COMPOSE_SMOKE_LIB_ONLY:-0}" = "1" ]; then
+    return 0 2>/dev/null || exit 0
+fi
 GRAFANA="${GRAFANA_ADDR:-http://localhost:3000}"
 PROMETHEUS="${PROMETHEUS_ADDR:-http://localhost:9090}"
 BACKEND="${BACKEND_ADDR:-http://localhost:8080}"
@@ -316,22 +341,18 @@ if ! EXISTING_VOLUMES="$(dockerq volume ls -q --filter "label=com.docker.compose
 fi
 
 if [ -n "$EXISTING_CONTAINERS" ] || [ -n "$EXISTING_VOLUMES" ]; then
-    if [ "${OBS_COMPOSE_REPLACE_STACK:-0}" = "1" ]; then
-        echo "-- OBS_COMPOSE_REPLACE_STACK=1: removing the existing '$PROJECT' stack and its volumes --"
-        if ! dc down -v --remove-orphans; then
-            echo "FATAL: could not remove the existing '$PROJECT' stack; nothing else was changed" >&2
-            exit 2
-        fi
-        STACK_OWNERSHIP=free
-    else
-        echo "FATAL: compose project '$PROJECT' already has containers or volumes." >&2
-        echo "       This test will not run 'down -v' on a stack it did not create — that" >&2
-        echo "       deletes named volumes. Either:" >&2
-        echo "         - remove it yourself:     docker compose -p $PROJECT -f $COMPOSE_FILE down -v" >&2
-        echo "         - use a different prefix: OBS_COMPOSE_PROJECT=<other-prefix> $0" >&2
-        echo "         - opt in to replacing it: OBS_COMPOSE_REPLACE_STACK=1 $0" >&2
-        exit 2
-    fi
+    # No opt-in to replace it. There was an OBS_COMPOSE_REPLACE_STACK=1 escape
+    # hatch here and it could not do the job it advertised: every invocation
+    # derives a new project name, so the rerun it told you to perform targeted a
+    # different, empty project and left the refused one untouched. Advice that
+    # cannot work is worse than no advice, and the two lines below both act on
+    # the project actually named.
+    echo "FATAL: compose project '$PROJECT' already has containers or volumes." >&2
+    echo "       This test will not run 'down -v' on a stack it did not create — that" >&2
+    echo "       deletes named volumes. Either:" >&2
+    echo "         - remove that project:    docker compose -p $PROJECT -f $COMPOSE_FILE down -v" >&2
+    echo "         - use a different prefix: OBS_COMPOSE_PROJECT=<other-prefix> $0" >&2
+    exit 2
 else
     STACK_OWNERSHIP=free
 fi
