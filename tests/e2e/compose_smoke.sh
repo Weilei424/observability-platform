@@ -32,8 +32,23 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 COMPOSE_FILE="$REPO_ROOT/deployments/docker/docker-compose.yml"
 
 # A project name of its own, so this never reuses, restarts, or deletes the
-# volumes of a stack someone started with `make local-up`.
-PROJECT="${OBS_COMPOSE_PROJECT:-obs-compose-e2e}"
+# volumes of a stack someone started with `make local-up` — and a name unique to
+# this run, which is a safety property rather than a tidiness one.
+#
+# Compose containers and volumes carry their project name and nothing else, so
+# two runs sharing one are indistinguishable: neither can tell whose stack it is
+# about to `down -v`. That is not hypothetical. Both runs could find the shared
+# project empty, both claim it, and the one that lost the race for the host
+# ports would fail its `up` and then destroy the winner's stack on the way out.
+# kind_smoke.sh closes its equivalent race by keying off kind's refusal to
+# create a name already in use; compose has no such signal, because
+# `docker compose up` on an existing project succeeds and reconciles it.
+#
+# A per-run name makes "never destroy what this run did not create" structural:
+# a losing run tears down its own empty project and leaves the winner alone.
+# The obs-compose-e2e prefix keeps kept stacks greppable with `docker compose ls`.
+RUN_ID="run$(date +%s%N | tr 0-9 a-j)"
+PROJECT="${OBS_COMPOSE_PROJECT:-obs-compose-e2e-$RUN_ID}"
 GRAFANA="${GRAFANA_ADDR:-http://localhost:3000}"
 PROMETHEUS="${PROMETHEUS_ADDR:-http://localhost:9090}"
 BACKEND="${BACKEND_ADDR:-http://localhost:8080}"
@@ -61,7 +76,6 @@ fi
 
 PASS=0
 FAIL=0
-RUN_ID="run$(date +%s%N | tr 0-9 a-j)"
 
 # The expected running set. Every service is asserted on its own data elsewhere
 # in this run, but a producer can also exit between assertions, so the exact set
@@ -74,6 +88,56 @@ dc() { timeout "${DC_TIMEOUT:-1800}" docker compose -p "$PROJECT" -f "$COMPOSE_F
 # hung docker call would blow through the loop's deadline the same way a hung
 # curl would.
 dcq() { timeout 60 docker compose -p "$PROJECT" -f "$COMPOSE_FILE" "$@"; }
+# dockerq is dcq for the plain `docker` calls that are not compose subcommands.
+# The volume enumeration in the preflight was written as a bare `docker volume
+# ls` and was the one call in this script outside the bound the comment above
+# promises; a stalled daemon held the whole run until the outer job timeout.
+dockerq() { timeout 60 docker "$@"; }
+
+# Project lock. The default project name is unique per run and never contends,
+# so this exists for the one case a unique name cannot cover: two runs pointed
+# at the SAME project by an explicit OBS_COMPOSE_PROJECT. Without it they can
+# both find that project empty before either creates anything, and the loser
+# destroys the winner's stack.
+#
+# mkdir is the atomic primitive — it succeeds for exactly one caller. The holder
+# records its pid so a run killed between acquiring and releasing does not wedge
+# the project forever: a lock whose holder is gone is taken over rather than
+# honoured. The takeover races through mkdir too, so only one claimant wins it.
+LOCK_DIR="${TMPDIR:-/tmp}/obs-compose-smoke-$PROJECT.lock"
+LOCK_HELD=0
+
+acquire_project_lock() {
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+        echo $$ > "$LOCK_DIR/pid"
+        LOCK_HELD=1
+        return 0
+    fi
+    local holder
+    holder="$(cat "$LOCK_DIR/pid" 2>/dev/null)"
+    if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
+        echo "FATAL: another run of this test already holds compose project '$PROJECT'" >&2
+        echo "       (pid $holder). Two runs sharing one project cannot tell whose stack" >&2
+        echo "       is whose, and 'down -v' deletes named volumes." >&2
+        echo "       Wait for it, or use a project of your own: OBS_COMPOSE_PROJECT=<name>" >&2
+        return 1
+    fi
+    # Stale: the recorded holder is not running.
+    rm -rf "$LOCK_DIR"
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+        echo $$ > "$LOCK_DIR/pid"
+        LOCK_HELD=1
+        return 0
+    fi
+    echo "FATAL: could not take over the stale lock on project '$PROJECT'; another run won it" >&2
+    return 1
+}
+
+release_project_lock() {
+    [ "$LOCK_HELD" = "1" ] || return 0
+    rm -rf "$LOCK_DIR"
+    LOCK_HELD=0
+}
 
 log_pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 log_fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
@@ -167,8 +231,16 @@ chunk_count() {
     rm -rf "$tmp"
 }
 
+# teardown wraps teardown_stack so the lock is released on every path through
+# it, including the two early returns below.
 teardown() {
     local rc=$?
+    teardown_stack "$rc"
+    release_project_lock
+}
+
+teardown_stack() {
+    local rc="$1"
     if [ "$FAIL" -ne 0 ] || [ "$rc" -ne 0 ]; then
         echo ""
         echo "-- Container state (run failed) --"
@@ -254,6 +326,13 @@ if ! docker compose version >/dev/null 2>&1; then
     exit 2
 fi
 
+# Claimed before the project is inspected, so the emptiness check and the `up`
+# that acts on it cannot be interleaved with another run's. Released by an
+# interim trap until the full teardown takes over — without it, every refusal
+# below would exit holding the lock and wedge the project for the next run.
+acquire_project_lock || exit 2
+trap release_project_lock EXIT
+
 # Stack ownership, mirroring tests/e2e/kind_smoke.sh's cluster ownership and for
 # the same reason: never destroy state this run did not create.
 #
@@ -272,7 +351,7 @@ if ! EXISTING_CONTAINERS="$(dcq ps -aq 2>/dev/null)"; then
     echo "       Run: docker compose -p $PROJECT -f $COMPOSE_FILE ps -a" >&2
     exit 2
 fi
-if ! EXISTING_VOLUMES="$(docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null)"; then
+if ! EXISTING_VOLUMES="$(dockerq volume ls -q --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null)"; then
     echo "FATAL: could not list volumes for project '$PROJECT'; refusing to continue." >&2
     echo "       Run: docker volume ls --filter label=com.docker.compose.project=$PROJECT" >&2
     exit 2
@@ -302,8 +381,11 @@ fi
 for port in 3000 8080 9090; do
     if curl -s -o /dev/null --connect-timeout 2 --max-time 5 "http://localhost:$port" 2>/dev/null; then
         echo "FATAL: port $port is already serving, and this test needs it." >&2
-        echo "       Project '$PROJECT' is empty, so the listener belongs to something else —" >&2
-        echo "       most likely 'make local-up'. Stop it (make local-down) and retry." >&2
+        echo "       Project '$PROJECT' is empty, so the listener belongs to something else:" >&2
+        echo "       'make local-up', or a stack a previous OBS_COMPOSE_KEEP_UP=1 run left" >&2
+        echo "       behind under its own per-run project name. Find it with:" >&2
+        echo "         docker compose ls | grep obs-compose-e2e" >&2
+        echo "       then 'make local-down', or 'docker compose -p <that-project> down -v'." >&2
         exit 2
     fi
 done
