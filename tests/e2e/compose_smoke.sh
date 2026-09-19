@@ -46,9 +46,21 @@ COMPOSE_FILE="$REPO_ROOT/deployments/docker/docker-compose.yml"
 #
 # A per-run name makes "never destroy what this run did not create" structural:
 # a losing run tears down its own empty project and leaves the winner alone.
-# The obs-compose-e2e prefix keeps kept stacks greppable with `docker compose ls`.
+#
+# OBS_COMPOSE_PROJECT is therefore a PREFIX, not the exact name — uniqueness is
+# not something a caller can opt out of. It was the exact name for one revision,
+# with a lock guarding the case of two runs sharing it, and that lock was itself
+# racy: mkdir succeeded, the owner pid was written as a separate step, and a run
+# arriving in between read no pid, judged the live lock stale, removed it and
+# took it too. Two runs held it at once; a delayed-mkdir stub reproduced it.
+#
+# Nothing atomic and portable fixes that cleanly — flock(1) is util-linux and
+# absent from a stock macOS, and a symlink token, while atomic to acquire, has
+# no atomic "remove only if still stale" for the takeover. Making a collision
+# impossible is what removes the whole class, so there is no lock here now.
+# The prefix keeps kept stacks greppable with `docker compose ls`.
 RUN_ID="run$(date +%s%N | tr 0-9 a-j)"
-PROJECT="${OBS_COMPOSE_PROJECT:-obs-compose-e2e-$RUN_ID}"
+PROJECT="${OBS_COMPOSE_PROJECT:-obs-compose-e2e}-$RUN_ID"
 GRAFANA="${GRAFANA_ADDR:-http://localhost:3000}"
 PROMETHEUS="${PROMETHEUS_ADDR:-http://localhost:9090}"
 BACKEND="${BACKEND_ADDR:-http://localhost:8080}"
@@ -94,50 +106,6 @@ dcq() { timeout 60 docker compose -p "$PROJECT" -f "$COMPOSE_FILE" "$@"; }
 # promises; a stalled daemon held the whole run until the outer job timeout.
 dockerq() { timeout 60 docker "$@"; }
 
-# Project lock. The default project name is unique per run and never contends,
-# so this exists for the one case a unique name cannot cover: two runs pointed
-# at the SAME project by an explicit OBS_COMPOSE_PROJECT. Without it they can
-# both find that project empty before either creates anything, and the loser
-# destroys the winner's stack.
-#
-# mkdir is the atomic primitive — it succeeds for exactly one caller. The holder
-# records its pid so a run killed between acquiring and releasing does not wedge
-# the project forever: a lock whose holder is gone is taken over rather than
-# honoured. The takeover races through mkdir too, so only one claimant wins it.
-LOCK_DIR="${TMPDIR:-/tmp}/obs-compose-smoke-$PROJECT.lock"
-LOCK_HELD=0
-
-acquire_project_lock() {
-    if mkdir "$LOCK_DIR" 2>/dev/null; then
-        echo $$ > "$LOCK_DIR/pid"
-        LOCK_HELD=1
-        return 0
-    fi
-    local holder
-    holder="$(cat "$LOCK_DIR/pid" 2>/dev/null)"
-    if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
-        echo "FATAL: another run of this test already holds compose project '$PROJECT'" >&2
-        echo "       (pid $holder). Two runs sharing one project cannot tell whose stack" >&2
-        echo "       is whose, and 'down -v' deletes named volumes." >&2
-        echo "       Wait for it, or use a project of your own: OBS_COMPOSE_PROJECT=<name>" >&2
-        return 1
-    fi
-    # Stale: the recorded holder is not running.
-    rm -rf "$LOCK_DIR"
-    if mkdir "$LOCK_DIR" 2>/dev/null; then
-        echo $$ > "$LOCK_DIR/pid"
-        LOCK_HELD=1
-        return 0
-    fi
-    echo "FATAL: could not take over the stale lock on project '$PROJECT'; another run won it" >&2
-    return 1
-}
-
-release_project_lock() {
-    [ "$LOCK_HELD" = "1" ] || return 0
-    rm -rf "$LOCK_DIR"
-    LOCK_HELD=0
-}
 
 log_pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 log_fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
@@ -231,16 +199,8 @@ chunk_count() {
     rm -rf "$tmp"
 }
 
-# teardown wraps teardown_stack so the lock is released on every path through
-# it, including the two early returns below.
 teardown() {
     local rc=$?
-    teardown_stack "$rc"
-    release_project_lock
-}
-
-teardown_stack() {
-    local rc="$1"
     if [ "$FAIL" -ne 0 ] || [ "$rc" -ne 0 ]; then
         echo ""
         echo "-- Container state (run failed) --"
@@ -326,13 +286,6 @@ if ! docker compose version >/dev/null 2>&1; then
     exit 2
 fi
 
-# Claimed before the project is inspected, so the emptiness check and the `up`
-# that acts on it cannot be interleaved with another run's. Released by an
-# interim trap until the full teardown takes over — without it, every refusal
-# below would exit holding the lock and wedge the project for the next run.
-acquire_project_lock || exit 2
-trap release_project_lock EXIT
-
 # Stack ownership, mirroring tests/e2e/kind_smoke.sh's cluster ownership and for
 # the same reason: never destroy state this run did not create.
 #
@@ -343,6 +296,11 @@ trap release_project_lock EXIT
 #
 # Enumeration failing is not evidence of emptiness. Both queries are checked, so
 # a docker that cannot answer stops the run rather than licensing a `down -v`.
+#
+# The per-run project name above is what actually prevents a collision; this
+# check is the belt to its braces. It costs two docker calls and it is what
+# turns "the name is unique" from an assumption into something verified, so a
+# name that did somehow already exist is refused rather than torn down.
 STACK_OWNERSHIP=unknown
 
 if ! EXISTING_CONTAINERS="$(dcq ps -aq 2>/dev/null)"; then
@@ -370,7 +328,7 @@ if [ -n "$EXISTING_CONTAINERS" ] || [ -n "$EXISTING_VOLUMES" ]; then
         echo "       This test will not run 'down -v' on a stack it did not create — that" >&2
         echo "       deletes named volumes. Either:" >&2
         echo "         - remove it yourself:     docker compose -p $PROJECT -f $COMPOSE_FILE down -v" >&2
-        echo "         - use a different name:   OBS_COMPOSE_PROJECT=<other-name> $0" >&2
+        echo "         - use a different prefix: OBS_COMPOSE_PROJECT=<other-prefix> $0" >&2
         echo "         - opt in to replacing it: OBS_COMPOSE_REPLACE_STACK=1 $0" >&2
         exit 2
     fi
