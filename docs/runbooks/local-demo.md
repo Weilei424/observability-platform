@@ -82,7 +82,7 @@ Grafana → Dashboards → **Observability Platform Logs**, or use Explore with 
 
 ```bash
 curl -sG 'http://localhost:8080/loki/api/v1/query_range' \
-  --data-urlencode 'query={service="sample-app"}' \
+  --data-urlencode 'query={service="api"}' \
   --data-urlencode 'limit=5'
 ```
 
