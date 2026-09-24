@@ -529,17 +529,26 @@ closes the gap. It is a query-engine feature, so it was deliberately kept out of
 
 ### Phase 6.1 — Component Split
 
-**Goal:** Split one binary into deployable logical components while preserving local single-binary mode.
+**Goal:** Split one binary into deployable logical components that work together as one system, while preserving local single-binary mode.
 
 **Scope:**
-- Add component modes: `gateway`, `ingester`, `querier`, `store`, `compactor`.
-- Keep `all-in-one` mode for local development.
-- Move component-specific wiring behind interfaces.
+- Add component modes: `gateway`, `ingester`, `querier`, `store`, `compactor`, one instance of each, chosen by a `target` config key.
+- Keep `all-in-one` mode, the default, for local development.
+- Give every data directory one owner: the ingester owns the WALs and the in-memory heads, and the store owns metrics blocks and log chunks. No volume is shared.
+- Connect the components over an internal HTTP + JSON API on each one's existing port. The ingester flushes sealed chunks and log streams to the store. The querier reads the ingester, then the store, and merges by write generation. The compactor plans compaction and retention, and the store executes them.
+- Move both query engines to one bulk read per selector per query, so a remote source costs one round trip rather than one per step.
+- Make the gateway a route-level reverse proxy serving exactly the all-in-one public API.
+- Move component-specific wiring behind interfaces, with one constructor per component and `all-in-one` assembled from the same constructors.
+- Register per-component self-observability, and add a split topology to both Docker Compose (a second Compose file) and Helm (a `topology` value).
 
 **DoD:**
-- `all-in-one` mode still passes all existing tests.
-- Each component mode starts independently.
-- Documentation explains component responsibilities.
+- `all-in-one` mode still passes all existing tests, with their assertions unchanged.
+- Each component mode starts independently, and reports healthy and ready with every peer unreachable.
+- In the split topology, ingest → flush → ingester restart → query through the gateway returns every seeded sample and log line by value: in process, under Docker Compose, and under Helm on kind.
+- A store outage makes reads fail with `503` while writes keep succeeding, and reads recover when the store returns.
+- Documentation explains component responsibilities, data ownership, the internal API, and failure behavior.
+
+**Why the scope grew:** modes that only start prove little. A querier that cannot reach the ingester's head cannot answer a query, so this phase delivers a working split, with the transport and merge the components need. More than one ingester, replication, and parallel fanout stay with 6.2–6.4.
 
 ### Phase 6.2 — Ring-Based Sharding
 
