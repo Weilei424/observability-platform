@@ -733,15 +733,95 @@ against the system by `go test ./...`.
 ## Phase 6 Execution Checklist — Distributed Mode
 
 ### Phase 6.1 — Component Split
-- [ ] Add `all-in-one` mode
-- [ ] Add `gateway` mode
-- [ ] Add `ingester` mode
-- [ ] Add `querier` mode
-- [ ] Add `store` mode
-- [ ] Add `compactor` mode
-- [ ] Refactor component wiring behind interfaces
-- [ ] Verify: all existing single-node tests pass in `all-in-one` mode
-- [ ] Verify: each component mode starts independently
+
+Design: `docs/superpowers/specs/2026-09-23-phase-6.1-component-split-design.md`
+Plan: `docs/superpowers/plans/2026-09-23-phase-6.1-component-split.md`
+
+The original list stopped at modes that start, and a mode that only starts proves
+little: a querier that cannot reach the ingester's head cannot answer a query. This
+phase ships a working split instead, with one instance each of gateway, ingester,
+querier, store, and compactor. Each data directory has one owner, and the components
+talk over an internal HTTP API. A query answered through the gateway returns what
+`all-in-one` returns. `all-in-one` stays the default, and every existing test keeps
+its assertions.
+
+**Pre-flight**
+- [ ] Close the Phase 5.4 fresh-clone gate — the open Verify line above is that phase's acceptance gate, and phases are worked in order
+
+**Bulk reads** — one read per selector per query, so a remote source costs one round trip, not one per step
+- [ ] `metrics.Source` — `Select(ctx, SelectParams)` with anchors, series-only, and any-time membership; `SelectLabelNames` / `SelectLabelValues`; highest-generation dedup
+- [ ] Metrics engine over `Source`, with `…Context` variants; the old per-tick evaluator kept as a test oracle over randomized series with out-of-order writes and overwrites — instant, range, and `rate` results must match exactly
+- [ ] Native `Select` on `MemoryStore`, `BlockStore`, and `WALStore`
+- [ ] `logs.Source` — `SelectStreams`; the logs engine over it; the Loki label handlers surface source errors
+
+**Storage seams**
+- [ ] Per-chunk WAL fence, test-first — `OldestHeadSegment` becomes the minimum over every in-memory chunk. The current fence is too new whenever an unflushed sealed chunk is older than its series' head chunk; reproduced through `SetTestBeforeCheckpoint` before the fix
+- [ ] `BlockStore.IngestSeriesChunks` — write and register a block from chunks another process built; `FlushBlock` rides on it
+- [ ] `WALStore` over any head, not only `*BlockStore`; `SealedChunkCount`
+- [ ] Ingester head store — flushes sealed chunks through a `BlockSink` in 16 MiB batches, discards them only after the store acknowledges, and persists its generation floor to `metrics/genfloor` before each flush
+- [ ] Compactor maintenance loop with an optional flusher and an optional block manager
+- [ ] `logs.Store` split into `Head` + `ChunkStore`, its API unchanged
+- [ ] Logs head in the ingester — a failed flush no longer fails the push; 10 s flush timeout, 30 s backoff, 16 MiB batches, a flush hook
+
+**Configuration and wiring**
+- [ ] A `target` config key — `all-in-one` (default), `gateway`, `ingester`, `querier`, `store`, `compactor` — and three peer URLs: required peers enforced, peers a target does not use rejected, base http(s) URLs only; the Helm ConfigMap refuses them as template-owned
+- [ ] `internal/app` — one constructor per component, with `all-in-one` assembled from the same constructors; `cmd/server` delegates and keeps `buildServer`
+
+**The split components**
+- [ ] `metrics.Merge` / `logs.Merge` — the ingester read first, then the store; overlap resolved by highest generation; persisted log entries first at equal timestamps
+- [ ] Internal wire format — sample values as `strconv.FormatFloat` strings so `NaN` and `±Inf` survive, generations as integers, flushed chunks as base64 of the persisted encoding, invalid UTF-8 refused
+- [ ] `/internal/v1` routes — reads on the ingester and the store; flush-in, blocks, compact, and retention on the store only; flush bodies capped at 64 MiB with `413`
+- [ ] Peer clients — 5 s dial; a transport error or 5xx is unavailable (queries answer `503`), a 4xx is a protocol bug (`500`)
+- [ ] `internal/api` — route sets, an internal mount point, injectable readiness, `503 unavailable` mapping
+- [ ] Gateway — a route-level reverse proxy over exactly the all-in-one route table; forwards `X-Request-Id`; answers `503` in each route family's shape; never proxies `/internal`
+- [ ] The five modes — `gateway`, `ingester`, `querier`, `store`, `compactor` — each assembled in `internal/app`, beside `all-in-one`
+- [ ] Source conformance suite — every local and remote `Source` implementation returns the same results
+- [ ] `tests/integration/split_test.go` — five components in one test process: ingest and read back through the gateway; flush, then read back by value; an overwrite across a flush boundary; an ingester restart followed by an overwrite; a compactor pass; the store down (reads `503`, writes `204`) and back; each target alone with its peers unreachable
+
+**Per-component observability**
+- [ ] Each target registers only the collectors for what it owns; head cardinality becomes optional
+- [ ] `obs_log_flushes_total`, `obs_log_flush_failures_total` — in the ingester a failed log flush no longer fails the push, so without these it would be invisible
+- [ ] Every log line carries `target=<mode>`; new component names `gateway`, `rpc`, `flush`
+- [ ] A `component` label on every scrape target; the internals dashboard's HTTP panels filter to the edge (`component=~"all-in-one|gateway"`); a new Component Health panel plots `up` by `component`
+
+**Compose split**
+- [ ] `deployments/docker/docker-compose.split.yml` — project `observability-platform-split`; the gateway answers as `backend`; only the gateway, Grafana, and Prometheus publish ports, all loopback; no `depends_on` between components
+- [ ] `observability/prometheus/prometheus.split.yml`, and Make targets `local-up-split`, `local-down-split`, `local-logs-split`, `local-reset-split`, `smoke-compose-split`
+- [ ] `compose_smoke.sh` topology switch with split checks — a by-value round trip across an ingester restart and a store-outage drill; CI runs both topologies
+
+**Helm split**
+- [ ] Backend chart `topology: all-in-one | split` — the gateway keeps the `observability-backend` Service; the ingester and store are StatefulSets; the ingester, store, and compactor refuse more than one replica
+- [ ] Prometheus chart `topology` switch — scrapes every split component
+- [ ] Chart tests — the split render lints; each Service selects only its component; ConfigMaps load and reach their peers; every probe path is a real route; the cross-chart contract holds through the gateway
+- [ ] `kind_smoke.sh` topology switch — a by-value round trip across ingester and store restarts; `smoke-kind-split` in CI
+
+**Docs**
+- [ ] `docs/architecture/components.md` — responsibilities, data ownership, the flush, read, and compaction sequences, the no-gap argument, the failure matrix; Mermaid whose every node names a real symbol, file, or route
+- [ ] `docs/api/internal.md` — routes, encodings, limits, error codes; route coverage walks every target's router
+- [ ] `docs/runbooks/split-demo.md` — the Compose walk-through with a store-outage drill, then the Helm install
+- [ ] `docs/architecture/storage-layout.md` — ownership per subtree and `genfloor`, checked by a split case of `TestStorageLayoutDocMatchesDisk`
+- [ ] `docs/api/limitations.md` — one instance per component, no ingester backpressure, the held logs-flush lock, no all-in-one → split migration, best-effort final flushes, an unauthenticated internal API
+- [ ] README topology section, `deployments/helm/README.md`, and `ARCHITECTURE_NOTES.md` (component responsibilities, the phase's decisions, the component name set, the new metrics)
+
+**Verification**
+- [ ] Verify: all existing single-node tests pass in `all-in-one` mode, with their assertions unchanged
+- [ ] Verify: each component mode starts independently — healthy and ready with every peer unreachable
+- [ ] Verify: ingest → flush → ingester restart → query through the gateway returns every seeded sample and log line by value — in process, under Compose (locally and in CI), and on kind (CI)
+- [ ] Verify: a store outage fails reads with `503` while writes keep succeeding, and reads recover when it returns — under Compose
+- [ ] Verify: the all-in-one smoke tests stay green — `make smoke`, `make smoke-compose`, and `smoke-kind`
+
+**Hand-off to 6.2:** write generations are per-ingester counters. Once the ring can
+move a series between ingesters, two ingesters' generations for the same series are
+not comparable, so 6.2's design must choose a last-write-wins rule across ingesters
+before it allows membership changes.
+
+**Deferred from 6.1** — unscheduled
+- [ ] Ingester backpressure and head limits — while the store is down the head and WALs grow without bound; the flush-failure counters and `obs_wal_bytes` make that visible, nothing limits it
+- [ ] A segment-aware logs WAL checkpoint — would let the logs flush drop its held lock, which today can stall pushes behind a hanging store for up to one flush timeout
+- [ ] Authentication or TLS on the internal API
+- [ ] Streaming or binary select encoding, and pushing filters and limits down to the sources
+- [ ] Converting an `all-in-one` data directory into split mode
+- [ ] Mixed-version rolling upgrades — `/internal/v1` carries no cross-version promise
 
 ### Phase 6.2 — Ring-Based Sharding
 - [ ] Implement ring assignment for series IDs
