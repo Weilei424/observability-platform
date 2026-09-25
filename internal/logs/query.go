@@ -30,13 +30,23 @@ type StreamResult struct {
 	Entries []LogEntry
 }
 
-// QueryEngine evaluates parsed LogQL over a Reader.
+// QueryEngine evaluates parsed LogQL over a Source.
 type QueryEngine struct {
-	r Reader
+	src Source
 }
 
-// NewQueryEngine returns an engine reading from r.
-func NewQueryEngine(r Reader) *QueryEngine { return &QueryEngine{r: r} }
+// NewQueryEngine returns an engine reading from r. A Reader that also
+// implements Source is read through it; any other Reader is adapted.
+func NewQueryEngine(r Reader) *QueryEngine {
+	if src, ok := r.(Source); ok {
+		return &QueryEngine{src: src}
+	}
+	return &QueryEngine{src: readerSource{r: r}}
+}
+
+// NewQueryEngineFromSource returns an engine reading from src. The querier
+// uses it with Merge(ingester, store).
+func NewQueryEngineFromSource(src Source) *QueryEngine { return &QueryEngine{src: src} }
 
 // QueryRange evaluates sel over the half-open range [startNs, endNs), matching
 // Loki: results have a timestamp >= start and < end. Entries are line-filtered,
@@ -65,27 +75,24 @@ type taggedEntry struct {
 }
 
 func (e *QueryEngine) query(ctx context.Context, sel LogSelector, startNs, endNs int64, endInclusive bool, limit int, dir Direction) ([]StreamResult, error) {
-	ids := e.r.MatchingStreamIDs(sel.Matchers)
+	streams, err := e.src.SelectStreams(ctx, sel.Matchers, startNs, endNs)
+	if err != nil {
+		return nil, err
+	}
 
 	var all []taggedEntry
-	labelsByID := make(map[StreamID]StreamLabels)
+	labelsByID := make(map[StreamID]StreamLabels, len(streams))
 	seq := 0
-	for _, id := range ids {
+	for _, sd := range streams {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		labels, ok := e.r.StreamLabelSet(id)
-		if !ok {
-			continue
-		}
-		labelsByID[id] = labels
+		id := StreamIDOf(sd.Labels)
+		labelsByID[id] = sd.Labels
 		// The store's range is inclusive on both ends, so it returns a superset
 		// when the caller wants a half-open range; the boundary drop below is what
 		// makes query_range's [start, end) exact.
-		entries, err := e.r.StreamEntries(ctx, id, startNs, endNs)
-		if err != nil {
-			return nil, err
-		}
+		entries := sd.Entries
 		kept := make([]LogEntry, 0, len(entries))
 		for _, en := range entries {
 			if !endInclusive && en.TimestampNs == endNs {
@@ -198,10 +205,14 @@ func sortEntries(entries []LogEntry, dir Direction) {
 }
 
 // LabelNames returns all stream label names.
-func (e *QueryEngine) LabelNames() []string { return e.r.LabelNames() }
+func (e *QueryEngine) LabelNames(ctx context.Context) ([]string, error) {
+	return e.src.SelectLabelNames(ctx)
+}
 
 // LabelValues returns all values for a stream label name.
-func (e *QueryEngine) LabelValues(name string) []string { return e.r.LabelValues(name) }
+func (e *QueryEngine) LabelValues(ctx context.Context, name string) ([]string, error) {
+	return e.src.SelectLabelValues(ctx, name)
+}
 
 func passesFilters(line string, filters []LineFilter) bool {
 	for _, f := range filters {
