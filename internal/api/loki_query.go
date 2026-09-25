@@ -463,7 +463,14 @@ func (s *Server) handleLokiLabels(w http.ResponseWriter, r *http.Request) {
 	if !s.requireLogQuery(w, r) {
 		return
 	}
-	writeLokiLabels(w, s.logQuery.LabelNames())
+	names, err := s.logQuery.LabelNames(r.Context())
+	if err != nil {
+		observability.Component(observability.FromContext(r.Context()), "logs_query").Error(
+			"loki labels failed", "err", err)
+		writeLokiError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeLokiLabels(w, names)
 }
 
 // handleLokiLabelValues returns all values for the {name} label.
@@ -472,7 +479,14 @@ func (s *Server) handleLokiLabelValues(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := chi.URLParam(r, "name")
-	writeLokiLabels(w, s.logQuery.LabelValues(name))
+	values, err := s.logQuery.LabelValues(r.Context(), name)
+	if err != nil {
+		observability.Component(observability.FromContext(r.Context()), "logs_query").Error(
+			"loki label values failed", "err", err)
+		writeLokiError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeLokiLabels(w, values)
 }
 
 func toLokiStreamResults(results []logs.StreamResult) []lokiStreamResult {
