@@ -1,12 +1,15 @@
 package metrics
 
 import (
+	"context"
 	"fmt"
 	"sort"
 )
 
-// queryStore is the read interface QueryEngine depends on.
-// *MemoryStore, *BlockStore, and *WALStore all implement it.
+// queryStore is the per-series read contract the engine was built on: one
+// series, one instant or range at a time. *MemoryStore, *BlockStore, and
+// *WALStore still satisfy it. NewQueryEngine reads a store that also implements
+// Source through Select and adapts anything else with perSeriesSource.
 type queryStore interface {
 	SelectSeries(sel Selector) ([]MatchedSeries, error)
 	QueryInstant(id SeriesID, tMs int64) (Sample, bool, error)
@@ -15,14 +18,25 @@ type queryStore interface {
 	LabelValues(name string) []string
 }
 
-// QueryEngine executes instant and range queries over a queryStore.
+// QueryEngine executes instant and range queries over a Source, reading each
+// selector once per query rather than once per series per step.
 type QueryEngine struct {
-	store queryStore
+	src Source
 }
 
-// NewQueryEngine returns a QueryEngine backed by store.
+// NewQueryEngine returns a QueryEngine backed by store. A store that implements
+// Source is read through its own Select; any other queryStore is adapted.
 func NewQueryEngine(store queryStore) *QueryEngine {
-	return &QueryEngine{store: store}
+	if src, ok := store.(Source); ok {
+		return &QueryEngine{src: src}
+	}
+	return &QueryEngine{src: perSeriesSource{s: store}}
+}
+
+// NewQueryEngineFromSource returns a QueryEngine over src. The querier uses it
+// with Merge(ingester, store), neither of which is a queryStore.
+func NewQueryEngineFromSource(src Source) *QueryEngine {
+	return &QueryEngine{src: src}
 }
 
 // InstantSample is a single series value at the query instant.
@@ -47,26 +61,37 @@ type RangeSeries struct {
 // InstantQuery returns the latest sample at or before tMs for each series
 // matching sel. Series with no sample at or before tMs are omitted.
 func (e *QueryEngine) InstantQuery(sel Selector, tMs int64) ([]InstantSample, error) {
-	matched, err := e.store.SelectSeries(sel)
+	return e.InstantQueryContext(context.Background(), sel, tMs)
+}
+
+// InstantQueryContext is InstantQuery bound to ctx.
+func (e *QueryEngine) InstantQueryContext(ctx context.Context, sel Selector, tMs int64) ([]InstantSample, error) {
+	series, err := e.src.Select(ctx, SelectParams{Selector: sel, MinT: tMs, MaxT: tMs, Anchor: true})
 	if err != nil {
 		return nil, err
 	}
-	result := make([]InstantSample, 0, len(matched))
-	for _, ms := range matched {
-		sample, ok, err := e.store.QueryInstant(SeriesID(ms.Labels.Hash()), tMs)
-		if err != nil {
-			return nil, err
-		}
+	result := make([]InstantSample, 0, len(series))
+	for _, sd := range series {
+		s, ok := latestAtOrBefore(sd, tMs)
 		if !ok {
 			continue
 		}
-		result = append(result, InstantSample{
-			Labels:      ms.Labels,
-			TimestampMs: sample.TimestampMs,
-			Value:       sample.Value,
-		})
+		result = append(result, InstantSample{Labels: sd.Labels, TimestampMs: s.TimestampMs, Value: s.Value})
 	}
 	return result, nil
+}
+
+// latestAtOrBefore returns sd's latest sample with timestamp <= t: the last
+// in-range sample at or before t, else the anchor, which precedes them all.
+func latestAtOrBefore(sd SeriesData, t int64) (Sample, bool) {
+	i := sort.Search(len(sd.Samples), func(i int) bool { return sd.Samples[i].TimestampMs > t })
+	if i > 0 {
+		return sd.Samples[i-1], true
+	}
+	if sd.Anchor != nil && sd.Anchor.TimestampMs <= t {
+		return *sd.Anchor, true
+	}
+	return Sample{}, false
 }
 
 // RangeQuery returns step-aligned points for each series matching sel.
@@ -75,36 +100,43 @@ func (e *QueryEngine) InstantQuery(sel Selector, tMs int64) ([]InstantSample, er
 // the tick t, not the original sample timestamp.
 // Series with zero points in the range are omitted.
 func (e *QueryEngine) RangeQuery(sel Selector, startMs, endMs, stepMs int64) ([]RangeSeries, error) {
+	return e.RangeQueryContext(context.Background(), sel, startMs, endMs, stepMs)
+}
+
+// RangeQueryContext is RangeQuery bound to ctx.
+func (e *QueryEngine) RangeQueryContext(ctx context.Context, sel Selector, startMs, endMs, stepMs int64) ([]RangeSeries, error) {
 	if stepMs <= 0 {
 		return nil, fmt.Errorf("step must be greater than 0")
 	}
 	if endMs < startMs {
 		return nil, fmt.Errorf("end time must be >= start time")
 	}
-
-	matched, err := e.store.SelectSeries(sel)
+	series, err := e.src.Select(ctx, SelectParams{Selector: sel, MinT: startMs, MaxT: endMs, Anchor: true})
 	if err != nil {
 		return nil, err
 	}
-	result := make([]RangeSeries, 0, len(matched))
-
-	for _, ms := range matched {
+	result := make([]RangeSeries, 0, len(series))
+	for _, sd := range series {
 		var points []SamplePoint
-		id := SeriesID(ms.Labels.Hash())
+		// cur is the latest sample at or before the current tick. Ticks ascend
+		// and Samples are sorted, so next only moves forward: one pass per
+		// series instead of a full chunk scan per tick.
+		cur := sd.Anchor
+		next := 0
 		for t := startMs; t <= endMs; t += stepMs {
-			sample, ok, err := e.store.QueryInstant(id, t)
-			if err != nil {
-				return nil, err
+			for next < len(sd.Samples) && sd.Samples[next].TimestampMs <= t {
+				cur = &sd.Samples[next]
+				next++
 			}
-			if !ok {
+			if cur == nil {
 				continue
 			}
-			points = append(points, SamplePoint{TimestampMs: t, Value: sample.Value})
+			points = append(points, SamplePoint{TimestampMs: t, Value: cur.Value})
 		}
 		if len(points) == 0 {
 			continue
 		}
-		result = append(result, RangeSeries{Labels: ms.Labels, Points: points})
+		result = append(result, RangeSeries{Labels: sd.Labels, Points: points})
 	}
 	return result, nil
 }
@@ -133,63 +165,66 @@ func (f MetadataFilter) isUnfiltered() bool {
 
 // matchingSeries returns the deduplicated series satisfying f: the OR-union of
 // its selectors (or all series when none are given), optionally restricted to
-// those active within [StartMs, EndMs]. A storage error encountered while
-// testing activity is propagated, never swallowed, so that a corrupt chunk or
-// I/O failure surfaces as a failed metadata query rather than a successful but
-// silently-incomplete one.
-func (e *QueryEngine) matchingSeries(f MetadataFilter) ([]MatchedSeries, error) {
+// those with a sample in [StartMs, EndMs]. A storage error is propagated, never
+// swallowed, so a failed read is a failed metadata query rather than a
+// successful but silently incomplete one.
+func (e *QueryEngine) matchingSeries(ctx context.Context, f MetadataFilter) ([]SeriesData, error) {
 	sels := f.Selectors
 	if len(sels) == 0 {
 		sels = []Selector{{}} // empty selector matches every series
 	}
 	seen := make(map[SeriesID]struct{})
-	var out []MatchedSeries
+	var out []SeriesData
 	for _, sel := range sels {
-		matched, err := e.store.SelectSeries(sel)
+		matched, err := e.src.Select(ctx, SelectParams{
+			Selector:   sel,
+			MinT:       f.StartMs,
+			MaxT:       f.EndMs,
+			SeriesOnly: true,
+			AnyTime:    !f.HasTime,
+		})
 		if err != nil {
 			return nil, err
 		}
-		for _, ms := range matched {
-			id := SeriesID(ms.Labels.Hash())
+		for _, sd := range matched {
+			id := SeriesID(sd.Labels.Hash())
 			if _, ok := seen[id]; ok {
 				continue
 			}
-			if f.HasTime {
-				samples, err := e.store.QueryRange(id, f.StartMs, f.EndMs)
-				if err != nil {
-					return nil, err
-				}
-				if len(samples) == 0 {
-					continue
-				}
-			}
 			seen[id] = struct{}{}
-			out = append(out, ms)
+			out = append(out, sd)
 		}
 	}
 	return out, nil
 }
 
 // LabelNames returns a sorted, deduplicated list of label names. With an
-// unfiltered MetadataFilter it is served directly by the store's label index;
+// unfiltered MetadataFilter it is served directly by the source's label index;
 // otherwise it is computed from the label sets of the matching series. Always
-// returns a non-nil slice on success. A storage error from time-range filtering
-// is propagated.
+// returns a non-nil slice on success. A storage error is propagated.
 func (e *QueryEngine) LabelNames(f MetadataFilter) ([]string, error) {
+	return e.LabelNamesContext(context.Background(), f)
+}
+
+// LabelNamesContext is LabelNames bound to ctx.
+func (e *QueryEngine) LabelNamesContext(ctx context.Context, f MetadataFilter) ([]string, error) {
 	if f.isUnfiltered() {
-		names := e.store.LabelNames()
+		names, err := e.src.SelectLabelNames(ctx)
+		if err != nil {
+			return nil, err
+		}
 		if names == nil {
 			return []string{}, nil
 		}
 		return names, nil
 	}
-	series, err := e.matchingSeries(f)
+	series, err := e.matchingSeries(ctx, f)
 	if err != nil {
 		return nil, err
 	}
 	set := make(map[string]struct{})
-	for _, ms := range series {
-		for name := range ms.Labels.Map() {
+	for _, sd := range series {
+		for name := range sd.Labels.Map() {
 			set[name] = struct{}{}
 		}
 	}
@@ -197,24 +232,32 @@ func (e *QueryEngine) LabelNames(f MetadataFilter) ([]string, error) {
 }
 
 // LabelValues returns a sorted, deduplicated list of values for name. With an
-// unfiltered MetadataFilter it is served directly by the store's label index;
+// unfiltered MetadataFilter it is served directly by the source's label index;
 // otherwise it is computed from the matching series. Always returns a non-nil
-// slice on success. A storage error from time-range filtering is propagated.
+// slice on success. A storage error is propagated.
 func (e *QueryEngine) LabelValues(name string, f MetadataFilter) ([]string, error) {
+	return e.LabelValuesContext(context.Background(), name, f)
+}
+
+// LabelValuesContext is LabelValues bound to ctx.
+func (e *QueryEngine) LabelValuesContext(ctx context.Context, name string, f MetadataFilter) ([]string, error) {
 	if f.isUnfiltered() {
-		values := e.store.LabelValues(name)
+		values, err := e.src.SelectLabelValues(ctx, name)
+		if err != nil {
+			return nil, err
+		}
 		if values == nil {
 			return []string{}, nil
 		}
 		return values, nil
 	}
-	series, err := e.matchingSeries(f)
+	series, err := e.matchingSeries(ctx, f)
 	if err != nil {
 		return nil, err
 	}
 	set := make(map[string]struct{})
-	for _, ms := range series {
-		if v, ok := ms.Labels.Get(name); ok {
+	for _, sd := range series {
+		if v, ok := sd.Labels.Get(name); ok {
 			set[v] = struct{}{}
 		}
 	}
@@ -239,15 +282,20 @@ func sortedStringSet(set map[string]struct{}) []string {
 // returns every series; callers that require at least one selector are
 // responsible for enforcing that before calling.
 func (e *QueryEngine) Series(f MetadataFilter) ([]Labels, error) {
-	series, err := e.matchingSeries(f)
+	return e.SeriesContext(context.Background(), f)
+}
+
+// SeriesContext is Series bound to ctx.
+func (e *QueryEngine) SeriesContext(ctx context.Context, f MetadataFilter) ([]Labels, error) {
+	series, err := e.matchingSeries(ctx, f)
 	if err != nil {
 		return nil, err
 	}
 	seen := make(map[SeriesID]Labels)
-	for _, ms := range series {
-		id := SeriesID(ms.Labels.Hash())
+	for _, sd := range series {
+		id := SeriesID(sd.Labels.Hash())
 		if _, exists := seen[id]; !exists {
-			seen[id] = ms.Labels
+			seen[id] = sd.Labels
 		}
 	}
 	// Cache __name__ per entry to avoid repeated Get calls during sort.
