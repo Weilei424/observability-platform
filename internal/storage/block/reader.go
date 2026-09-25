@@ -12,6 +12,13 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/storage/index"
 )
 
+// MaxChunksPerSeries bounds how many chunks a single series' index entry may
+// declare in one block. OpenReader refuses a block whose index declares more
+// than this many chunks for any one series, so a writer (or a flush that
+// batches chunks before writing) must keep each series within this bound
+// per block.
+const MaxChunksPerSeries = 10_000
+
 // LabelPair is a name/value label stored in the block index.
 type LabelPair struct {
 	Name  string
@@ -265,8 +272,8 @@ func readIndex(blockDir string) ([]SeriesEntry, error) {
 			return nil, errors.New("block: index truncated at chunk count")
 		}
 		numChunks := int(binary.BigEndian.Uint32(data[pos:]))
-		if numChunks > 10_000 {
-			return nil, fmt.Errorf("block: series %d declares %d chunks, exceeds maximum 10000", id, numChunks)
+		if numChunks > MaxChunksPerSeries {
+			return nil, fmt.Errorf("block: series %d declares %d chunks, exceeds maximum %d", id, numChunks, MaxChunksPerSeries)
 		}
 		pos += 4
 
