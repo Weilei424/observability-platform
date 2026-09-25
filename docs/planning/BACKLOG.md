@@ -755,7 +755,7 @@ its assertions.
 - [x] `logs.Source` — `SelectStreams`; the logs engine over it; the Loki label handlers surface source errors
 
 **Storage seams**
-- [ ] Per-chunk WAL fence, test-first — `OldestHeadSegment` becomes the minimum over every in-memory chunk. The current fence is too new whenever an unflushed sealed chunk is older than its series' head chunk; reproduced through `SetTestBeforeCheckpoint` before the fix
+- [x] Per-chunk WAL fence, test-first — `OldestHeadSegment` becomes the minimum over every in-memory chunk. The current fence is too new whenever an unflushed sealed chunk is older than its series' head chunk; reproduced through `SetTestBeforeCheckpoint` before the fix
 - [ ] `BlockStore.IngestSeriesChunks` — write and register a block from chunks another process built; `FlushBlock` rides on it
 - [ ] `WALStore` over any head, not only `*BlockStore`; `SealedChunkCount`
 - [ ] Ingester head store — flushes sealed chunks through a `BlockSink` in 16 MiB batches, discards them only after the store acknowledges, and persists its generation floor to `metrics/genfloor` before each flush
