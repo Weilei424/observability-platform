@@ -12,12 +12,12 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/storage/wal"
 )
 
-// WALStore writes each sample to the WAL before forwarding it to a BlockStore.
-// Reads delegate to the embedded BlockStore, which fans out to memory and
-// persisted blocks. Safe for concurrent use.
+// WALStore writes each sample to the WAL before forwarding it to a head store.
+// Reads delegate to the head store, which in all-in-one is a BlockStore fanning out
+// to memory and persisted blocks. Safe for concurrent use.
 type WALStore struct {
 	w        wal.RecordWriter
-	store    *BlockStore
+	store    walHead
 	dataDir  string
 	walDir   string
 	appendMu sync.Mutex // serializes WAL-write+AppendTracked with FlushBlock's checkpoint calculation
@@ -35,10 +35,27 @@ func (s *WALStore) SetTestBeforeCheckpoint(fn func()) {
 	s.testBeforeCheckpoint = fn
 }
 
-var _ Store = (*WALStore)(nil)
+// walHead is what WALStore needs from the store behind it: tracked appends, the
+// generation guard, the WAL fence, a flush, the sealed-chunk backlog, and reads.
+// *BlockStore satisfies it in all-in-one; the ingester's HeadStore, whose
+// flushes go to another process, satisfies it in split mode.
+type walHead interface {
+	AppendTracked(labels Labels, tsMs int64, val float64, walSeg int) error
+	GenerationExhausted() bool
+	OldestHeadSegment() int
+	FlushBlock() (bool, error)
+	SealedChunkCount() int
+	queryStore
+	Source
+}
+
+var (
+	_ Store   = (*WALStore)(nil)
+	_ walHead = (*BlockStore)(nil)
+)
 
 // NewWALStore returns a WALStore backed by w for durability and store for storage.
-func NewWALStore(w wal.RecordWriter, store *BlockStore, dataDir string) *WALStore {
+func NewWALStore(w wal.RecordWriter, store walHead, dataDir string) *WALStore {
 	return &WALStore{
 		w:       w,
 		store:   store,
@@ -150,6 +167,10 @@ func (s *WALStore) FlushBlock() (bool, error) {
 func (s *WALStore) WALBytes() (int64, error) {
 	return wal.DirSize(s.walDir)
 }
+
+// SealedChunkCount reports the head's sealed-chunk backlog, the maintenance
+// loop's count-based flush trigger.
+func (s *WALStore) SealedChunkCount() int { return s.store.SealedChunkCount() }
 
 func labelsToWALPairs(l Labels) []wal.LabelPair {
 	m := l.Map()
