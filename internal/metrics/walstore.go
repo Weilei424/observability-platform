@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -82,6 +83,20 @@ func (s *WALStore) QueryRange(id SeriesID, startMs, endMs int64) ([]Sample, erro
 
 func (s *WALStore) LabelNames() []string          { return s.store.LabelNames() }
 func (s *WALStore) LabelValues(n string) []string { return s.store.LabelValues(n) }
+
+var _ Source = (*WALStore)(nil)
+
+func (s *WALStore) Select(ctx context.Context, p SelectParams) ([]SeriesData, error) {
+	return s.store.Select(ctx, p)
+}
+
+func (s *WALStore) SelectLabelNames(ctx context.Context) ([]string, error) {
+	return s.store.SelectLabelNames(ctx)
+}
+
+func (s *WALStore) SelectLabelValues(ctx context.Context, name string) ([]string, error) {
+	return s.store.SelectLabelValues(ctx, name)
+}
 
 // FlushBlock flushes sealed chunks to a new immutable block and advances the WAL
 // checkpoint. The safe deletion boundary is determined by OldestHeadSegment: the
