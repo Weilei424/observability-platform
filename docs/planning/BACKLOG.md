@@ -752,7 +752,7 @@ its assertions.
 - [x] `metrics.Source` — `Select(ctx, SelectParams)` with anchors, series-only, and any-time membership; `SelectLabelNames` / `SelectLabelValues`; highest-generation dedup
 - [x] Metrics engine over `Source`, with `…Context` variants; the old per-tick evaluator kept as a test oracle over randomized series with out-of-order writes and overwrites — instant, range, and `rate` results must match exactly
 - [x] Native `Select` on `MemoryStore`, `BlockStore`, and `WALStore`
-- [ ] `logs.Source` — `SelectStreams`; the logs engine over it; the Loki label handlers surface source errors
+- [x] `logs.Source` — `SelectStreams`; the logs engine over it; the Loki label handlers surface source errors
 
 **Storage seams**
 - [ ] Per-chunk WAL fence, test-first — `OldestHeadSegment` becomes the minimum over every in-memory chunk. The current fence is too new whenever an unflushed sealed chunk is older than its series' head chunk; reproduced through `SetTestBeforeCheckpoint` before the fix
