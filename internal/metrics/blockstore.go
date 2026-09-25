@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -592,6 +593,15 @@ func (bs *BlockStore) QueryRange(id SeriesID, startMs, endMs int64) ([]Sample, e
 	return sortAndDedup(result), nil
 }
 
+// BlockSink persists sealed series chunks as one block and makes them queryable
+// before returning. *BlockStore is the local sink; internal/rpc's client is the
+// remote one the ingester uses.
+type BlockSink interface {
+	IngestSeriesChunks(ctx context.Context, series []SeriesChunks) (block.Meta, error)
+}
+
+var _ BlockSink = (*BlockStore)(nil)
+
 // FlushBlock writes all sealed chunks from memory into a new immutable block.
 // Returns (false, nil) immediately if no sealed chunks exist. Returns (true, nil)
 // on success. On write failure the memory store is unchanged. Concurrent calls
@@ -604,24 +614,53 @@ func (bs *BlockStore) FlushBlock() (bool, error) {
 	if len(snapshot) == 0 {
 		return false, nil
 	}
+	if _, err := bs.ingestLocked(snapshot); err != nil {
+		return false, err
+	}
+	// The block was registered before this point, so there is no query window
+	// in which the data is visible in neither source. Queries that snapshot the
+	// block list before registration still see the sealed chunks in memory;
+	// queries after it may briefly see both, which the generation dedup resolves.
+	bs.mem.DiscardSealedChunks(snapshot)
+	return true, nil
+}
 
+// IngestSeriesChunks writes series as one immutable block, validates it with
+// the checks every published block must pass, and registers it for queries
+// before returning. It is FlushBlock's persistence half: FlushBlock hands it
+// the head's sealed chunks, and in split mode the store hands it the chunks an
+// ingester sent. Serialized against FlushBlock, CompactOnce, and ApplyRetention.
+func (bs *BlockStore) IngestSeriesChunks(ctx context.Context, series []SeriesChunks) (block.Meta, error) {
+	if err := ctx.Err(); err != nil {
+		return block.Meta{}, err
+	}
+	if len(series) == 0 {
+		return block.Meta{}, errors.New("blockstore: ingest of zero series")
+	}
+	bs.flushMu.Lock()
+	defer bs.flushMu.Unlock()
+	return bs.ingestLocked(series)
+}
+
+// ingestLocked is IngestSeriesChunks for a caller that holds flushMu.
+func (bs *BlockStore) ingestLocked(series []SeriesChunks) (block.Meta, error) {
 	w, err := block.NewWriter(bs.blockDir, bs.tmpDir)
 	if err != nil {
-		return false, fmt.Errorf("blockstore: new writer: %w", err)
+		return block.Meta{}, fmt.Errorf("blockstore: new writer: %w", err)
 	}
 
-	for _, sc := range snapshot {
+	for _, sc := range series {
 		pairs := labelsToPairs(sc.Labels)
 		if err := w.AddSeries(uint64(sc.ID), pairs, sc.Chunks); err != nil {
 			_ = w.Abort()
-			return false, fmt.Errorf("blockstore: add series: %w", err)
+			return block.Meta{}, fmt.Errorf("blockstore: add series: %w", err)
 		}
 	}
 
 	meta, err := w.Commit()
 	if err != nil {
 		_ = w.Abort()
-		return false, fmt.Errorf("blockstore: commit block: %w", err)
+		return block.Meta{}, fmt.Errorf("blockstore: commit block: %w", err)
 	}
 
 	if bs.testAfterFlushCommit != nil {
@@ -631,47 +670,40 @@ func (bs *BlockStore) FlushBlock() (bool, error) {
 	// Re-open the committed block as a reader using the block ID from Commit. Delete
 	// the committed directory on failure (as the validation branches below do), so a
 	// block that cannot even be opened is not left orphaned on disk where it would
-	// fail the next startup; the memory snapshot is untouched for a later retry.
+	// fail the next startup; the caller's chunks are untouched for a later retry.
 	newReader, err := block.OpenReader(filepath.Join(bs.blockDir, meta.BlockID))
 	if err != nil {
 		_ = bs.safeDeleteBlock(meta.BlockID)
-		return false, fmt.Errorf("blockstore: open new block %s: %w", meta.BlockID, err)
+		return block.Meta{}, fmt.Errorf("blockstore: open new block %s: %w", meta.BlockID, err)
 	}
 
-	// Validate the committed block before it becomes the only copy of this data. The
-	// sealed chunks are about to be dropped from memory, and WALStore.FlushBlock may
-	// then checkpoint and delete the WAL segments covering them — so a silently
-	// corrupt block (a bad write or writer regression) must be caught here, while
-	// memory and the WAL still hold the data, not at the next restart. These are the
-	// same pre-publication checks compaction runs. On failure the block is deleted
-	// and the memory snapshot is left intact for a later retry.
+	// Validate the committed block before it becomes the only copy of this data.
+	// The caller is about to drop these chunks from memory and may then
+	// checkpoint the WAL segments covering them — so a silently corrupt block (a
+	// bad write or writer regression) must be caught here, while memory and the
+	// WAL still hold the data, not at the next restart. These are the same
+	// pre-publication checks compaction runs. On failure the block is deleted
+	// and the caller's chunks are left intact for a later retry.
 	if err := validateBlockSeries(newReader); err != nil {
 		_ = newReader.Close()
 		_ = bs.safeDeleteBlock(meta.BlockID)
-		return false, fmt.Errorf("blockstore: flushed block %s: %w", meta.BlockID, err)
+		return block.Meta{}, fmt.Errorf("blockstore: flushed block %s: %w", meta.BlockID, err)
 	}
 	if err := newReader.ValidateChunkRefs(); err != nil {
 		_ = newReader.Close()
 		_ = bs.safeDeleteBlock(meta.BlockID)
-		return false, fmt.Errorf("blockstore: flushed block %s chunk refs: %w", meta.BlockID, err)
+		return block.Meta{}, fmt.Errorf("blockstore: flushed block %s chunk refs: %w", meta.BlockID, err)
 	}
 	if _, err := validateBlockChunks(newReader); err != nil {
 		_ = newReader.Close()
 		_ = bs.safeDeleteBlock(meta.BlockID)
-		return false, fmt.Errorf("blockstore: flushed block %s chunks: %w", meta.BlockID, err)
+		return block.Meta{}, fmt.Errorf("blockstore: flushed block %s chunks: %w", meta.BlockID, err)
 	}
 
-	// Register the new reader before discarding sealed chunks from memory.
-	// This ensures no query window where the data is visible in neither source.
-	// Queries that snapshot the block list before this point still see the sealed
-	// chunks in memory; queries that snapshot after may briefly see both, which
-	// is handled correctly by the existing dedup pass (highest generation wins).
 	bs.mu.Lock()
 	bs.blocks = append(bs.blocks, newReader)
 	bs.mu.Unlock()
-	bs.mem.DiscardSealedChunks(snapshot)
-
-	return true, nil
+	return meta, nil
 }
 
 // CompactOnce applies plan to the current block set. For each returned group of
