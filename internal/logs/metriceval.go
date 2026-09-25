@@ -96,26 +96,19 @@ func (e *QueryEngine) evalMetric(ctx context.Context, q MetricQuery, startNs, en
 	readStart := windowStart(startNs, q.RangeNs)
 	groups := make(map[string]*metricGroup)
 
-	for _, id := range e.r.MatchingStreamIDs(q.Selector.Matchers) {
+	streams, err := e.src.SelectStreams(ctx, q.Selector.Matchers, readStart, endNs)
+	if err != nil {
+		return nil, err
+	}
+	for _, sd := range streams {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		labels, ok := e.r.StreamLabelSet(id)
-		if !ok {
-			continue
-		}
-		entries, err := e.r.StreamEntries(ctx, id, readStart, endNs)
-		if err != nil {
-			return nil, err
-		}
-		// Filter in place rather than allocating a second slice: StreamEntries
-		// returns a fresh slice on every call (both Store's disk-backed
-		// implementation and the in-memory one build `out` from nil), never one
-		// shared with a cache or another caller, so overwriting its head as we
-		// go is safe. That freshness is the assumption a future StreamEntries
-		// change (e.g. a cached or pooled buffer) could break.
-		kept := entries[:0]
-		for _, en := range entries {
+		labels := sd.Labels
+		// Filter in place rather than allocating a second slice: Source hands
+		// the caller slices it owns, so overwriting this one as we go is safe.
+		kept := sd.Entries[:0]
+		for _, en := range sd.Entries {
 			if !passesFilters(en.Line, q.Selector.LineFilters) {
 				continue
 			}
