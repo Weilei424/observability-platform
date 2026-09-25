@@ -587,23 +587,7 @@ func (bs *BlockStore) QueryRange(id SeriesID, startMs, endMs int64) ([]Sample, e
 		return result, nil
 	}
 
-	sort.SliceStable(result, func(i, j int) bool {
-		return result[i].TimestampMs < result[j].TimestampMs
-	})
-
-	// Dedup: for equal timestamps keep the highest generation (last-write-wins).
-	deduped := result[:1]
-	for i := 1; i < len(result); i++ {
-		last := &deduped[len(deduped)-1]
-		if result[i].TimestampMs == last.TimestampMs {
-			if result[i].Gen > last.Gen {
-				*last = result[i]
-			}
-		} else {
-			deduped = append(deduped, result[i])
-		}
-	}
-	return deduped, nil
+	return sortAndDedup(result), nil
 }
 
 // FlushBlock writes all sealed chunks from memory into a new immutable block.
