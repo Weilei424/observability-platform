@@ -1,21 +1,28 @@
 package metrics
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 )
 
 // EvalInstant evaluates expr at time tMs and returns one InstantSample per output series.
 func (e *QueryEngine) EvalInstant(expr Expr, tMs int64) ([]InstantSample, error) {
+	return e.EvalInstantContext(context.Background(), expr, tMs)
+}
+
+// EvalInstantContext is EvalInstant bound to ctx.
+func (e *QueryEngine) EvalInstantContext(ctx context.Context, expr Expr, tMs int64) ([]InstantSample, error) {
 	switch x := expr.(type) {
 	case SelectorExpr:
-		return e.InstantQuery(x.Selector, tMs)
+		return e.InstantQueryContext(ctx, x.Selector, tMs)
 	case RateExpr:
-		return e.rateInstant(x, tMs)
+		return e.rateInstant(ctx, x, tMs)
 	case SumExpr:
-		inner, err := e.EvalInstant(x.Inner, tMs)
+		inner, err := e.EvalInstantContext(ctx, x.Inner, tMs)
 		if err != nil {
 			return nil, err
 		}
@@ -29,6 +36,11 @@ func (e *QueryEngine) EvalInstant(expr Expr, tMs int64) ([]InstantSample, error)
 
 // EvalRange evaluates expr over [startMs, endMs] at stepMs-aligned ticks.
 func (e *QueryEngine) EvalRange(expr Expr, startMs, endMs, stepMs int64) ([]RangeSeries, error) {
+	return e.EvalRangeContext(context.Background(), expr, startMs, endMs, stepMs)
+}
+
+// EvalRangeContext is EvalRange bound to ctx.
+func (e *QueryEngine) EvalRangeContext(ctx context.Context, expr Expr, startMs, endMs, stepMs int64) ([]RangeSeries, error) {
 	if stepMs <= 0 {
 		return nil, fmt.Errorf("step must be greater than 0")
 	}
@@ -37,11 +49,11 @@ func (e *QueryEngine) EvalRange(expr Expr, startMs, endMs, stepMs int64) ([]Rang
 	}
 	switch x := expr.(type) {
 	case SelectorExpr:
-		return e.RangeQuery(x.Selector, startMs, endMs, stepMs)
+		return e.RangeQueryContext(ctx, x.Selector, startMs, endMs, stepMs)
 	case RateExpr:
-		return e.rateRange(x, startMs, endMs, stepMs)
+		return e.rateRange(ctx, x, startMs, endMs, stepMs)
 	case SumExpr:
-		inner, err := e.EvalRange(x.Inner, startMs, endMs, stepMs)
+		inner, err := e.EvalRangeContext(ctx, x.Inner, startMs, endMs, stepMs)
 		if err != nil {
 			return nil, err
 		}
@@ -64,60 +76,68 @@ func scalarPoints(v float64, startMs, endMs, stepMs int64) []SamplePoint {
 	return points
 }
 
-func (e *QueryEngine) rateInstant(x RateExpr, tMs int64) ([]InstantSample, error) {
-	matched, err := e.store.SelectSeries(x.Selector)
+func (e *QueryEngine) rateInstant(ctx context.Context, x RateExpr, tMs int64) ([]InstantSample, error) {
+	series, err := e.src.Select(ctx, SelectParams{Selector: x.Selector, MinT: tMs - x.WindowMs, MaxT: tMs})
 	if err != nil {
 		return nil, err
 	}
-	result := make([]InstantSample, 0, len(matched))
+	result := make([]InstantSample, 0, len(series))
 	windowSec := float64(x.WindowMs) / 1000.0
-	for _, ms := range matched {
-		samples, err := e.store.QueryRange(SeriesID(ms.Labels.Hash()), tMs-x.WindowMs, tMs)
-		if err != nil {
-			return nil, err
-		}
-		if len(samples) < 2 {
+	for _, sd := range series {
+		if len(sd.Samples) < 2 {
 			continue
 		}
-		first, last := samples[0], samples[len(samples)-1]
-		rate := (last.Value - first.Value) / windowSec
+		first, last := sd.Samples[0], sd.Samples[len(sd.Samples)-1]
 		result = append(result, InstantSample{
-			Labels:      ms.Labels,
+			Labels:      sd.Labels,
 			TimestampMs: tMs,
-			Value:       rate,
+			Value:       (last.Value - first.Value) / windowSec,
 		})
 	}
 	return result, nil
 }
 
-func (e *QueryEngine) rateRange(x RateExpr, startMs, endMs, stepMs int64) ([]RangeSeries, error) {
-	matched, err := e.store.SelectSeries(x.Selector)
+// rateRange reads each series once over [startMs-WindowMs, endMs] and slides a
+// [t-WindowMs, t] window across the ticks with two pointers, where the
+// pre-bulk engine re-read storage for every tick.
+func (e *QueryEngine) rateRange(ctx context.Context, x RateExpr, startMs, endMs, stepMs int64) ([]RangeSeries, error) {
+	series, err := e.src.Select(ctx, SelectParams{Selector: x.Selector, MinT: saturatingSub(startMs, x.WindowMs), MaxT: endMs})
 	if err != nil {
 		return nil, err
 	}
-	result := make([]RangeSeries, 0, len(matched))
+	result := make([]RangeSeries, 0, len(series))
 	windowSec := float64(x.WindowMs) / 1000.0
-	for _, ms := range matched {
-		id := SeriesID(ms.Labels.Hash())
+	for _, sd := range series {
 		var points []SamplePoint
+		lo, hi := 0, 0 // the tick's window is Samples[lo:hi]
 		for t := startMs; t <= endMs; t += stepMs {
-			samples, err := e.store.QueryRange(id, t-x.WindowMs, t)
-			if err != nil {
-				return nil, err
+			for hi < len(sd.Samples) && sd.Samples[hi].TimestampMs <= t {
+				hi++
 			}
-			if len(samples) < 2 {
+			for lo < hi && sd.Samples[lo].TimestampMs < t-x.WindowMs {
+				lo++
+			}
+			if hi-lo < 2 {
 				continue
 			}
-			first, last := samples[0], samples[len(samples)-1]
-			rate := (last.Value - first.Value) / windowSec
-			points = append(points, SamplePoint{TimestampMs: t, Value: rate})
+			first, last := sd.Samples[lo], sd.Samples[hi-1]
+			points = append(points, SamplePoint{TimestampMs: t, Value: (last.Value - first.Value) / windowSec})
 		}
 		if len(points) == 0 {
 			continue
 		}
-		result = append(result, RangeSeries{Labels: ms.Labels, Points: points})
+		result = append(result, RangeSeries{Labels: sd.Labels, Points: points})
 	}
 	return result, nil
+}
+
+// saturatingSub returns a-b clamped to the int64 range, for a window start that
+// would otherwise wrap below math.MinInt64.
+func saturatingSub(a, b int64) int64 {
+	if b > 0 && a < math.MinInt64+b {
+		return math.MinInt64
+	}
+	return a - b
 }
 
 func aggregateInstant(samples []InstantSample, by []string, tMs int64) []InstantSample {
