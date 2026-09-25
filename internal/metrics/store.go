@@ -2,7 +2,6 @@ package metrics
 
 import (
 	"errors"
-	"sort"
 	"sync"
 
 	"github.com/masonwheeler/observability-platform/internal/storage/chunk"
@@ -304,29 +303,7 @@ func (s *MemoryStore) QueryRange(id SeriesID, startMs, endMs int64) ([]Sample, e
 		}
 	}
 
-	sort.SliceStable(result, func(i, j int) bool {
-		return result[i].TimestampMs < result[j].TimestampMs
-	})
-
-	// Dedup: for equal timestamps keep the highest generation (last-write-wins).
-	if len(result) > 1 {
-		// deduped aliases result's backing array; i always advances ahead of len(deduped),
-		// so no element is read after it has been overwritten — safe in-place compaction.
-		deduped := result[:1]
-		for i := 1; i < len(result); i++ {
-			last := &deduped[len(deduped)-1]
-			if result[i].TimestampMs == last.TimestampMs {
-				if result[i].Gen > last.Gen {
-					*last = result[i]
-				}
-			} else {
-				deduped = append(deduped, result[i])
-			}
-		}
-		result = deduped
-	}
-
-	return result, nil
+	return sortAndDedup(result), nil
 }
 
 // ChunkCount returns the number of chunks allocated for the given series.
