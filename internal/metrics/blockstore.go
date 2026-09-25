@@ -28,17 +28,18 @@ type BlockStore struct {
 	blockDir string
 	tmpDir   string
 	mu       sync.RWMutex
-	flushMu  sync.Mutex // serializes concurrent FlushBlock calls
+	flushMu  sync.Mutex // serializes concurrent FlushBlock and IngestSeriesChunks calls
 
-	// testAfterFlushCommit, if non-nil, is called in FlushBlock right after the
-	// block is committed to disk but before it is validated and registered. Tests
-	// only: used to inject on-disk corruption and assert pre-publication validation.
+	// testAfterFlushCommit, if non-nil, is called right after a block is
+	// committed to disk (by FlushBlock or IngestSeriesChunks, via their shared
+	// ingestLocked) but before it is validated and registered. Tests only: used
+	// to inject on-disk corruption and assert pre-publication validation.
 	testAfterFlushCommit func(blockID string)
 }
 
-// SetTestAfterFlushCommit installs a hook that fires in FlushBlock after Commit but
-// before the committed block is validated. Must not be called after concurrent use
-// begins. Tests only.
+// SetTestAfterFlushCommit installs a hook that fires after Commit (in either
+// FlushBlock or IngestSeriesChunks) but before the committed block is validated.
+// Must not be called after concurrent use begins. Tests only.
 func (bs *BlockStore) SetTestAfterFlushCommit(fn func(blockID string)) {
 	bs.testAfterFlushCommit = fn
 }
@@ -602,6 +603,11 @@ type BlockSink interface {
 
 var _ BlockSink = (*BlockStore)(nil)
 
+// ErrInvalidSeriesChunks marks a caller error in the series passed to
+// IngestSeriesChunks: malformed input, never a storage failure. A later task's
+// HTTP handler maps this sentinel to 400 and everything else to 500.
+var ErrInvalidSeriesChunks = errors.New("blockstore: invalid series chunks")
+
 // FlushBlock writes all sealed chunks from memory into a new immutable block.
 // Returns (false, nil) immediately if no sealed chunks exist. Returns (true, nil)
 // on success. On write failure the memory store is unchanged. Concurrent calls
@@ -630,16 +636,59 @@ func (bs *BlockStore) FlushBlock() (bool, error) {
 // before returning. It is FlushBlock's persistence half: FlushBlock hands it
 // the head's sealed chunks, and in split mode the store hands it the chunks an
 // ingester sent. Serialized against FlushBlock, CompactOnce, and ApplyRetention.
+//
+// ctx is checked before validation and locking, and again immediately after
+// flushMu is acquired, so a cancellation that arrives while this call is
+// queued behind a concurrent FlushBlock/CompactOnce/ApplyRetention still stops
+// it before anything is written. ingestLocked itself takes no ctx: FlushBlock
+// shares that path and has no context of its own.
 func (bs *BlockStore) IngestSeriesChunks(ctx context.Context, series []SeriesChunks) (block.Meta, error) {
 	if err := ctx.Err(); err != nil {
 		return block.Meta{}, err
 	}
-	if len(series) == 0 {
-		return block.Meta{}, errors.New("blockstore: ingest of zero series")
+	if err := validateSeriesChunks(series); err != nil {
+		return block.Meta{}, err
 	}
 	bs.flushMu.Lock()
 	defer bs.flushMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return block.Meta{}, err
+	}
 	return bs.ingestLocked(series)
+}
+
+// validateSeriesChunks rejects malformed input before any write is attempted
+// (in particular before block.NewWriter creates a temp directory): an empty
+// series slice, a series with no chunks, a nil or zero-sample chunk, a
+// duplicate series ID, or a series ID that is not its label set's fingerprint.
+// A zero-sample chunk is otherwise accepted by chunk.FromBytes and would
+// silently publish a fingerprint with no data; a nil chunk would panic in
+// block.Writer.AddSeries. Every returned error wraps ErrInvalidSeriesChunks so
+// callers (and eventually an HTTP handler) can distinguish bad input from a
+// storage failure.
+func validateSeriesChunks(series []SeriesChunks) error {
+	if len(series) == 0 {
+		return fmt.Errorf("blockstore: ingest of zero series: %w", ErrInvalidSeriesChunks)
+	}
+	seen := make(map[SeriesID]struct{}, len(series))
+	for _, sc := range series {
+		if _, dup := seen[sc.ID]; dup {
+			return fmt.Errorf("blockstore: duplicate series ID %d: %w", sc.ID, ErrInvalidSeriesChunks)
+		}
+		seen[sc.ID] = struct{}{}
+		if len(sc.Chunks) == 0 {
+			return fmt.Errorf("blockstore: series %d has no chunks: %w", sc.ID, ErrInvalidSeriesChunks)
+		}
+		for _, c := range sc.Chunks {
+			if c == nil || c.NumSamples() == 0 {
+				return fmt.Errorf("blockstore: series %d has an empty chunk: %w", sc.ID, ErrInvalidSeriesChunks)
+			}
+		}
+		if fp := SeriesID(sc.Labels.Hash()); fp != sc.ID {
+			return fmt.Errorf("blockstore: series %d label set fingerprints to %d: %w", sc.ID, fp, ErrInvalidSeriesChunks)
+		}
+	}
+	return nil
 }
 
 // ingestLocked is IngestSeriesChunks for a caller that holds flushMu.
