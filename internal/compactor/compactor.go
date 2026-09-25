@@ -9,11 +9,13 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/storage/block"
 )
 
-// Flusher flushes sealed head chunks to a new block and advances the WAL checkpoint.
-// It reports whether a block was actually written (false for a no-op when no sealed
-// chunks exist) so the maintenance loop counts only real flushes.
+// Flusher flushes sealed head chunks to a new block and advances the WAL
+// checkpoint. FlushBlock reports whether a block was actually written (false
+// for a no-op when no sealed chunks exist) so the loop counts only real
+// flushes. SealedChunkCount is the head's backlog, the count-based trigger.
 type Flusher interface {
 	FlushBlock() (bool, error)
+	SealedChunkCount() int
 }
 
 // WALSizer reports the WAL's current on-disk size.
@@ -21,13 +23,12 @@ type WALSizer interface {
 	WALBytes() (int64, error)
 }
 
-// BlockManager is the block-set mechanism the compactor drives.
+// BlockManager is the block-set mechanism the compactor drives. In all-in-one
+// it is the local BlockStore; in the compactor target it is a client for the
+// store component, which executes each plan under its own lock.
 type BlockManager interface {
-	BlockInfos() []block.BlockInfo
 	CompactOnce(plan func([]block.BlockInfo) [][]string) (int, error)
 	ApplyRetention(now time.Time, retention time.Duration) (int, error)
-	StorageStats() (blocks int, bytes int64)
-	SealedChunkCount() int
 }
 
 // Config controls maintenance cadence and policy.
@@ -52,7 +53,9 @@ type Compactor struct {
 	lastFlush time.Time
 }
 
-// New builds a Compactor. clock defaults to time.Now when nil.
+// New builds a Compactor. clock defaults to time.Now when nil. Any of flusher,
+// blocks, and walSizer may be nil: the ingester passes only a flusher and a
+// WAL sizer, the compactor target only a block manager, and all-in-one all three.
 func New(flusher Flusher, blocks BlockManager, walSizer WALSizer, clock func() time.Time, cfg Config, metrics *observability.Metrics, log *slog.Logger) *Compactor {
 	if clock == nil {
 		clock = time.Now
@@ -78,11 +81,14 @@ func (c *Compactor) RunOnce(ctx context.Context) {
 }
 
 func (c *Compactor) maybeFlush() {
+	if c.flusher == nil {
+		return
+	}
 	due := c.clock().Sub(c.lastFlush) >= c.cfg.FlushInterval
-	if !due && c.cfg.FlushSealedChunks > 0 && c.blocks.SealedChunkCount() >= c.cfg.FlushSealedChunks {
+	if !due && c.cfg.FlushSealedChunks > 0 && c.flusher.SealedChunkCount() >= c.cfg.FlushSealedChunks {
 		due = true
 	}
-	if !due && c.cfg.FlushWALBytes > 0 {
+	if !due && c.cfg.FlushWALBytes > 0 && c.wal != nil {
 		if n, err := c.wal.WALBytes(); err == nil && n >= c.cfg.FlushWALBytes {
 			due = true
 		}
@@ -103,6 +109,9 @@ func (c *Compactor) maybeFlush() {
 }
 
 func (c *Compactor) compactToStable(ctx context.Context) {
+	if c.blocks == nil {
+		return
+	}
 	plan := func(infos []block.BlockInfo) [][]string { return Plan(infos, c.cfg.Ranges) }
 	for {
 		if ctx.Err() != nil {
@@ -124,6 +133,9 @@ func (c *Compactor) compactToStable(ctx context.Context) {
 }
 
 func (c *Compactor) applyRetention() {
+	if c.blocks == nil {
+		return
+	}
 	deleted, err := c.blocks.ApplyRetention(c.clock(), c.cfg.Retention)
 	if err != nil {
 		c.log.Warn("retention failed", slog.String("error", err.Error()))
@@ -141,8 +153,10 @@ func (c *Compactor) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			if _, err := c.flusher.FlushBlock(); err != nil {
-				c.log.Warn("final flush failed", slog.String("error", err.Error()))
+			if c.flusher != nil {
+				if _, err := c.flusher.FlushBlock(); err != nil {
+					c.log.Warn("final flush failed", slog.String("error", err.Error()))
+				}
 			}
 			return
 		case <-t.C:
