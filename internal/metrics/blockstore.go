@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/masonwheeler/observability-platform/internal/storage/block"
+	"github.com/masonwheeler/observability-platform/internal/storage/chunk"
 )
 
 // BlockStore wraps a MemoryStore and a list of loaded block Readers.
@@ -1243,12 +1244,17 @@ func (bs *BlockStore) Select(ctx context.Context, p SelectParams) ([]SeriesData,
 		return a
 	}
 
+	// matchers is computed once and shared by the head's index Select and every
+	// block's Postings, instead of being rebuilt per source.
+	matchers := selectorToIndexMatchers(p.Selector)
+	anyTime := p.SeriesOnly && p.AnyTime
+	wantAnchor := p.Anchor && p.MinT > math.MinInt64
+
 	// Head: every series the head's index matches, with or without samples,
 	// so AnyTime keeps SelectSeries' membership semantics.
 	// Lock order is bs.mu, then the head's own lock — the order QueryRange and
 	// QueryInstant already take them in.
-	anyTime := p.SeriesOnly && p.AnyTime
-	headIDs := bs.mem.idx.Select(selectorToIndexMatchers(p.Selector))
+	headIDs := bs.mem.idx.Select(matchers)
 	bs.mem.mu.RLock()
 	for _, id := range headIDs {
 		ms, ok := bs.mem.series[SeriesID(id)]
@@ -1268,8 +1274,11 @@ func (bs *BlockStore) Select(ctx context.Context, p SelectParams) ([]SeriesData,
 	}
 	bs.mem.mu.RUnlock()
 
-	matchers := selectorToIndexMatchers(p.Selector)
-	wantAnchor := p.Anchor && p.MinT > math.MinInt64
+	// Blocks: the same selectFromChunks scan the head just used, run over each
+	// series' chunks read from this block — one shared definition of "in range"
+	// and "anchor" for head and blocks alike, instead of a second hand-written
+	// copy of the per-sample loop. This also gets per-chunk time skipping inside
+	// a block for free, on top of the block-level readChunks skip below.
 	for _, r := range bs.blocks {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -1294,22 +1303,19 @@ func (bs *BlockStore) Select(ctx context.Context, p SelectParams) ([]SeriesData,
 			if !readChunks {
 				continue
 			}
+			chunks := make([]*chunk.Chunk, 0, len(se.Chunks))
 			for _, ref := range se.Chunks {
 				c, err := r.ReadChunk(ref)
 				if err != nil {
 					return nil, fmt.Errorf("blockstore: read chunk: %w", err)
 				}
-				it := c.Iterator()
-				for it.Next() {
-					ts, val := it.At()
-					switch {
-					case ts >= p.MinT && ts <= p.MaxT:
-						a.samples = append(a.samples, Sample{SeriesID: SeriesID(l.Hash()), TimestampMs: ts, Value: val, Gen: it.Gen()})
-					case wantAnchor && ts < p.MinT:
-						cand := Sample{SeriesID: SeriesID(l.Hash()), TimestampMs: ts, Value: val, Gen: it.Gen()}
-						a.anchor = laterSample(a.anchor, &cand)
-					}
-				}
+				chunks = append(chunks, c)
+			}
+			if sd, keep := selectFromChunks(l, chunks, SelectParams{
+				MinT: p.MinT, MaxT: p.MaxT, Anchor: p.Anchor,
+			}); keep {
+				a.samples = append(a.samples, sd.Samples...)
+				a.anchor = laterSample(a.anchor, sd.Anchor)
 			}
 		}
 	}
