@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"os"
@@ -1209,3 +1210,141 @@ func labelsToPairs(l Labels) []block.LabelPair {
 
 // Ensure BlockStore satisfies the Store interface at compile time.
 var _ Store = (*BlockStore)(nil)
+
+var _ Source = (*BlockStore)(nil)
+
+// Select implements Source over head and blocks under one read lock, so a
+// concurrent flush or compaction is either wholly before or wholly after it.
+// Series come back in SelectSeries order: head series first, then series only
+// blocks hold, in block order. Samples for one series merge across head and
+// every block by the generation rule, as QueryRange merges them.
+func (bs *BlockStore) Select(ctx context.Context, p SelectParams) ([]SeriesData, error) {
+	if err := p.Validate(); err != nil {
+		return nil, err
+	}
+	bs.mu.RLock()
+	defer bs.mu.RUnlock()
+
+	type acc struct {
+		labels  Labels
+		samples []Sample
+		anchor  *Sample
+	}
+	var order []SeriesID
+	byID := make(map[SeriesID]*acc)
+	get := func(l Labels) *acc {
+		fp := SeriesID(l.Hash())
+		a, ok := byID[fp]
+		if !ok {
+			a = &acc{labels: l}
+			byID[fp] = a
+			order = append(order, fp)
+		}
+		return a
+	}
+
+	// Head: every series the head's index matches, with or without samples,
+	// so AnyTime keeps SelectSeries' membership semantics.
+	// Lock order is bs.mu, then the head's own lock — the order QueryRange and
+	// QueryInstant already take them in.
+	anyTime := p.SeriesOnly && p.AnyTime
+	headIDs := bs.mem.idx.Select(selectorToIndexMatchers(p.Selector))
+	bs.mem.mu.RLock()
+	for _, id := range headIDs {
+		ms, ok := bs.mem.series[SeriesID(id)]
+		if !ok {
+			continue
+		}
+		a := get(ms.labels)
+		if anyTime {
+			continue
+		}
+		if sd, keep := selectFromChunks(ms.labels, ms.chunks, SelectParams{
+			MinT: p.MinT, MaxT: p.MaxT, Anchor: p.Anchor,
+		}); keep {
+			a.samples = append(a.samples, sd.Samples...)
+			a.anchor = laterSample(a.anchor, sd.Anchor)
+		}
+	}
+	bs.mem.mu.RUnlock()
+
+	matchers := selectorToIndexMatchers(p.Selector)
+	wantAnchor := p.Anchor && p.MinT > math.MinInt64
+	for _, r := range bs.blocks {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		ids, err := r.Postings(matchers)
+		if err != nil {
+			return nil, fmt.Errorf("blockstore: select series in block: %w", err)
+		}
+		meta := r.Meta()
+		readChunks := !anyTime && p.MaxT >= p.MinT &&
+			meta.MinTime <= p.MaxT && (wantAnchor || meta.MaxTime >= p.MinT)
+		for _, id := range ids {
+			se, ok := r.SeriesByID(id)
+			if !ok {
+				continue
+			}
+			l, err := blockPairsToLabels(se.Labels)
+			if err != nil {
+				return nil, fmt.Errorf("blockstore: decode series %d labels: %w", se.ID, err)
+			}
+			a := get(l)
+			if !readChunks {
+				continue
+			}
+			for _, ref := range se.Chunks {
+				c, err := r.ReadChunk(ref)
+				if err != nil {
+					return nil, fmt.Errorf("blockstore: read chunk: %w", err)
+				}
+				it := c.Iterator()
+				for it.Next() {
+					ts, val := it.At()
+					switch {
+					case ts >= p.MinT && ts <= p.MaxT:
+						a.samples = append(a.samples, Sample{SeriesID: SeriesID(l.Hash()), TimestampMs: ts, Value: val, Gen: it.Gen()})
+					case wantAnchor && ts < p.MinT:
+						cand := Sample{SeriesID: SeriesID(l.Hash()), TimestampMs: ts, Value: val, Gen: it.Gen()}
+						a.anchor = laterSample(a.anchor, &cand)
+					}
+				}
+			}
+		}
+	}
+
+	out := make([]SeriesData, 0, len(order))
+	for _, fp := range order {
+		a := byID[fp]
+		switch {
+		case anyTime:
+			out = append(out, SeriesData{Labels: a.labels})
+		case p.SeriesOnly:
+			if len(a.samples) > 0 {
+				out = append(out, SeriesData{Labels: a.labels})
+			}
+		default:
+			if len(a.samples) == 0 && a.anchor == nil {
+				continue
+			}
+			var anchor *Sample
+			if a.anchor != nil {
+				cp := *a.anchor
+				anchor = &cp
+			}
+			out = append(out, SeriesData{Labels: a.labels, Anchor: anchor, Samples: sortAndDedup(a.samples)})
+		}
+	}
+	return out, nil
+}
+
+// SelectLabelNames implements Source.
+func (bs *BlockStore) SelectLabelNames(context.Context) ([]string, error) {
+	return bs.LabelNames(), nil
+}
+
+// SelectLabelValues implements Source.
+func (bs *BlockStore) SelectLabelValues(_ context.Context, name string) ([]string, error) {
+	return bs.LabelValues(name), nil
+}
