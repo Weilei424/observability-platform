@@ -750,7 +750,7 @@ its assertions.
 
 **Bulk reads** — one read per selector per query, so a remote source costs one round trip, not one per step
 - [x] `metrics.Source` — `Select(ctx, SelectParams)` with anchors, series-only, and any-time membership; `SelectLabelNames` / `SelectLabelValues`; highest-generation dedup
-- [ ] Metrics engine over `Source`, with `…Context` variants; the old per-tick evaluator kept as a test oracle over randomized series with out-of-order writes and overwrites — instant, range, and `rate` results must match exactly
+- [x] Metrics engine over `Source`, with `…Context` variants; the old per-tick evaluator kept as a test oracle over randomized series with out-of-order writes and overwrites — instant, range, and `rate` results must match exactly
 - [ ] Native `Select` on `MemoryStore`, `BlockStore`, and `WALStore`
 - [ ] `logs.Source` — `SelectStreams`; the logs engine over it; the Loki label handlers surface source errors
 
