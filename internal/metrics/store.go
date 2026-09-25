@@ -1,7 +1,9 @@
 package metrics
 
 import (
+	"context"
 	"errors"
+	"math"
 	"sync"
 
 	"github.com/masonwheeler/observability-platform/internal/storage/chunk"
@@ -390,4 +392,83 @@ func (s *MemoryStore) DiscardSealedChunks(toDiscard []SeriesChunks) {
 		ms.chunks = keep
 		s.series[id] = ms
 	}
+}
+
+var _ Source = (*MemoryStore)(nil)
+
+// Select implements Source over the head. Series come back in index order, the
+// same order SelectSeries returns them.
+func (s *MemoryStore) Select(ctx context.Context, p SelectParams) ([]SeriesData, error) {
+	if err := p.Validate(); err != nil {
+		return nil, err
+	}
+	ids := s.idx.Select(selectorToIndexMatchers(p.Selector))
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]SeriesData, 0, len(ids))
+	for _, id := range ids {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		ms, ok := s.series[SeriesID(id)]
+		if !ok {
+			continue
+		}
+		if sd, keep := selectFromChunks(ms.labels, ms.chunks, p); keep {
+			out = append(out, sd)
+		}
+	}
+	return out, nil
+}
+
+// selectFromChunks answers p for one series from its in-memory chunks. keep is
+// false when the series has nothing p asks for.
+func selectFromChunks(l Labels, chunks []*chunk.Chunk, p SelectParams) (SeriesData, bool) {
+	if p.SeriesOnly && p.AnyTime {
+		return SeriesData{Labels: l}, true
+	}
+	if p.MaxT < p.MinT {
+		return SeriesData{}, false
+	}
+	var samples []Sample
+	var anchor *Sample
+	wantAnchor := p.Anchor && p.MinT > math.MinInt64
+	for _, c := range chunks {
+		if c.NumSamples() == 0 {
+			continue
+		}
+		if c.MinTs() > p.MaxT || (!wantAnchor && c.MaxTs() < p.MinT) {
+			continue
+		}
+		it := c.Iterator()
+		for it.Next() {
+			ts, val := it.At()
+			switch {
+			case ts >= p.MinT && ts <= p.MaxT:
+				samples = append(samples, Sample{SeriesID: SeriesID(l.Hash()), TimestampMs: ts, Value: val, Gen: it.Gen()})
+			case wantAnchor && ts < p.MinT:
+				cand := Sample{SeriesID: SeriesID(l.Hash()), TimestampMs: ts, Value: val, Gen: it.Gen()}
+				anchor = laterSample(anchor, &cand)
+			}
+		}
+	}
+	if p.SeriesOnly {
+		return SeriesData{Labels: l}, len(samples) > 0
+	}
+	if len(samples) == 0 && anchor == nil {
+		return SeriesData{}, false
+	}
+	if anchor != nil {
+		a := *anchor
+		anchor = &a
+	}
+	return SeriesData{Labels: l, Anchor: anchor, Samples: sortAndDedup(samples)}, true
+}
+
+// SelectLabelNames implements Source; the head's index never fails.
+func (s *MemoryStore) SelectLabelNames(context.Context) ([]string, error) { return s.LabelNames(), nil }
+
+// SelectLabelValues implements Source; the head's index never fails.
+func (s *MemoryStore) SelectLabelValues(_ context.Context, name string) ([]string, error) {
+	return s.LabelValues(name), nil
 }
