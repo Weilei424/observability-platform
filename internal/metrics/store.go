@@ -73,6 +73,14 @@ func (s *MemoryStore) EnsureGenFloor(floor int64) {
 	}
 }
 
+// NextGeneration returns the generation the next append will be assigned.
+// Every sample already in memory has a smaller one.
+func (s *MemoryStore) NextGeneration() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.nextGen
+}
+
 // GenerationExhausted reports whether the write-generation counter has passed
 // chunk.MaxGeneration, so no further append can be assigned a valid generation.
 // Lets the WAL layer refuse a doomed write before persisting its record.
