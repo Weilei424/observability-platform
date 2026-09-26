@@ -62,9 +62,10 @@ func readBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, bool
 	return body, true
 }
 
-// decodeStrict unmarshals body into v, refusing unknown fields: both sides of
-// this API ship in one binary, so an unknown field is a version mismatch, not a
-// field to ignore. It answers 400 itself when it fails.
+// decodeStrict unmarshals body into v, refusing unknown fields and anything
+// after the JSON value: both sides of this API ship in one binary, so an
+// unknown field or trailing data is a version mismatch, not something to
+// ignore. It answers 400 itself when it fails.
 func decodeStrict(w http.ResponseWriter, body []byte, v any) bool {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
@@ -72,11 +73,28 @@ func decodeStrict(w http.ResponseWriter, body []byte, v any) bool {
 		writeError(w, http.StatusBadRequest, "invalid request: "+err.Error())
 		return false
 	}
+	// dec.Decode reads exactly one JSON value off the stream and stops; on its
+	// own it would silently discard a second value or trailing garbage after
+	// it, contradicting "Strict". A second Decode must land on exactly io.EOF
+	// for the body to be considered fully consumed: trailing whitespace or a
+	// newline reads as EOF, but a second value or any other trailing byte does
+	// not. This is deliberately not dec.More(): More peeks for a '}' or ']' as
+	// its "nothing more" signal, which is right inside an enclosing array or
+	// object but means a body like `{"a":1}}` — a stray extra '}' with nothing
+	// else after it — is not caught; a second Decode is caught by a
+	// SyntaxError instead, since '}' cannot start a JSON value on its own.
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err != io.EOF {
+		writeError(w, http.StatusBadRequest, "invalid request: trailing data after JSON value")
+		return false
+	}
 	return true
 }
 
 // errorMessage extracts {"error": ...} from an answer body, falling back to the
-// first 200 bytes of whatever it is.
+// first 200 bytes of whatever it is. The fallback cuts by byte count, which can
+// land inside a multi-byte rune; ToValidUTF8 drops that dangling partial rune
+// instead of handing back a string that isn't valid UTF-8.
 func errorMessage(raw []byte) string {
 	var e errorBody
 	if json.Unmarshal(raw, &e) == nil && e.Error != "" {
@@ -84,7 +102,7 @@ func errorMessage(raw []byte) string {
 	}
 	s := strings.TrimSpace(string(raw))
 	if len(s) > 200 {
-		s = s[:200] + "…"
+		s = strings.ToValidUTF8(s[:200], "") + "…"
 	}
 	return s
 }
