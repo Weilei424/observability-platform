@@ -71,6 +71,10 @@ type Deps struct {
 	// removing a temp file in Config.DataDir). Stateless components pass one
 	// that always succeeds: they own no data directory to prove writable.
 	Ready func() error
+
+	// Upstreams, when set, makes this server a gateway (see gateway.go): every
+	// public route is proxied, and the engine and ingester fields are unused.
+	Upstreams *Upstreams
 }
 
 type Server struct {
@@ -87,6 +91,7 @@ type Server struct {
 	routes      RouteSet
 	internal    func(chi.Router)
 	ready       func() error
+	gateway     *gatewayProxies
 }
 
 func New(d Deps) *Server {
@@ -109,6 +114,9 @@ func New(d Deps) *Server {
 		routes:      d.Routes,
 		internal:    d.Internal,
 		ready:       d.Ready,
+	}
+	if d.Upstreams != nil {
+		s.gateway = newGatewayProxies(d.Upstreams)
 	}
 	s.router = s.buildRouter()
 	return s
