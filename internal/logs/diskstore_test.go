@@ -674,8 +674,8 @@ func TestStore_CloseClosesWALEvenWhenFlushFails(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	spy := &walCloseSpy{logWAL: s.wal}
-	s.wal = spy
+	spy := &walCloseSpy{logWAL: s.head.wal}
+	s.head.wal = spy
 
 	err := s.Close()
 	if err == nil {
@@ -840,9 +840,7 @@ func TestStoreStatsIgnoresOrphanedChunkTempFiles(t *testing.T) {
 	}
 
 	// Create an orphaned .chunk.tmp file (simulating a crash between fsync and rename)
-	s.mu.Lock()
-	actualChunksDir := s.chunksDir
-	s.mu.Unlock()
+	actualChunksDir := s.chunks.chunksDir
 
 	tmpPath := filepath.Join(actualChunksDir, "orphaned.chunk.tmp")
 	if err := os.WriteFile(tmpPath, []byte("fake chunk data with some bytes"), 0o644); err != nil {
