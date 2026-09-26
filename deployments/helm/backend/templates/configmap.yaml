@@ -7,6 +7,11 @@ metadata:
 {{- if hasKey .Values.config "OBS_HTTP_ADDR" }}
 {{- fail "config.OBS_HTTP_ADDR is not settable: the listen port is owned by service.port, which the Services and every probe are derived from. Set service.port instead." }}
 {{- end }}
+{{- range $key := list "OBS_TARGET" "OBS_INGESTER_URL" "OBS_STORE_URL" "OBS_QUERIER_URL" }}
+{{- if hasKey $.Values.config $key }}
+{{- fail (printf "config.%s is not settable: the chart decides each component's target and peer URLs." $key) }}
+{{- end }}
+{{- end }}
 data:
   # service.port is the single owner of the listen port: it is derived here
   # rather than left to the http_addr default of :8080, so the container
