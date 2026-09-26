@@ -29,6 +29,16 @@ type StreamData struct {
 	Entries []LogEntry
 }
 
+// AsSource returns r as a Source: r itself when it already is one, otherwise
+// an exact adapter over its per-stream reads. The ingester and the store serve
+// their Head and ChunkStore through it.
+func AsSource(r Reader) Source {
+	if src, ok := r.(Source); ok {
+		return src
+	}
+	return readerSource{r: r}
+}
+
 // readerSource adapts a Reader to Source. For a *Store it is exact: it is the
 // same per-stream reads the engine made before bulk reads.
 type readerSource struct{ r Reader }
