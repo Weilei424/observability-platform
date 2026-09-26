@@ -241,15 +241,23 @@ func (c *Config) validateTopology() error {
 // later callers can join "/internal/v1/..." onto it without doubling the
 // slash.
 //
-// The userinfo check runs before every other check that echoes raw into its
-// error: a peer URL can carry embedded credentials
-// (http://user:pass@host:port), and this function exists in part to catch
-// that, so no error path may print raw once it is known to carry a userinfo
-// component — printing it would leak the very credentials being rejected
-// into whatever the caller logs.
+// Every error path guards against raw carrying embedded credentials
+// (http://user:pass@host:port). When url.Parse succeeds, the userinfo check
+// runs before every other check that echoes raw, so a well-formed URL with
+// credentials never reaches a message that prints raw. When url.Parse itself
+// fails, u is unusable — the userinfo check cannot run — so raw is withheld
+// whenever it contains "@": a malformed credential (a password with a space,
+// or a bad percent-escape inside one) still fails to parse, and both
+// *url.Error and url.EscapeError embed the offending text in their own
+// Error() string, so wrapping err would leak it exactly like printing raw
+// would. A malformed value with no "@" cannot carry userinfo, so it keeps
+// the detailed message.
 func validatePeerURL(env string, target Target, raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
+		if strings.Contains(raw, "@") {
+			return "", fmt.Errorf("config: %s is not a valid URL for target %s (value withheld because it may contain credentials)", env, target)
+		}
 		return "", fmt.Errorf("config: %s %q is not a URL for target %s: %w", env, raw, target, err)
 	}
 	if u.User != nil {
