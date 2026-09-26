@@ -24,23 +24,32 @@ func (s *Server) buildRouter() chi.Router {
 		r.Handle("/metrics", promhttp.HandlerFor(s.reg, promhttp.HandlerOpts{}))
 	}
 
-	r.Post("/api/v1/ingest/metrics", s.handleIngestMetrics)
-	r.Get("/api/v1/query", s.handleQuery)
-	r.Post("/api/v1/query", s.handleQuery)
-	r.Get("/api/v1/query_range", s.handleQueryRange)
-	r.Post("/api/v1/query_range", s.handleQueryRange)
-	r.Get("/api/v1/labels", s.handleLabels)
-	r.Post("/api/v1/labels", s.handleLabels)
-	r.Get("/api/v1/label/{name}/values", s.handleLabelValues)
-	r.Post("/api/v1/label/{name}/values", s.handleLabelValues)
-	r.Get("/api/v1/series", s.handleSeries)
-	r.Post("/api/v1/series", s.handleSeries)
+	if s.routes.writes() {
+		r.Post("/api/v1/ingest/metrics", s.handleIngestMetrics)
+		r.Post("/loki/api/v1/push", s.handleLokiPush)
+	}
 
-	r.Post("/loki/api/v1/push", s.handleLokiPush)
-	r.Get("/loki/api/v1/query", s.handleLokiQuery)
-	r.Get("/loki/api/v1/query_range", s.handleLokiQueryRange)
-	r.Get("/loki/api/v1/labels", s.handleLokiLabels)
-	r.Get("/loki/api/v1/label/{name}/values", s.handleLokiLabelValues)
+	if s.routes.reads() {
+		r.Get("/api/v1/query", s.handleQuery)
+		r.Post("/api/v1/query", s.handleQuery)
+		r.Get("/api/v1/query_range", s.handleQueryRange)
+		r.Post("/api/v1/query_range", s.handleQueryRange)
+		r.Get("/api/v1/labels", s.handleLabels)
+		r.Post("/api/v1/labels", s.handleLabels)
+		r.Get("/api/v1/label/{name}/values", s.handleLabelValues)
+		r.Post("/api/v1/label/{name}/values", s.handleLabelValues)
+		r.Get("/api/v1/series", s.handleSeries)
+		r.Post("/api/v1/series", s.handleSeries)
+
+		r.Get("/loki/api/v1/query", s.handleLokiQuery)
+		r.Get("/loki/api/v1/query_range", s.handleLokiQueryRange)
+		r.Get("/loki/api/v1/labels", s.handleLokiLabels)
+		r.Get("/loki/api/v1/label/{name}/values", s.handleLokiLabelValues)
+	}
+
+	if s.internal != nil {
+		r.Route("/internal/v1", s.internal)
+	}
 
 	return r
 }
