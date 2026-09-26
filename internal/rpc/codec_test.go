@@ -14,7 +14,7 @@ import (
 )
 
 func TestWireSampleRoundTripsEveryFloat(t *testing.T) {
-	for _, v := range []float64{0, -0.5, 1e-300, math.MaxFloat64, math.NaN(), math.Inf(1), math.Inf(-1), 0.1 + 0.2} {
+	for _, v := range []float64{0, math.Copysign(0, -1), -0.5, 1e-300, math.MaxFloat64, math.NaN(), math.Inf(1), math.Inf(-1), 0.1 + 0.2} {
 		in := wireSample{T: -1_000, V: v, G: 1<<62 - 7}
 		raw, err := json.Marshal(in)
 		if err != nil {
@@ -32,9 +32,32 @@ func TestWireSampleRoundTripsEveryFloat(t *testing.T) {
 }
 
 func TestWireSampleRejectsMalformedInput(t *testing.T) {
-	for _, raw := range []string{`[1,"2"]`, `[1,2,3]`, `[1,"x",3]`, `{"t":1}`, `[1,"2",3.5]`} {
+	for _, raw := range []string{
+		`[1,"2"]`, `[1,2,3]`, `[1,"x",3]`, `{"t":1}`, `[1,"2",3.5]`,
+		// A 20-digit generation overflows int64 (max is 19 digits): must be a
+		// clean decode error, not a panic.
+		`[1,"2",12345678901234567890]`,
+	} {
 		var s wireSample
 		if err := json.Unmarshal([]byte(raw), &s); err == nil {
+			t.Errorf("%s decoded without error", raw)
+		}
+	}
+}
+
+// TestWireEntryRejectsMalformedInput mirrors TestWireSampleRejectsMalformedInput
+// for wireEntry: wrong arity, a non-integer timestamp, a non-string line, and a
+// non-array value must all be clean decode errors, not panics.
+func TestWireEntryRejectsMalformedInput(t *testing.T) {
+	for _, raw := range []string{
+		`[1]`,                // too few elements
+		`[1,"x",2]`,          // too many elements
+		`["x","line"]`,       // non-integer timestamp
+		`[1,2]`,              // non-string line
+		`{"t":1,"line":"x"}`, // not an array at all
+	} {
+		var e wireEntry
+		if err := json.Unmarshal([]byte(raw), &e); err == nil {
 			t.Errorf("%s decoded without error", raw)
 		}
 	}
