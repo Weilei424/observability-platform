@@ -772,7 +772,7 @@ its assertions.
 - [x] Internal wire format — sample values as `strconv.FormatFloat` strings so `NaN` and `±Inf` survive, generations as integers, flushed chunks as base64 of the persisted encoding, invalid UTF-8 refused
 - [x] `/internal/v1` routes — reads on the ingester and the store; flush-in, blocks, compact, and retention on the store only; flush bodies capped at 64 MiB with `413`
 - [x] Peer clients — 5 s dial; a transport error or 5xx is unavailable (queries answer `503`), a 4xx is a protocol bug (`500`)
-- [ ] `internal/api` — route sets, an internal mount point, injectable readiness, `503 unavailable` mapping
+- [x] `internal/api` — route sets, an internal mount point, injectable readiness, `503 unavailable` mapping
 - [ ] Gateway — a route-level reverse proxy over exactly the all-in-one route table; forwards `X-Request-Id`; answers `503` in each route family's shape; never proxies `/internal`
 - [ ] The five modes — `gateway`, `ingester`, `querier`, `store`, `compactor` — each assembled in `internal/app`, beside `all-in-one`
 - [ ] Source conformance suite — every local and remote `Source` implementation returns the same results
