@@ -195,21 +195,29 @@ func TestChunkSinkWritesLinesWithoutHTMLEscaping(t *testing.T) {
 // actually aborts a request already in flight against a slow peer, not merely
 // a request whose context was already cancelled before it started (that case
 // is covered above by TestClientClassifiesFailures).
+//
+// The source is built before the goroutine starts: client(t, ...) may call
+// t.Fatal, which must run on the test's own goroutine, not one this test
+// spawns. An arrived channel — closed once the handler is actually running —
+// replaces a fixed sleep, so the test doesn't guess how long "in flight" takes.
 func TestClientContextCancellationAbortsInFlightRequest(t *testing.T) {
+	arrived := make(chan struct{})
 	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(arrived)
 		<-release // hang until the test releases it, simulating a slow peer
 	}))
 	t.Cleanup(func() { close(release); srv.Close() })
 
+	src := rpc.NewMetricsSource(client(t, srv.URL))
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := rpc.NewMetricsSource(client(t, srv.URL)).SelectLabelNames(ctx)
+		_, err := src.SelectLabelNames(ctx)
 		errCh <- err
 	}()
 
-	time.Sleep(50 * time.Millisecond) // let the request reach the server and block there
+	<-arrived // the request has reached the server and is blocked there
 	cancel()
 
 	select {
@@ -219,6 +227,63 @@ func TestClientContextCancellationAbortsInFlightRequest(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("request did not abort after its context was cancelled")
+	}
+}
+
+// TestClientContextDeadlineIsUnavailable pins the fix-round-1 ruling: unlike a
+// cancellation, a deadline means the peer failed to answer in time — the same
+// as any other timeout — so it must classify as ErrUnavailable (in addition to
+// still satisfying errors.Is against the deadline itself).
+func TestClientContextDeadlineIsUnavailable(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release // hang past the deadline, simulating an unresponsive peer
+	}))
+	t.Cleanup(func() { close(release); srv.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err := rpc.NewMetricsSource(client(t, srv.URL)).SelectLabelNames(ctx)
+	if !errors.Is(err, rpc.ErrUnavailable) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("deadline = %v, want both ErrUnavailable and context.DeadlineExceeded", err)
+	}
+}
+
+// TestClientTreatsATruncated200AsUnavailable pins the fix-round-1 ruling that a
+// 2xx whose body is cut short mid-transfer is a transport failure like any
+// other, not a decode error to surface as a protocol disagreement: the peer
+// promises more bytes than it (or the connection) ever delivers.
+func TestClientTreatsATruncated200AsUnavailable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"names":`)) // far short of the promised length
+		if hj, ok := w.(http.Hijacker); ok {
+			if conn, _, err := hj.Hijack(); err == nil {
+				_ = conn.Close()
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := rpc.NewMetricsSource(client(t, srv.URL)).SelectLabelNames(context.Background())
+	if !errors.Is(err, rpc.ErrUnavailable) {
+		t.Errorf("truncated 2xx = %v, want ErrUnavailable", err)
+	}
+}
+
+// TestClientFiveHundredErrorNamesPeerAndMessage pins the fix-round-1 ruling
+// that a 5xx's error keeps enough for an operator to act on it: which peer
+// answered, and the peer's own error text, not just a bare classification.
+func TestClientFiveHundredErrorNamesPeerAndMessage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"error":"disk on fire"}`, http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := rpc.NewMetricsSource(client(t, srv.URL)).SelectLabelNames(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "store") || !strings.Contains(err.Error(), "disk on fire") {
+		t.Fatalf("5xx error = %v, want it to name the peer (%q) and carry the peer's message (%q)", err, "store", "disk on fire")
 	}
 }
 
