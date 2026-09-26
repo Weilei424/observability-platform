@@ -9,17 +9,15 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/masonwheeler/observability-platform/internal/api"
-	"github.com/masonwheeler/observability-platform/internal/compactor"
+	"github.com/masonwheeler/observability-platform/internal/app"
 	"github.com/masonwheeler/observability-platform/internal/config"
 	"github.com/masonwheeler/observability-platform/internal/logs"
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/observability"
-	"github.com/masonwheeler/observability-platform/internal/storage/fsutil"
 	"github.com/masonwheeler/observability-platform/internal/storage/wal"
 )
 
@@ -51,39 +49,24 @@ func main() {
 	// the structured JSON application logger instead of the stdlib text default.
 	slog.SetDefault(log)
 
-	sc, err := buildServer(cfg, log)
-	if err != nil {
-		// buildServer already logged the specific failure.
-		os.Exit(1)
-	}
-	srv := sc.Server
-	store := sc.Store
-	blockStore := sc.BlockStore
-	w := sc.WAL
-	logStore := sc.LogStore
-	mx := sc.Maintenance
-
 	// log itself is api.Deps.Logger and must stay component-free (see the doc
 	// comment on that field in internal/api/server.go), so main()'s own
 	// lifecycle logging goes through a derived logger instead of log directly.
 	mainLog := observability.Component(log, "main")
 
+	a, err := app.Build(cfg, log)
+	if err != nil {
+		mainLog.Error("startup failed", slog.String("target", string(cfg.Target)), slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	comp := compactor.New(store, blockStore, store, time.Now, compactor.Config{
-		MaintenanceInterval: cfg.MaintenanceInterval,
-		FlushInterval:       cfg.FlushInterval,
-		FlushSealedChunks:   cfg.FlushSealedChunks,
-		FlushWALBytes:       cfg.FlushWALBytes,
-		Ranges:              compactor.Ranges(cfg.CompactionBaseRange.Milliseconds(), int64(cfg.CompactionMultiplier), cfg.CompactionLevels),
-		Retention:           cfg.Retention,
-	}, mx, observability.Component(log, "compactor"))
-
-	compDone := make(chan struct{})
+	runDone := make(chan struct{})
 	go func() {
-		comp.Run(ctx)
-		close(compDone)
+		a.Run(ctx)
+		close(runDone)
 	}()
 
 	// Bind synchronously so a bind failure (e.g. address already in use) is fatal
@@ -105,7 +88,7 @@ func main() {
 		}
 	}
 
-	httpSrv := &http.Server{Handler: srv}
+	httpSrv := &http.Server{Handler: a.Handler}
 	go func() {
 		mainLog.Info("starting server", slog.String("addr", boundAddr), slog.String("data_dir", cfg.DataDir))
 		if err := httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -123,31 +106,13 @@ func main() {
 		mainLog.Error("http shutdown error", slog.String("error", err.Error()))
 	}
 
-	<-compDone // compactor performs its final flush on ctx cancellation
-
-	walLog := observability.Component(log, "wal")
-	if err := w.Close(); err != nil {
-		walLog.Error("wal close error", slog.String("error", err.Error()))
-	}
-	// Close joins the flush error and the WAL-close error, so this line can carry
-	// either or both. Both are durability failures worth naming as such: a failed
-	// flush leaves the head only in the WAL, and a failed WAL close means its tail
-	// was never fsynced. Shutdown still completes — there is nothing left to retry
-	// at this point — but the next start replays from whatever did reach disk.
-	logsLog := observability.Component(log, "logs")
-	if err := logStore.Close(); err != nil {
-		logsLog.Error("logs store close error: buffered logs may not have reached disk",
-			slog.String("error", err.Error()))
-	}
-	if err := blockStore.Close(); err != nil {
-		mainLog.Error("block store close error", slog.String("error", err.Error()))
-	}
+	<-runDone // the maintenance loop performs its final flush on ctx cancellation
+	a.Close()
 	mainLog.Info("shutdown complete")
 }
 
-// serverComponents are the collaborators buildServer constructs: the API
-// server itself, plus the storage handles main() needs afterward to wire the
-// compactor and to close everything down on shutdown.
+// serverComponents are the all-in-one collaborators cmd/server's tests drive:
+// the API server, plus the storage handles they close.
 type serverComponents struct {
 	Server      *api.Server
 	Store       *metrics.WALStore
@@ -157,137 +122,21 @@ type serverComponents struct {
 	Maintenance *observability.Metrics
 }
 
-// buildServer wires the API server and its storage collaborators. This is
-// exactly the construction main() used to run inline, cut out unchanged
-// (each os.Exit(1) became a returned error; main() still decides to exit on
-// failure) so a test can build the same production wiring in a temp data
-// directory: create the data directory, open the block store, replay the
-// metrics WAL from the last checkpoint, open the WAL for new writes, open the
-// logs store, then construct the query engine, registry, and api.Deps from
-// them.
-//
-// log becomes api.Deps.Logger unchanged -- see the doc comment on that field
-// for why it must not already carry a "component" attribute. Because
-// production's actual wiring now lives in a function instead of only inside
-// main(), a cmd/server test can drive a real request through it and catch a
-// regression here (e.g. reintroducing observability.Component(log, "api"))
-// that a lighter, hand-assembled api.Deps in another package's tests would
-// never see.
+// buildServer is the all-in-one assembly main() runs through app.Build, kept
+// as the entry point these tests use: a regression in production's wiring (for
+// example a component-stamped api.Deps.Logger) shows up here, where a
+// hand-assembled api.Deps in another package's tests would never see it.
 func buildServer(cfg *config.Config, log *slog.Logger) (*serverComponents, error) {
-	// log becomes api.Deps.Logger unchanged at the bottom of this function and
-	// must stay component-free (see the doc comment on that field in
-	// internal/api/server.go) — so every log line buildServer emits for its own
-	// startup/replay work goes through a derived, component-stamped logger
-	// instead, never through log directly. mainLog covers generic startup
-	// concerns (the data directory, the block store); walLog and logsLog are
-	// the same "wal"/"logs" component names the metrics-WAL and logs-store
-	// packages already use for their own log lines, reused here rather than
-	// invented, so startup and runtime lines about the same subsystem carry
-	// the same name.
-	mainLog := observability.Component(log, "main")
-	walLog := observability.Component(log, "wal")
-	logsLog := observability.Component(log, "logs")
-
-	// Durably create the data directory so its own directory entry survives a
-	// power loss on first startup — a plain MkdirAll leaves the entry only in the
-	// OS cache, and the WAL helpers below stop walking at the (now-existing) data
-	// dir and never fsync its parent.
-	if err := fsutil.MkdirAllSync(cfg.DataDir); err != nil {
-		mainLog.Error("failed to create data directory", slog.String("data_dir", cfg.DataDir), slog.String("error", err.Error()))
-		return nil, err
-	}
-
-	walDir := filepath.Join(cfg.DataDir, "metrics", "wal")
-
-	blockStore, err := metrics.NewBlockStore(cfg.DataDir)
+	a, err := app.BuildAllInOne(cfg, log)
 	if err != nil {
-		mainLog.Error("failed to open block store", slog.String("error", err.Error()))
 		return nil, err
 	}
-
-	checkpoint := metrics.ReadCheckpoint(cfg.DataDir)
-	walLog.Info("WAL checkpoint", slog.Int("after_segment", checkpoint))
-
-	var replayCount int
-	if err := wal.ReplayFrom(walDir, checkpoint, func(pairs []wal.LabelPair, tsMs int64, value float64) {
-		lm := make(map[string]string, len(pairs))
-		for _, p := range pairs {
-			lm[p.Name] = p.Value
-		}
-		labels, err := metrics.NewLabels(lm)
-		if err != nil {
-			walLog.Warn("WAL replay: skipping record with invalid labels", slog.String("error", err.Error()))
-			return
-		}
-		if err := blockStore.Append(labels, tsMs, value); err != nil {
-			walLog.Warn("WAL replay: failed to append sample", slog.String("error", err.Error()))
-			return
-		}
-		replayCount++
-	}); err != nil {
-		walLog.Error("WAL replay failed", slog.String("error", err.Error()))
-		return nil, err
-	}
-	walLog.Info("WAL replay complete", slog.Int("samples_restored", replayCount))
-
-	blockStore.MemStore().SetHeadFence(checkpoint + 1)
-
-	w, err := wal.Open(walDir, cfg.WALSegmentMaxBytes, cfg.WALSyncEveryN)
-	if err != nil {
-		walLog.Error("failed to open WAL", slog.String("wal_dir", walDir), slog.String("error", err.Error()))
-		return nil, err
-	}
-
-	logsDir := filepath.Join(cfg.DataDir, "logs")
-	logsWALDir := filepath.Join(logsDir, "wal")
-	logStore, err := logs.NewStore(
-		logsWALDir,
-		filepath.Join(logsDir, "chunks"),
-		filepath.Join(logsDir, "index"),
-		cfg.WALSegmentMaxBytes,
-		cfg.WALSyncEveryN,
-		cfg.LogsFlushThresholdBytes,
-	)
-	if err != nil {
-		logsLog.Error("failed to open logs store", slog.String("logs_dir", logsDir), slog.String("error", err.Error()))
-		return nil, err
-	}
-	logsLog.Info("logs store ready", slog.String("logs_dir", logsDir))
-	logIngester := logStore
-	logQuery := logs.NewQueryEngine(logStore)
-
-	store := metrics.NewWALStore(w, blockStore, cfg.DataDir)
-	engine := metrics.NewQueryEngine(blockStore)
-	reg, inst := observability.NewRegistry(observability.RegistryOptions{
-		Cardinality: blockStore,
-		Storage:     blockStore,
-		WALs: []observability.WALSource{
-			{Name: "metrics", Stats: func() (int64, int, error) { return wal.DirStats(walDir) }},
-			{Name: "logs", Stats: func() (int64, int, error) { return wal.DirStats(logsWALDir) }},
-		},
-		Logs: logStore,
-		// The plain logger, never a component-stamped one: each collector adds
-		// its own component (see RegistryOptions.Logger).
-		Logger: log,
-	})
-	srv := api.New(api.Deps{
-		Config:      cfg,
-		Logger:      log,
-		Ingester:    store,
-		Engine:      engine,
-		Registry:    reg,
-		LogIngester: logIngester,
-		LogQuery:    logQuery,
-		HTTP:        inst.HTTP,
-		Ingest:      inst.Ingest,
-	})
-
 	return &serverComponents{
-		Server:      srv,
-		Store:       store,
-		BlockStore:  blockStore,
-		WAL:         w,
-		LogStore:    logStore,
-		Maintenance: inst.Maintenance,
+		Server:      a.Server,
+		Store:       a.Store,
+		BlockStore:  a.BlockStore,
+		WAL:         a.WAL,
+		LogStore:    a.LogStore,
+		Maintenance: a.Maintenance,
 	}, nil
 }
