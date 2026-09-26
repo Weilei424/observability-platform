@@ -201,7 +201,8 @@ func parseDuration(s, name string) (time.Duration, error) {
 }
 
 // validateTopology checks the target and that exactly the peer URLs it needs
-// are set, each a base http(s) URL.
+// are set, each a base http(s) URL. Each peer field is normalized in place
+// (see validatePeerURL) once it passes.
 func (c *Config) validateTopology() error {
 	required, ok := requiredPeers[c.Target]
 	if !ok {
@@ -211,39 +212,61 @@ func (c *Config) validateTopology() error {
 		}
 		return fmt.Errorf("config: unknown OBS_TARGET %q (want one of %s)", c.Target, strings.Join(names, ", "))
 	}
-	values := map[peerKey]string{peerIngester: c.IngesterURL, peerStore: c.StoreURL, peerQuerier: c.QuerierURL}
+	// Pointers, not copies: an accepted URL is normalized (validatePeerURL
+	// trims a trailing "/"), and the normalized form needs to land back in
+	// the same Config field the raw value came from.
+	fields := map[peerKey]*string{peerIngester: &c.IngesterURL, peerStore: &c.StoreURL, peerQuerier: &c.QuerierURL}
 	for _, p := range []peerKey{peerIngester, peerStore, peerQuerier} {
 		needed := slices.Contains(required, p)
-		v := values[p]
+		v := *fields[p]
 		switch {
 		case needed && v == "":
 			return fmt.Errorf("config: target %s requires %s", c.Target, p.env)
 		case !needed && v != "":
 			return fmt.Errorf("config: %s is set but target %s does not use it; unset it", p.env, c.Target)
 		case v != "":
-			if err := validatePeerURL(p.env, v); err != nil {
+			normalized, err := validatePeerURL(p.env, c.Target, v)
+			if err != nil {
 				return err
 			}
+			*fields[p] = normalized
 		}
 	}
 	return nil
 }
 
-// validatePeerURL requires an absolute http or https URL with a host and
-// nothing after it but an optional "/": clients append their own paths.
-func validatePeerURL(env, raw string) error {
+// validatePeerURL requires an absolute http or https URL with a host and no
+// userinfo, and nothing after it but an optional "/": clients append their
+// own paths. On success it returns raw with any trailing "/" trimmed, so
+// later callers can join "/internal/v1/..." onto it without doubling the
+// slash.
+//
+// The userinfo check runs before every other check that echoes raw into its
+// error: a peer URL can carry embedded credentials
+// (http://user:pass@host:port), and this function exists in part to catch
+// that, so no error path may print raw once it is known to carry a userinfo
+// component — printing it would leak the very credentials being rejected
+// into whatever the caller logs.
+func validatePeerURL(env string, target Target, raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return fmt.Errorf("config: %s %q is not a URL: %w", env, raw, err)
+		return "", fmt.Errorf("config: %s %q is not a URL for target %s: %w", env, raw, target, err)
+	}
+	if u.User != nil {
+		return "", fmt.Errorf("config: %s must not contain a userinfo component (credentials) for target %s", env, target)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("config: %s %q must be an http or https URL", env, raw)
+		return "", fmt.Errorf("config: %s %q must be an http or https URL for target %s", env, raw, target)
 	}
 	if u.Host == "" {
-		return fmt.Errorf("config: %s %q has no host", env, raw)
+		return "", fmt.Errorf("config: %s %q has no host for target %s", env, raw, target)
 	}
-	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
-		return fmt.Errorf("config: %s %q must be a base URL with no path, query, or fragment", env, raw)
+	// u.Fragment is "" both when there is no "#" at all and when the "#" is
+	// bare (e.g. "http://host:port#"), so a fragment is checked from raw
+	// directly. u.RawQuery misses the same bare case for "?"; ForceQuery is
+	// the field net/url sets for exactly that case.
+	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery || strings.Contains(raw, "#") {
+		return "", fmt.Errorf("config: %s %q must be a base URL with no path, query, or fragment for target %s", env, raw, target)
 	}
-	return nil
+	return strings.TrimSuffix(raw, "/"), nil
 }
