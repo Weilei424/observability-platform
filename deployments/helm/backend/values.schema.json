@@ -13,6 +13,22 @@
           "$comment": "Listed because it is a real config key, but templates/configmap.yaml rejects it with an actionable message: service.port owns the listen address, and setting both emits the key twice in one ConfigMap.",
           "type": ["string"]
         },
+        "OBS_TARGET": {
+          "$comment": "A real config key, but templates/configmap.yaml rejects it: the chart decides each component's target.",
+          "type": ["string"]
+        },
+        "OBS_INGESTER_URL": {
+          "$comment": "A real config key, but templates/configmap.yaml rejects it: the chart renders peer URLs from its own Services.",
+          "type": ["string"]
+        },
+        "OBS_STORE_URL": {
+          "$comment": "A real config key, but templates/configmap.yaml rejects it: the chart renders peer URLs from its own Services.",
+          "type": ["string"]
+        },
+        "OBS_QUERIER_URL": {
+          "$comment": "A real config key, but templates/configmap.yaml rejects it: the chart renders peer URLs from its own Services.",
+          "type": ["string"]
+        },
         "OBS_DATA_DIR": { "type": ["string"] },
         "OBS_LOG_LEVEL": { "type": ["string"] },
         "OBS_WAL_SEGMENT_MAX_BYTES": { "type": ["string", "integer"] },
