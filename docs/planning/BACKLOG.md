@@ -768,7 +768,7 @@ its assertions.
 - [x] `internal/app` — one constructor per component, with `all-in-one` assembled from the same constructors; `cmd/server` delegates and keeps `buildServer`
 
 **The split components**
-- [ ] `metrics.Merge` / `logs.Merge` — the ingester read first, then the store; overlap resolved by highest generation; persisted log entries first at equal timestamps
+- [x] `metrics.Merge` / `logs.Merge` — the ingester read first, then the store; overlap resolved by highest generation; persisted log entries first at equal timestamps
 - [ ] Internal wire format — sample values as `strconv.FormatFloat` strings so `NaN` and `±Inf` survive, generations as integers, flushed chunks as base64 of the persisted encoding, invalid UTF-8 refused
 - [ ] `/internal/v1` routes — reads on the ingester and the store; flush-in, blocks, compact, and retention on the store only; flush bodies capped at 64 MiB with `413`
 - [ ] Peer clients — 5 s dial; a transport error or 5xx is unavailable (queries answer `503`), a 4xx is a protocol bug (`500`)
