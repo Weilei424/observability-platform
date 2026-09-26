@@ -40,7 +40,7 @@ func openPausableSplit(t *testing.T) (*Store, StreamID, *gatedSink) {
 		t.Fatalf("OpenChunkStore: %v", err)
 	}
 	sink := newGatedSink(cs)
-	h, err := OpenHead(filepath.Join(dir, "wal"), 1<<20, 1, 1<<30, sink)
+	h, err := OpenHead(filepath.Join(dir, "wal"), 1<<20, 1, 1<<30, sink, HeadOptions{})
 	if err != nil {
 		t.Fatalf("OpenHead: %v", err)
 	}
