@@ -12,6 +12,24 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// RouteSet selects which public routes a Server serves.
+type RouteSet int
+
+const (
+	// RoutesAll serves every public route. It is the zero value, so all-in-one
+	// and every Deps written before route sets existed keep serving everything.
+	RoutesAll RouteSet = iota
+	// RoutesWrite serves the two write routes: the ingester.
+	RoutesWrite
+	// RoutesRead serves the nine read routes: the querier.
+	RoutesRead
+	// RoutesNone serves only /healthz, /readyz, and /metrics: the store and the compactor.
+	RoutesNone
+)
+
+func (r RouteSet) writes() bool { return r == RoutesAll || r == RoutesWrite }
+func (r RouteSet) reads() bool  { return r == RoutesAll || r == RoutesRead }
+
 // Deps are the server's collaborators. This is a struct rather than a parameter
 // list because the list had already reached seven same-shaped pointers, where a
 // caller can transpose two arguments and still compile.
@@ -40,6 +58,19 @@ type Deps struct {
 	// instruments so handlers never nil-check and tests never panic.
 	HTTP   *observability.HTTPMetrics
 	Ingest *observability.IngestMetrics
+
+	// Routes selects the public routes served; the zero value serves them all.
+	Routes RouteSet
+
+	// Internal, when set, mounts a component's internal API under
+	// /internal/v1, behind the same request-ID, logging, and metrics
+	// middleware as the public routes.
+	Internal func(r chi.Router)
+
+	// Ready, when set, replaces the default readiness check (creating and
+	// removing a temp file in Config.DataDir). Stateless components pass one
+	// that always succeeds: they own no data directory to prove writable.
+	Ready func() error
 }
 
 type Server struct {
@@ -53,6 +84,9 @@ type Server struct {
 	logQuery    *logs.QueryEngine
 	http        *observability.HTTPMetrics
 	ingest      *observability.IngestMetrics
+	routes      RouteSet
+	internal    func(chi.Router)
+	ready       func() error
 }
 
 func New(d Deps) *Server {
@@ -72,6 +106,9 @@ func New(d Deps) *Server {
 		logQuery:    d.LogQuery,
 		http:        d.HTTP,
 		ingest:      d.Ingest,
+		routes:      d.Routes,
+		internal:    d.Internal,
+		ready:       d.Ready,
 	}
 	s.router = s.buildRouter()
 	return s
