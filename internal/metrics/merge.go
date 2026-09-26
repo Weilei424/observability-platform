@@ -2,7 +2,7 @@ package metrics
 
 import (
 	"context"
-	"sort"
+	"slices"
 )
 
 // Merge returns a Source that reads first to completion, then second, and
@@ -49,43 +49,16 @@ func (m merged) Select(ctx context.Context, p SelectParams) ([]SeriesData, error
 		}
 		cur := &out[i]
 		cur.Anchor = laterSample(cur.Anchor, sd.Anchor)
-		cur.Samples = mergeByGeneration(cur.Samples, sd.Samples)
+		// sortAndDedup is the one merge rule every read path applies (dedupByGeneration's
+		// doc, source.go): head against blocks, and here, ingester against store. Using it
+		// instead of a second copy of the generation comparison also means peer input that
+		// does not conform to a single Source's own invariants — two samples at one
+		// timestamp, or out of order, both reachable once samples cross the network — still
+		// comes out sorted and deduped: slices.Concat allocates a fresh slice, so this never
+		// appends into a peer's backing array.
+		cur.Samples = sortAndDedup(slices.Concat(cur.Samples, sd.Samples))
 	}
 	return out, nil
-}
-
-// mergeByGeneration merges two ascending, deduplicated sample slices, keeping
-// the higher generation at an equal timestamp — dedupByGeneration's rule, for
-// inputs that are already sorted.
-func mergeByGeneration(a, b []Sample) []Sample {
-	if len(a) == 0 {
-		return b
-	}
-	if len(b) == 0 {
-		return a
-	}
-	out := make([]Sample, 0, len(a)+len(b))
-	i, j := 0, 0
-	for i < len(a) && j < len(b) {
-		switch {
-		case a[i].TimestampMs < b[j].TimestampMs:
-			out = append(out, a[i])
-			i++
-		case a[i].TimestampMs > b[j].TimestampMs:
-			out = append(out, b[j])
-			j++
-		default:
-			if b[j].Gen > a[i].Gen {
-				out = append(out, b[j])
-			} else {
-				out = append(out, a[i])
-			}
-			i++
-			j++
-		}
-	}
-	out = append(out, a[i:]...)
-	return append(out, b[j:]...)
 }
 
 func (m merged) SelectLabelNames(ctx context.Context) ([]string, error) {
@@ -112,6 +85,8 @@ func (m merged) SelectLabelValues(ctx context.Context, name string) ([]string, e
 	return unionSorted(a, b), nil
 }
 
+// unionSorted builds the set of a and b and sorts it via sortedStringSet
+// (query.go), rather than a second copy of that normalize-and-sort logic.
 func unionSorted(a, b []string) []string {
 	set := make(map[string]struct{}, len(a)+len(b))
 	for _, s := range a {
@@ -120,10 +95,5 @@ func unionSorted(a, b []string) []string {
 	for _, s := range b {
 		set[s] = struct{}{}
 	}
-	out := make([]string, 0, len(set))
-	for s := range set {
-		out = append(out, s)
-	}
-	sort.Strings(out)
-	return out
+	return sortedStringSet(set)
 }
