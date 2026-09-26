@@ -122,3 +122,61 @@ func TestLoad_PeerURLTrailingSlashTrimmed(t *testing.T) {
 		t.Errorf("StoreURL = %q, want %q", cfg.StoreURL, "https://store:8443")
 	}
 }
+
+// TestLoad_PeerURLParseFailureCredentialSafety pins the parse-failure branch
+// of validatePeerURL, which TestLoad_PeerURLRejectsUserinfo does not reach:
+// url.Parse itself can fail on a malformed peer URL — a password with a
+// space, or an invalid percent-escape inside one — and when it fails, u is
+// nil, so the u.User check never runs. Both *url.Error and url.EscapeError
+// embed the offending URL text in their own Error() string, so wrapping err
+// (or printing raw) would leak the credential exactly like the accepted-URL
+// path already guards against. A malformed value with no "@" cannot carry
+// userinfo, so it keeps the detailed message — pinned here too, so a real
+// typo stays debuggable.
+func TestLoad_PeerURLParseFailureCredentialSafety(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		raw         string
+		wantAbsent  []string
+		wantPresent []string
+	}{
+		{
+			name:        "space in password",
+			raw:         "http://user:pa ss@store:8080",
+			wantAbsent:  []string{"pa ss", "user:"},
+			wantPresent: []string{"OBS_STORE_URL", "compactor"},
+		},
+		{
+			name:        "bad percent escape in password",
+			raw:         "http://user:pa%zzss@store:8080",
+			wantAbsent:  []string{"%zz", "user:"},
+			wantPresent: []string{"OBS_STORE_URL", "compactor"},
+		},
+		{
+			name:        "malformed with no credentials",
+			raw:         "http://store:8080:9090",
+			wantPresent: []string{"OBS_STORE_URL", "compactor", "8080:9090"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearTopologyEnv(t)
+			t.Setenv("OBS_TARGET", "compactor")
+			t.Setenv("OBS_STORE_URL", tc.raw)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatal("Load: want an error for a malformed peer URL, got nil")
+			}
+			for _, want := range tc.wantPresent {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %v, want it to contain %q", err, want)
+				}
+			}
+			for _, bad := range tc.wantAbsent {
+				if strings.Contains(err.Error(), bad) {
+					t.Errorf("error = %v, must not contain %q", err, bad)
+				}
+			}
+		})
+	}
+}
