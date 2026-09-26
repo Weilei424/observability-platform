@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -19,6 +20,13 @@ import (
 // DialTimeout bounds connecting to a peer. A request's own deadline comes from
 // its context.
 const DialTimeout = 5 * time.Second
+
+// errorBodyLimit bounds how much of a non-200 answer the client buffers. An
+// error body is always small — an {"error": "..."} object, or a maintenance
+// route's partial-count-plus-error — never data proportional to what was
+// requested, so a misbehaving peer can't make the client buffer an unbounded
+// body.
+const errorBodyLimit = 1 << 20
 
 // Client calls one peer's /internal/v1 API.
 type Client struct {
@@ -41,17 +49,20 @@ func NewClient(peer, base string) (*Client, error) {
 			DialContext:         (&net.Dialer{Timeout: DialTimeout, KeepAlive: 30 * time.Second}).DialContext,
 			MaxIdleConnsPerHost: 16,
 			IdleConnTimeout:     90 * time.Second,
+			TLSHandshakeTimeout: DialTimeout,
 		}},
 	}, nil
 }
 
 // do sends in (JSON, when non-nil) to /internal/v1/<path> and decodes the
-// answer into out. A transport failure or a 5xx is ErrUnavailable; any other
-// non-200 is a protocol disagreement between two components and is returned
-// as-is. On an error answer out is still filled when the body decodes, so a
-// partial result — compaction and retention report one — survives.
-// Cancellation is returned as the context's own error: a caller that gave up is
-// not an outage.
+// answer into out. A transport failure, a context deadline, or a 5xx is
+// ErrUnavailable — a deadline means the peer failed to answer in time, the
+// same as any other timeout; any other non-200 is a protocol disagreement
+// between two components and is returned as-is. On an error answer out is
+// still filled when the body decodes, so a partial result — compaction and
+// retention report one — survives. A cancellation is different from a
+// deadline: it is the caller giving up on its own, not the peer failing to
+// answer, so it is returned as the context's own error and is not ErrUnavailable.
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, in, out any) error {
 	var body io.Reader
 	if in != nil {
@@ -79,20 +90,28 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
+		if cerr := c.ctxErr(ctx, path); cerr != nil {
+			return cerr
 		}
 		return fmt.Errorf("%w: %s %s: %v", ErrUnavailable, c.peer, path, err)
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		return fmt.Errorf("%w: %s %s: reading the answer: %v", ErrUnavailable, c.peer, path, err)
-	}
+
 	if resp.StatusCode != http.StatusOK {
+		// Cap what an error answer buffers: it is always small (an
+		// {"error": ...} object, or a maintenance route's partial count), so a
+		// misbehaving peer can't make the client hold an unbounded body in
+		// memory. Draining whatever is left over the cap afterward lets the
+		// Transport reuse the connection instead of closing it, the same as a
+		// full read would.
+		raw, err := io.ReadAll(io.LimitReader(resp.Body, errorBodyLimit))
+		if err != nil {
+			if cerr := c.ctxErr(ctx, path); cerr != nil {
+				return cerr
+			}
+			return fmt.Errorf("%w: %s %s: reading the answer: %v", ErrUnavailable, c.peer, path, err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
 		if out != nil {
 			_ = json.Unmarshal(raw, out)
 		}
@@ -101,12 +120,37 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		}
 		return fmt.Errorf("rpc: %s %s answered %d: %s", c.peer, path, resp.StatusCode, errorMessage(raw))
 	}
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		if cerr := c.ctxErr(ctx, path); cerr != nil {
+			return cerr
+		}
+		return fmt.Errorf("%w: %s %s: reading the answer: %v", ErrUnavailable, c.peer, path, err)
+	}
 	if out != nil {
 		if err := json.Unmarshal(raw, out); err != nil {
 			return fmt.Errorf("rpc: decode %s %s answer: %w", c.peer, path, err)
 		}
 	}
 	return nil
+}
+
+// ctxErr classifies ctx's own error for a request to path, or returns nil when
+// ctx carries none. A deadline means the peer failed to answer in time, the
+// same as any other timeout, so it counts as ErrUnavailable; a cancellation is
+// the caller giving up on its own, not the peer's fault, so it is returned as
+// the caller's own error (wrapped only with the peer and route) and does not
+// count as an outage.
+func (c *Client) ctxErr(ctx context.Context, path string) error {
+	err := ctx.Err()
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%w: %s %s: %w", ErrUnavailable, c.peer, path, err)
+	}
+	return fmt.Errorf("rpc: %s %s: %w", c.peer, path, err)
 }
 
 // requestID forwards the inbound request's ID, so one ID follows a query from
