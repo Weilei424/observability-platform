@@ -7,11 +7,45 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/masonwheeler/observability-platform/internal/storage/fsutil"
 	"github.com/masonwheeler/observability-platform/internal/storage/index"
 	"github.com/masonwheeler/observability-platform/internal/storage/logwal"
 )
+
+const (
+	// DefaultLogFlushBackoff is how long a tolerant head waits after a failed
+	// flush before trying again, so a store outage costs one attempt per
+	// interval rather than one per push.
+	DefaultLogFlushBackoff = 30 * time.Second
+	// DefaultLogFlushTimeout bounds one sink call from a tolerant head. The
+	// flush holds the head lock, so this is also the longest a hung store can
+	// stall a push.
+	DefaultLogFlushTimeout = 10 * time.Second
+	// DefaultLogFlushBatchBytes caps the log-line bytes one sink call carries —
+	// well under the store's 64 MiB body limit.
+	DefaultLogFlushBatchBytes = 16 << 20
+)
+
+// HeadOptions tune how a Head flushes. The zero value is all-in-one's
+// behavior: one unbounded sink call per flush, and a flush error returned to
+// the push that triggered it.
+type HeadOptions struct {
+	// TolerateFlushErrors keeps a failed threshold flush from failing the push
+	// that triggered it — the entry is already durable in the WAL and the head —
+	// and pauses further threshold flushes for FlushBackoff. The ingester sets
+	// it. Explicit Flush and Close still return the error.
+	TolerateFlushErrors bool
+	// FlushBackoff defaults to DefaultLogFlushBackoff when TolerateFlushErrors is set.
+	FlushBackoff time.Duration
+	// FlushTimeout bounds each sink call; zero means none.
+	FlushTimeout time.Duration
+	// BatchBytes caps the log-line bytes per sink call; zero means one call.
+	BatchBytes int
+	// Now is the clock for the backoff; nil means time.Now.
+	Now func() time.Time
+}
 
 // Head is the logs write path's in-memory half: a WAL-backed per-stream buffer
 // that flushes the whole head to a ChunkSink at a size threshold and on Close,
@@ -30,13 +64,17 @@ type Head struct {
 	sink        ChunkSink
 	headBytes   int64
 	flushThresh int64
+
+	opts         HeadOptions
+	backoffUntil time.Time
+	onFlush      func(error)
 }
 
 var _ Reader = (*Head)(nil)
 
 // OpenHead replays the WAL in walDir into a new head and opens the WAL for
-// appends. Flushes go to sink.
-func OpenHead(walDir string, segMaxBytes int64, syncEveryN int, flushThreshold int64, sink ChunkSink) (*Head, error) {
+// appends. Flushes go to sink, tuned by opts.
+func OpenHead(walDir string, segMaxBytes int64, syncEveryN int, flushThreshold int64, sink ChunkSink, opts HeadOptions) (*Head, error) {
 	if err := fsutil.MkdirAllSync(walDir); err != nil {
 		return nil, fmt.Errorf("logs: mkdir %s: %w", walDir, err)
 	}
@@ -74,7 +112,13 @@ func OpenHead(walDir string, segMaxBytes int64, syncEveryN int, flushThreshold i
 	if err != nil {
 		return nil, fmt.Errorf("logs: open WAL: %w", err)
 	}
-	return &Head{head: head, wal: lw, sink: sink, headBytes: headBytes, flushThresh: flushThreshold}, nil
+	if opts.TolerateFlushErrors && opts.FlushBackoff <= 0 {
+		opts.FlushBackoff = DefaultLogFlushBackoff
+	}
+	if opts.Now == nil {
+		opts.Now = time.Now
+	}
+	return &Head{head: head, wal: lw, sink: sink, headBytes: headBytes, flushThresh: flushThreshold, opts: opts}, nil
 }
 
 // Append writes the record to the WAL, buffers it in the head, and flushes the
@@ -94,10 +138,39 @@ func (h *Head) Append(labels StreamLabels, tsNs int64, line string) error {
 	hs.entries = append(hs.entries, LogEntry{StreamID: id, TimestampNs: tsNs, Line: line})
 	h.headBytes += int64(8 + len(line))
 	if h.flushThresh > 0 && h.headBytes >= h.flushThresh {
-		_, err := h.flushLocked()
-		return err
+		return h.thresholdFlushLocked()
 	}
 	return nil
+}
+
+// thresholdFlushLocked runs the flush a threshold crossing triggers. A strict
+// head (all-in-one) returns its error to the push; a tolerant one (the
+// ingester) reports it through the hook, backs off, and lets the push succeed.
+func (h *Head) thresholdFlushLocked() error {
+	if h.opts.TolerateFlushErrors && h.opts.Now().Before(h.backoffUntil) {
+		return nil
+	}
+	flushed, err := h.flushLocked()
+	h.report(flushed, err)
+	if err != nil && h.opts.TolerateFlushErrors {
+		h.backoffUntil = h.opts.Now().Add(h.opts.FlushBackoff)
+		return nil
+	}
+	return err
+}
+
+// SetFlushHook installs fn, called with nil after every flush that moved data
+// and with the error after every failed one. Call before concurrent use.
+func (h *Head) SetFlushHook(fn func(err error)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.onFlush = fn
+}
+
+func (h *Head) report(flushed bool, err error) {
+	if h.onFlush != nil && (flushed || err != nil) {
+		h.onFlush(err)
+	}
 }
 
 // Flush drains the head to the sink and checkpoints the WAL. Safe to call when
@@ -105,7 +178,8 @@ func (h *Head) Append(labels StreamLabels, tsNs int64, line string) error {
 func (h *Head) Flush() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	_, err := h.flushLocked()
+	flushed, err := h.flushLocked()
+	h.report(flushed, err)
 	return err
 }
 
@@ -117,7 +191,8 @@ func (h *Head) Flush() error {
 // records already acknowledged to clients.
 func (h *Head) Close() error {
 	h.mu.Lock()
-	_, flushErr := h.flushLocked()
+	flushed, flushErr := h.flushLocked()
+	h.report(flushed, flushErr)
 	h.mu.Unlock()
 	return errors.Join(flushErr, h.wal.Close())
 }
@@ -129,8 +204,16 @@ func (h *Head) flushLocked() (bool, error) {
 	if len(h.head) == 0 {
 		return false, nil
 	}
-	if err := h.sink.IngestStreams(context.Background(), h.snapshotLocked()); err != nil {
-		return true, err
+	for _, batch := range batchStreams(h.snapshotLocked(), h.opts.BatchBytes) {
+		ctx, cancel := context.Background(), context.CancelFunc(func() {})
+		if h.opts.FlushTimeout > 0 {
+			ctx, cancel = context.WithTimeout(context.Background(), h.opts.FlushTimeout)
+		}
+		err := h.sink.IngestStreams(ctx, batch)
+		cancel()
+		if err != nil {
+			return true, err
+		}
 	}
 	if err := h.wal.Checkpoint(); err != nil {
 		return true, err
@@ -268,4 +351,42 @@ func mergeEntries(persisted, head []LogEntry, minTs, maxTs int64) []LogEntry {
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].TimestampNs < out[j].TimestampNs })
 	return out
+}
+
+// batchStreams splits streams into groups carrying at most limit bytes of log
+// lines, splitting a stream across groups when it alone exceeds the limit; a
+// single oversized entry travels alone. limit <= 0 means one group. A failure
+// part-way leaves the head intact, so the next attempt resends batches the
+// sink already has — duplicates the (ts, line) dedup on read absorbs, as it
+// already absorbs the crash window between chunk write and checkpoint.
+func batchStreams(streams []StreamData, limit int) [][]StreamData {
+	if limit <= 0 {
+		return [][]StreamData{streams}
+	}
+	var batches [][]StreamData
+	var cur []StreamData
+	size := 0
+	for _, sd := range streams {
+		part := StreamData{Labels: sd.Labels}
+		for _, e := range sd.Entries {
+			n := len(e.Line)
+			if size > 0 && size+n > limit {
+				if len(part.Entries) > 0 {
+					cur = append(cur, part)
+					part = StreamData{Labels: sd.Labels}
+				}
+				batches = append(batches, cur)
+				cur, size = nil, 0
+			}
+			part.Entries = append(part.Entries, e)
+			size += n
+		}
+		if len(part.Entries) > 0 {
+			cur = append(cur, part)
+		}
+	}
+	if len(cur) > 0 {
+		batches = append(batches, cur)
+	}
+	return batches
 }
