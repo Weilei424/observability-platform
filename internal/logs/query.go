@@ -38,10 +38,7 @@ type QueryEngine struct {
 // NewQueryEngine returns an engine reading from r. A Reader that also
 // implements Source is read through it; any other Reader is adapted.
 func NewQueryEngine(r Reader) *QueryEngine {
-	if src, ok := r.(Source); ok {
-		return &QueryEngine{src: src}
-	}
-	return &QueryEngine{src: readerSource{r: r}}
+	return &QueryEngine{src: AsSource(r)}
 }
 
 // NewQueryEngineFromSource returns an engine reading from src. The querier
