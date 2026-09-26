@@ -1,7 +1,9 @@
 package logs
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"slices"
@@ -316,7 +318,7 @@ func TestBatchStreamsSizesByEstimatedWireBytes(t *testing.T) {
 		streams      []StreamData
 		limit        int
 		wantBatches  int
-		oneOversized bool // the one batch is allowed to exceed limit
+		oneOversized bool // every batch in this case is allowed to exceed limit
 	}{
 		{
 			name: "a stream splits mid-way across several batches",
@@ -375,6 +377,30 @@ func TestBatchStreamsSizesByEstimatedWireBytes(t *testing.T) {
 			limit:       0,
 			wantBatches: 1,
 		},
+		{
+			// Many streams, each with a short line but an escape-heavy label
+			// VALUE (control characters and quotes, legal per internal/labels —
+			// values may hold up to 65535 bytes of arbitrary UTF-8). A raw byte
+			// count on the label undercounts each stream's open cost by up to
+			// 6x — enough to wrongly pack all 3 into one batch under the
+			// limit below; the real, escape-aware cost must instead force 3
+			// separate batches, each still comfortably within the limit (no
+			// oversized exception needed here — unlike the lone-oversized-entry
+			// case above, three well-estimated opens simply don't fit together).
+			name: "escape-heavy label values force splits even with short lines",
+			streams: []StreamData{
+				{Labels: mustLabels(t, map[string]string{"service": "a", "payload": strings.Repeat("\x01\"", 20)}), Entries: []LogEntry{{TimestampNs: 1, Line: "x"}}},
+				{Labels: mustLabels(t, map[string]string{"service": "b", "payload": strings.Repeat("\x01\"", 20)}), Entries: []LogEntry{{TimestampNs: 2, Line: "y"}}},
+				{Labels: mustLabels(t, map[string]string{"service": "c", "payload": strings.Repeat("\x01\"", 20)}), Entries: []LogEntry{{TimestampNs: 3, Line: "z"}}},
+			},
+			// 400 sits strictly between what raw byte-length accounting for the
+			// "payload" value would total for all 3 streams together (well
+			// under 400: 20 escape-worthy bytes naively cost 20, not 20*8) and
+			// what the correct, escape-aware cost totals (well over 400): a
+			// naive accounting would wrongly keep all 3 in one batch.
+			limit:       400,
+			wantBatches: 3,
+		},
 	}
 
 	for _, tt := range tests {
@@ -389,10 +415,57 @@ func TestBatchStreamsSizesByEstimatedWireBytes(t *testing.T) {
 			}
 			for i, b := range batches {
 				size := batchWireBytes(b)
-				oversizedException := tt.oneOversized && len(batches) == 1
-				if size > tt.limit && tt.limit > 0 && !oversizedException {
+				if size > tt.limit && tt.limit > 0 && !tt.oneOversized {
 					t.Fatalf("batch %d = %d estimated wire bytes, want <= %d (limit)", i, size, tt.limit)
 				}
+			}
+		})
+	}
+}
+
+// TestJSONStringBytesMatchesEncodingJSON pins jsonStringBytes to the actual
+// bytes encoding/json emits (HTML escaping off, matching the RPC client's
+// setting), for every character class its doc comment specifies: the two
+// short-vs-\u00XX control-escape classes, quotes/backslashes, HTML-special
+// bytes left plain, multi-byte UTF-8, the two runes encoding/json always
+// escapes regardless of the HTML-escaping setting, and a 64 KiB label-value-
+// sized input.
+func TestJSONStringBytesMatchesEncodingJSON(t *testing.T) {
+	allControlBytes := make([]byte, 0x20)
+	for i := range allControlBytes {
+		allControlBytes[i] = byte(i)
+	}
+	bigControlValue := strings.Repeat("\x00\x01\x02\x1f\"\\", 65536/6+1)[:65536]
+
+	tests := []struct {
+		name string
+		s    string
+	}{
+		{"empty", ""},
+		{"plain ASCII", "hello, world 123"},
+		{"every byte 0x00-0x1F", string(allControlBytes)},
+		{"quotes and backslashes", `she said "hi" \ then left`},
+		{"angle brackets and ampersand stay plain", "<script>a&b</script>"},
+		{"multi-byte UTF-8: e-acute", "café"},
+		{"multi-byte UTF-8: CJK", "日本語"},
+		{"multi-byte UTF-8: emoji", "hello \U0001F600 world"},
+		{"U+2028 alone", "\u2028"},
+		{"U+2029 alone", "\u2029"},
+		{"U+2028 and U+2029 inside text", "line one\u2028line two\u2029line three"},
+		{"64 KiB label-value-like control-byte string", bigControlValue},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			enc := json.NewEncoder(&buf)
+			enc.SetEscapeHTML(false)
+			if err := enc.Encode(tt.s); err != nil {
+				t.Fatalf("Encode: %v", err)
+			}
+			want := len(bytes.TrimSuffix(buf.Bytes(), []byte("\n")))
+			if got := jsonStringBytes(tt.s); got != want {
+				t.Fatalf("jsonStringBytes(%q) = %d, want %d (encoding/json's actual output)", tt.s, got, want)
 			}
 		})
 	}
