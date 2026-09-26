@@ -8,6 +8,7 @@ import (
 	"sort"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/masonwheeler/observability-platform/internal/storage/fsutil"
 	"github.com/masonwheeler/observability-platform/internal/storage/index"
@@ -381,16 +382,64 @@ func mergeEntries(persisted, head []LogEntry, minTs, maxTs int64) []LogEntry {
 	return out
 }
 
+// jsonStringBytes returns exactly how many bytes encoding/json emits for s as
+// a JSON string, quotes included, with HTML escaping off
+// (json.Encoder.SetEscapeHTML(false)) — the setting the RPC client will use.
+// It mirrors encoding/json's appendString (GOROOT src/encoding/json/encode.go,
+// checked against this toolchain, go1.26.0): with HTML escaping off, only the
+// ASCII control characters (0-31), '"', and '\\' need escaping — '<', '>',
+// and '&' are left as plain, 1-byte-each bytes. The costs:
+//
+//   - '\b' '\t' '\n' '\f' '\r' cost 2 (their short escape, e.g. "\n")
+//   - any other byte < 0x20 costs 6 (its "\u00XX" escape)
+//   - '"' and '\\' cost 2 ("\"" or "\\")
+//   - U+2028 and U+2029 cost 6 each ("\u2028" / "\u2029"), replacing their 3
+//     UTF-8 bytes — appendString escapes them unconditionally, HTML-escaping
+//     setting aside, because they break JSONP
+//   - every other byte costs 1
+//
+// s is assumed valid UTF-8: the push path rejects invalid UTF-8 before an
+// entry line or a label value (validated as UTF-8 at ingest, see
+// internal/labels) can reach the head, so this does not special-case it.
+func jsonStringBytes(s string) int {
+	n := 2 // the surrounding quotes
+	for i := 0; i < len(s); {
+		if b := s[i]; b < utf8.RuneSelf {
+			switch {
+			case b == '\b' || b == '\t' || b == '\n' || b == '\f' || b == '\r':
+				n += 2
+			case b == '"' || b == '\\':
+				n += 2
+			case b < 0x20:
+				n += 6
+			default:
+				n++
+			}
+			i++
+			continue
+		}
+		c, size := utf8.DecodeRuneInString(s[i:])
+		if c == '\u2028' || c == '\u2029' {
+			n += 6
+		} else {
+			n += size
+		}
+		i += size
+	}
+	return n
+}
+
 // logEntryFramingBytes is one entry's own JSON framing cost in an
-// IngestStreams request body, sized for the worst case: "[" (1) + a
+// IngestStreams request body, beyond the line's own encoded bytes (charged
+// separately, via jsonStringBytes, quotes included): "[" (1) + a
 // nanosecond-epoch timestamp, at most 19 digits (int64's max,
 // 9223372036854775807, has 19) (19) + "," separating it from the line (1) +
-// the line's own two surrounding quotes (2) + a trailing "," charged to every
-// entry as a stand-in for the separator before the next one, or the closing
-// "]" for the last (1) + that closing "]" itself (1) = 25. Charging every
-// entry a comma it might not need is a deliberate overcount: it only ever
-// shrinks a batch, never grows one past limit.
-const logEntryFramingBytes = 1 + 19 + 1 + 2 + 1 + 1 // 25
+// a trailing "," charged to every entry as a stand-in for the separator
+// before the next one, or the closing "]" for the last (1) + that closing
+// "]" itself (1) = 23. Charging every entry a comma it might not need is a
+// deliberate overcount: it only ever shrinks a batch, never grows one past
+// limit.
+const logEntryFramingBytes = 1 + 19 + 1 + 1 + 1 // 23
 
 // wireStreamFramingBytes is a conservative estimate of a stream part's own
 // JSON object framing in an IngestStreams request body — the braces, keys,
@@ -400,42 +449,32 @@ const logEntryFramingBytes = 1 + 19 + 1 + 2 + 1 + 1 // 25
 // internal/rpc, not this package, and entries dominate a batch's size anyway.
 const wireStreamFramingBytes = 32
 
-// wireLabelFramingBytes is a conservative estimate of one label's own JSON
-// framing inside a stream's "labels" object — quotes, colon, and comma, as in
-// `"name":"value",` — independent of the name/value bytes, which are charged
-// separately.
-const wireLabelFramingBytes = 8
+// wireLabelFramingBytes is one label's own JSON framing inside a stream's
+// "labels" object, beyond its name and value's own encoded bytes (charged
+// separately, via jsonStringBytes, quotes included): the colon and comma in
+// `"name":"value",`.
+const wireLabelFramingBytes = 1 + 1 // ':' + ','
 
 // entryWireBytes estimates one entry's encoded size in an IngestStreams
-// request body: its JSON framing plus its line, JSON-escaped byte by byte. A
-// control character (< 0x20) costs 6, matching a "\u00XX" escape; a '"' or
-// '\\' costs 2, matching "\"" or "\\\\"; every other byte costs 1. HTML
-// escaping is assumed off — the RPC client will be told to disable it — so
-// '<', '>', and '&' fall into the plain, 1-byte case.
+// request body: its JSON framing plus its line's exact encoded size.
 func entryWireBytes(e LogEntry) int {
-	n := logEntryFramingBytes
-	for i := 0; i < len(e.Line); i++ {
-		switch b := e.Line[i]; {
-		case b < 0x20:
-			n += 6
-		case b == '"' || b == '\\':
-			n += 2
-		default:
-			n++
-		}
-	}
-	return n
+	return logEntryFramingBytes + jsonStringBytes(e.Line)
 }
 
 // streamOpenWireBytes estimates a stream part's one-time wire cost when it
 // opens within a batch: its own JSON framing plus every label's framing and
-// bytes. Charged once per part — every continuation of a stream that a split
-// pushes into a new batch reopens it, and pays this again, because the new
-// request must re-encode the labels too.
+// its name and value's exact encoded size. Label values may legally hold up
+// to 65535 bytes of arbitrary valid UTF-8 (internal/labels validation), so
+// escaping-heavy values are charged the same way entry lines are — a raw
+// byte count would undercount them by up to 6x, which is exactly the
+// underestimate this whole scheme exists to close. Charged once per part —
+// every continuation of a stream that a split pushes into a new batch
+// reopens it, and pays this again, because the new request must re-encode
+// the labels too.
 func streamOpenWireBytes(labels StreamLabels) int {
 	n := wireStreamFramingBytes
 	for name, value := range labels.Map() {
-		n += wireLabelFramingBytes + len(name) + len(value)
+		n += wireLabelFramingBytes + jsonStringBytes(name) + jsonStringBytes(value)
 	}
 	return n
 }
