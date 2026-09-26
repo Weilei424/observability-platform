@@ -217,9 +217,7 @@ func parseLokiLogSelector(w http.ResponseWriter, queryStr string) (logs.LogSelec
 func (s *Server) respondLokiStreams(w http.ResponseWriter, r *http.Request, logMsg string, fetch func() ([]logs.StreamResult, error)) {
 	results, err := fetch()
 	if err != nil {
-		observability.Component(observability.FromContext(r.Context()), "logs_query").Error(
-			logMsg, "err", err)
-		writeLokiError(w, http.StatusInternalServerError, "internal error")
+		writeLokiEvalError(w, r, logMsg, err)
 		return
 	}
 	writeLokiStreams(w, toLokiStreamResults(results))
@@ -319,9 +317,7 @@ func (s *Server) handleLokiQueryRange(w http.ResponseWriter, r *http.Request) {
 	if isMetric {
 		series, err := s.logQuery.EvalMetricRange(r.Context(), mq, startNs, endNs, stepNs)
 		if err != nil {
-			observability.Component(observability.FromContext(r.Context()), "logs_query").Error(
-				"loki metric query_range failed", "err", err)
-			writeLokiError(w, http.StatusInternalServerError, "internal error")
+			writeLokiEvalError(w, r, "loki metric query_range failed", err)
 			return
 		}
 		writeLokiMatrix(w, toLokiMatrixSeries(series))
@@ -423,9 +419,7 @@ func (s *Server) handleLokiQuery(w http.ResponseWriter, r *http.Request) {
 		case err == nil:
 			samples, evalErr := s.logQuery.EvalMetricInstant(r.Context(), mq, timeNs)
 			if evalErr != nil {
-				observability.Component(observability.FromContext(r.Context()), "logs_query").Error(
-					"loki metric query failed", "err", evalErr)
-				writeLokiError(w, http.StatusInternalServerError, "internal error")
+				writeLokiEvalError(w, r, "loki metric query failed", evalErr)
 				return
 			}
 			writeLokiVectorSamples(w, toLokiVectorSamples(samples))
@@ -465,9 +459,7 @@ func (s *Server) handleLokiLabels(w http.ResponseWriter, r *http.Request) {
 	}
 	names, err := s.logQuery.LabelNames(r.Context())
 	if err != nil {
-		observability.Component(observability.FromContext(r.Context()), "logs_query").Error(
-			"loki labels failed", "err", err)
-		writeLokiError(w, http.StatusInternalServerError, "internal error")
+		writeLokiEvalError(w, r, "loki labels failed", err)
 		return
 	}
 	writeLokiLabels(w, names)
@@ -481,9 +473,7 @@ func (s *Server) handleLokiLabelValues(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	values, err := s.logQuery.LabelValues(r.Context(), name)
 	if err != nil {
-		observability.Component(observability.FromContext(r.Context()), "logs_query").Error(
-			"loki label values failed", "err", err)
-		writeLokiError(w, http.StatusInternalServerError, "internal error")
+		writeLokiEvalError(w, r, "loki label values failed", err)
 		return
 	}
 	writeLokiLabels(w, values)
