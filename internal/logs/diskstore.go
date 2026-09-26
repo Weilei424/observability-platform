@@ -34,12 +34,15 @@ func NewStore(walDir, chunksDir, indexDir string, segMaxBytes int64, syncEveryN 
 	if err != nil {
 		return nil, err
 	}
-	head, err := OpenHead(walDir, segMaxBytes, syncEveryN, flushThreshold, chunks)
+	head, err := OpenHead(walDir, segMaxBytes, syncEveryN, flushThreshold, chunks, HeadOptions{})
 	if err != nil {
 		return nil, err
 	}
 	return &Store{head: head, chunks: chunks}, nil
 }
+
+// SetFlushHook installs fn on the head; see Head.SetFlushHook.
+func (s *Store) SetFlushHook(fn func(err error)) { s.head.SetFlushHook(fn) }
 
 // Append writes the record to the WAL, buffers it in the head, and flushes the
 // whole head when buffered bytes cross the threshold.
