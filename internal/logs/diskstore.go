@@ -18,8 +18,9 @@ type logWAL interface {
 }
 
 // Store is the all-in-one log store: a Head whose flushes go to a local
-// ChunkStore. It reads the head before the chunk store (see StreamEntries), and
-// its API is what it was before the two halves could run apart.
+// ChunkStore. Safe for concurrent use. Every read reads the head before the
+// chunk store (see StreamEntries), and its API is what it was before the two
+// halves could run apart.
 type Store struct {
 	head   *Head
 	chunks *ChunkStore
@@ -143,13 +144,19 @@ func (s *Store) Stats() (streams, chunks int, bytes int64, err error) {
 	return len(ids), chunks, bytes, nil
 }
 
-// StreamLabelSet returns a stream's labels from the persisted index, or from the
-// still-buffered head. Stream labels are stable for a given id across a concurrent flush.
+// StreamLabelSet returns a stream's labels. Every read reads the head first,
+// falling back to the persisted index: a flush holds the head lock from
+// snapshot to reset, so a lookup that blocks on that lock and only proceeds
+// once the flush is done still finds the stream in the chunk store, even
+// though it is no longer in the head by then. Checking the chunk store first
+// would miss it in exactly that window (chunks not yet written) and then find
+// the head already cleared. Stream labels are stable for a given id across a
+// concurrent flush.
 func (s *Store) StreamLabelSet(id StreamID) (StreamLabels, bool) {
-	if l, ok := s.chunks.StreamLabelSet(id); ok {
+	if l, ok := s.head.StreamLabelSet(id); ok {
 		return l, true
 	}
-	return s.head.StreamLabelSet(id)
+	return s.chunks.StreamLabelSet(id)
 }
 
 // LabelNames returns all stream label names across head + persisted index, sorted, unique.
