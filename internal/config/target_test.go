@@ -46,6 +46,8 @@ func TestLoad_TargetPeers(t *testing.T) {
 		{"no host", map[string]string{"OBS_TARGET": "compactor", "OBS_STORE_URL": "http://"}, "has no host"},
 		{"a path", map[string]string{"OBS_TARGET": "compactor", "OBS_STORE_URL": "http://store:8080/api"}, "must be a base URL"},
 		{"a query", map[string]string{"OBS_TARGET": "compactor", "OBS_STORE_URL": "http://store:8080?x=1"}, "must be a base URL"},
+		{"bare fragment", map[string]string{"OBS_TARGET": "compactor", "OBS_STORE_URL": "http://store:8080#"}, "must be a base URL"},
+		{"bare query", map[string]string{"OBS_TARGET": "compactor", "OBS_STORE_URL": "http://store:8080?"}, "must be a base URL"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clearTopologyEnv(t)
@@ -65,6 +67,58 @@ func TestLoad_TargetPeers(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("Load error = %v, want one containing %q", err, tc.wantErr)
 			}
+			// Every topology error must name the target it is about — an
+			// operator running several components needs to see which one a
+			// startup error refers to, not just which env var.
+			if target := tc.env["OBS_TARGET"]; target != "" && !strings.Contains(err.Error(), target) {
+				t.Errorf("error = %v, want it to name the target %q", err, target)
+			}
 		})
+	}
+}
+
+// TestLoad_PeerURLRejectsUserinfo pins the fix for a peer URL that carries
+// embedded credentials (http://user:pass@host): every other check in
+// validatePeerURL passes it — valid scheme, a host, and an empty path — so
+// without an explicit rejection it would load silently. The credentials must
+// also never appear in the resulting error: printing them into a message a
+// caller then logs would defeat the point of rejecting them.
+func TestLoad_PeerURLRejectsUserinfo(t *testing.T) {
+	clearTopologyEnv(t)
+	t.Setenv("OBS_TARGET", "compactor")
+	t.Setenv("OBS_STORE_URL", "http://user:hunter2@store:8080")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load: want an error for a peer URL with userinfo, got nil")
+	}
+	if !strings.Contains(err.Error(), "OBS_STORE_URL") {
+		t.Errorf("error = %v, want it to name OBS_STORE_URL", err)
+	}
+	if !strings.Contains(err.Error(), "compactor") {
+		t.Errorf("error = %v, want it to name the target compactor", err)
+	}
+	if !strings.Contains(err.Error(), "credentials") {
+		t.Errorf("error = %v, want it to say the URL must not contain credentials", err)
+	}
+	if strings.Contains(err.Error(), "hunter2") {
+		t.Errorf("error = %v, must not echo the password", err)
+	}
+}
+
+// TestLoad_PeerURLTrailingSlashTrimmed pins the normalization every peer URL
+// gets: a trailing "/" is trimmed at load time, so later callers can join
+// "/internal/v1/..." onto the stored value without doubling the slash.
+func TestLoad_PeerURLTrailingSlashTrimmed(t *testing.T) {
+	clearTopologyEnv(t)
+	t.Setenv("OBS_TARGET", "compactor")
+	t.Setenv("OBS_STORE_URL", "https://store:8443/")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.StoreURL != "https://store:8443" {
+		t.Errorf("StoreURL = %q, want %q", cfg.StoreURL, "https://store:8443")
 	}
 }
