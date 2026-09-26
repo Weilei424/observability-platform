@@ -17,6 +17,12 @@ var _ metrics.BlockSink = (*BlockSink)(nil)
 
 func NewBlockSink(c *Client) *BlockSink { return &BlockSink{c: c} }
 
+// IngestSeriesChunks flushes series to the store's flush-in route. The
+// returned block.Meta is partial: only BlockID, NumSeries, and NumSamples are
+// populated, matching the flush response's fields (spec §6.2). MinTime,
+// MaxTime, CreatedAt, Level, Sources, and MaxGen are left at their zero value —
+// the flush response carries nothing for them, so a caller must not read a
+// zero there as a real Level 0 or MaxGen 0.
 func (s *BlockSink) IngestSeriesChunks(ctx context.Context, series []metrics.SeriesChunks) (block.Meta, error) {
 	req := metricsFlushRequest{Series: make([]wireChunkSeries, len(series))}
 	for i, sc := range series {
