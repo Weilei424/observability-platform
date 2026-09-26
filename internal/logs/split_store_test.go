@@ -13,7 +13,7 @@ func openSplit(t *testing.T, threshold int64) (*Head, *ChunkStore) {
 	if err != nil {
 		t.Fatalf("OpenChunkStore: %v", err)
 	}
-	h, err := OpenHead(filepath.Join(dir, "wal"), 1<<20, 1, threshold, cs)
+	h, err := OpenHead(filepath.Join(dir, "wal"), 1<<20, 1, threshold, cs, HeadOptions{})
 	if err != nil {
 		t.Fatalf("OpenHead: %v", err)
 	}
