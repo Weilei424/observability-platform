@@ -1,6 +1,8 @@
 package api
 
 import (
+	"net/http"
+
 	"github.com/go-chi/chi/v5"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/masonwheeler/observability-platform/internal/api/middleware"
@@ -25,26 +27,23 @@ func (s *Server) buildRouter() chi.Router {
 	}
 
 	if s.routes.writes() {
-		r.Post("/api/v1/ingest/metrics", s.handleIngestMetrics)
-		r.Post("/loki/api/v1/push", s.handleLokiPush)
+		r.Method(http.MethodPost, "/api/v1/ingest/metrics", s.write(s.handleIngestMetrics))
+		r.Method(http.MethodPost, "/loki/api/v1/push", s.write(s.handleLokiPush))
 	}
 
 	if s.routes.reads() {
-		r.Get("/api/v1/query", s.handleQuery)
-		r.Post("/api/v1/query", s.handleQuery)
-		r.Get("/api/v1/query_range", s.handleQueryRange)
-		r.Post("/api/v1/query_range", s.handleQueryRange)
-		r.Get("/api/v1/labels", s.handleLabels)
-		r.Post("/api/v1/labels", s.handleLabels)
-		r.Get("/api/v1/label/{name}/values", s.handleLabelValues)
-		r.Post("/api/v1/label/{name}/values", s.handleLabelValues)
-		r.Get("/api/v1/series", s.handleSeries)
-		r.Post("/api/v1/series", s.handleSeries)
+		for _, m := range []string{http.MethodGet, http.MethodPost} {
+			r.Method(m, "/api/v1/query", s.promRead(s.handleQuery))
+			r.Method(m, "/api/v1/query_range", s.promRead(s.handleQueryRange))
+			r.Method(m, "/api/v1/labels", s.promRead(s.handleLabels))
+			r.Method(m, "/api/v1/label/{name}/values", s.promRead(s.handleLabelValues))
+			r.Method(m, "/api/v1/series", s.promRead(s.handleSeries))
+		}
 
-		r.Get("/loki/api/v1/query", s.handleLokiQuery)
-		r.Get("/loki/api/v1/query_range", s.handleLokiQueryRange)
-		r.Get("/loki/api/v1/labels", s.handleLokiLabels)
-		r.Get("/loki/api/v1/label/{name}/values", s.handleLokiLabelValues)
+		r.Method(http.MethodGet, "/loki/api/v1/query", s.lokiRead(s.handleLokiQuery))
+		r.Method(http.MethodGet, "/loki/api/v1/query_range", s.lokiRead(s.handleLokiQueryRange))
+		r.Method(http.MethodGet, "/loki/api/v1/labels", s.lokiRead(s.handleLokiLabels))
+		r.Method(http.MethodGet, "/loki/api/v1/label/{name}/values", s.lokiRead(s.handleLokiLabelValues))
 	}
 
 	if s.internal != nil {
@@ -52,4 +51,27 @@ func (s *Server) buildRouter() chi.Router {
 	}
 
 	return r
+}
+
+// write, promRead, and lokiRead return the local handler, or on a gateway the
+// proxy for that route family.
+func (s *Server) write(local http.HandlerFunc) http.Handler {
+	if s.gateway != nil {
+		return s.gateway.write
+	}
+	return local
+}
+
+func (s *Server) promRead(local http.HandlerFunc) http.Handler {
+	if s.gateway != nil {
+		return s.gateway.promRead
+	}
+	return local
+}
+
+func (s *Server) lokiRead(local http.HandlerFunc) http.Handler {
+	if s.gateway != nil {
+		return s.gateway.lokiRead
+	}
+	return local
 }
