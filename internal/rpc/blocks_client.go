@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/masonwheeler/observability-platform/internal/compactor"
 	"github.com/masonwheeler/observability-platform/internal/storage/block"
 )
 
@@ -17,9 +16,11 @@ const MaintenanceTimeout = 2 * time.Minute
 // CompactOnce lists the store's blocks, runs the plan locally — planning is
 // the compactor's policy — and posts the chosen groups; the store re-checks
 // that each group's blocks still exist and executes under its own lock.
+//
+// BlockManager satisfies compactor.BlockManager; the assertion lives in
+// client_test.go rather than here, so this file does not carry a rpc ->
+// compactor import edge it otherwise has no need for.
 type BlockManager struct{ c *Client }
-
-var _ compactor.BlockManager = (*BlockManager)(nil)
 
 func NewBlockManager(c *Client) *BlockManager { return &BlockManager{c: c} }
 
