@@ -54,14 +54,23 @@ func main() {
 	// lifecycle logging goes through a derived logger instead of log directly.
 	mainLog := observability.Component(log, "main")
 
-	a, err := app.Build(cfg, log)
-	if err != nil {
-		mainLog.Error("startup failed", slog.String("target", string(cfg.Target)), slog.String("error", err.Error()))
-		os.Exit(1)
-	}
-
+	// Install the signal handler before app.Build, not after: Build's storage
+	// bring-up (WAL replay) can run long enough to matter, and a SIGINT sent
+	// while it is still ignored -- its inherited disposition in any `&` child
+	// of a shell without job control, e.g. a script, `bash -c`, a Makefile
+	// recipe, or CI -- is discarded by the kernel outright, never queued, so
+	// installing the handler any later would lose a shutdown signal sent
+	// during startup. Once installed here, a signal delivered during Build is
+	// captured on ctx, so <-ctx.Done() below returns immediately instead of
+	// waiting for a second signal.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	a, err := app.Build(cfg, log)
+	if err != nil {
+		// app.Build already logged the specific failure.
+		os.Exit(1)
+	}
 
 	runDone := make(chan struct{})
 	go func() {
