@@ -765,7 +765,7 @@ its assertions.
 
 **Configuration and wiring**
 - [x] A `target` config key — `all-in-one` (default), `gateway`, `ingester`, `querier`, `store`, `compactor` — and three peer URLs: required peers enforced, peers a target does not use rejected, base http(s) URLs only; the Helm ConfigMap refuses them as template-owned
-- [ ] `internal/app` — one constructor per component, with `all-in-one` assembled from the same constructors; `cmd/server` delegates and keeps `buildServer`
+- [x] `internal/app` — one constructor per component, with `all-in-one` assembled from the same constructors; `cmd/server` delegates and keeps `buildServer`
 
 **The split components**
 - [ ] `metrics.Merge` / `logs.Merge` — the ingester read first, then the store; overlap resolved by highest generation; persisted log entries first at equal timestamps
