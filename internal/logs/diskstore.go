@@ -3,175 +3,56 @@ package logs
 import (
 	"context"
 	"encoding/binary"
-	"errors"
-	"fmt"
-	"log/slog"
-	"os"
-	"path/filepath"
 	"sort"
-	"strings"
-	"sync"
 
-	"github.com/masonwheeler/observability-platform/internal/storage/fsutil"
 	"github.com/masonwheeler/observability-platform/internal/storage/index"
 	"github.com/masonwheeler/observability-platform/internal/storage/logchunk"
 	"github.com/masonwheeler/observability-platform/internal/storage/logwal"
 )
 
-// logWAL is the WAL surface Store needs: durable append, whole-head checkpoint, close.
+// logWAL is the WAL surface Head needs: durable append, whole-head checkpoint, close.
 type logWAL interface {
 	WriteRecord(labels []logwal.LabelPair, tsNs int64, line string) error
 	Checkpoint() error
 	Close() error
 }
 
-// Store is the production log store: a WAL-backed in-memory head that flushes the
-// whole head to compressed chunk files plus a persisted index at a size threshold
-// and on shutdown, checkpointing the WAL on each flush. Safe for concurrent use.
+// Store is the all-in-one log store: a Head whose flushes go to a local
+// ChunkStore. It reads the head before the chunk store (see StreamEntries), and
+// its API is what it was before the two halves could run apart.
 type Store struct {
-	mu          sync.Mutex
-	head        map[StreamID]*memoryStream
-	wal         logWAL
-	index       *streamIndex
-	chunksDir   string
-	indexPath   string
-	headBytes   int64
-	flushThresh int64
+	head   *Head
+	chunks *ChunkStore
 }
 
-// NewStore opens (or creates) a log store rooted at the given directories, loading
-// the persisted index (rebuilding from a chunk scan if the manifest is corrupt) and
-// replaying the WAL into the head.
+// NewStore opens (or creates) a log store rooted at the given directories,
+// loading the persisted index (rebuilding from a chunk scan if the manifest is
+// corrupt) and replaying the WAL into the head.
 func NewStore(walDir, chunksDir, indexDir string, segMaxBytes int64, syncEveryN int, flushThreshold int64) (*Store, error) {
-	for _, d := range []string{walDir, chunksDir, indexDir} {
-		if err := fsutil.MkdirAllSync(d); err != nil {
-			return nil, fmt.Errorf("logs: mkdir %s: %w", d, err)
-		}
-	}
-	indexPath := filepath.Join(indexDir, "streams.index")
-
-	idx, err := loadManifest(indexPath)
+	chunks, err := OpenChunkStore(chunksDir, indexDir)
 	if err != nil {
-		// Missing OR corrupt manifest: rebuild from the authoritative chunk headers,
-		// then rewrite. The manifest is a rebuildable cache; chunks are the source of
-		// truth. (rebuildFromScan on an empty chunks dir yields an empty index.)
-		idx, err = rebuildFromScan(chunksDir)
-		if err != nil {
-			return nil, err
-		}
-		if err := idx.writeManifest(indexPath); err != nil {
-			return nil, err
-		}
+		return nil, err
 	}
-
-	head := make(map[StreamID]*memoryStream)
-	var headBytes int64
-	if err := logwal.Replay(walDir, func(pairs []logwal.LabelPair, tsNs int64, line string) {
-		m := make(map[string]string, len(pairs))
-		for _, p := range pairs {
-			m[p.Name] = p.Value
-		}
-		sl, err := NewStreamLabels(m)
-		if err != nil {
-			// Skip the record, but say so. Log WAL records carry no checksum, so a
-			// structurally valid record can still hold semantically corrupt labels
-			// and reach this path; dropping it silently makes real data loss
-			// invisible to whoever is reading the startup logs. Warning here matches
-			// the metrics replay path in cmd/server/main.go, and reaches the
-			// application logger because main.go calls slog.SetDefault.
-			slog.Warn("logs WAL replay: skipping record with invalid stream labels",
-				"component", "logs", "error", err.Error())
-			return
-		}
-		id := StreamIDOf(sl)
-		hs := head[id]
-		if hs == nil {
-			hs = &memoryStream{labels: sl}
-			head[id] = hs
-		}
-		hs.entries = append(hs.entries, LogEntry{StreamID: id, TimestampNs: tsNs, Line: line})
-		headBytes += int64(8 + len(line))
-	}); err != nil {
-		return nil, fmt.Errorf("logs: WAL replay: %w", err)
-	}
-
-	lw, err := logwal.Open(walDir, segMaxBytes, syncEveryN)
+	head, err := OpenHead(walDir, segMaxBytes, syncEveryN, flushThreshold, chunks)
 	if err != nil {
-		return nil, fmt.Errorf("logs: open WAL: %w", err)
+		return nil, err
 	}
-
-	return &Store{
-		head:        head,
-		wal:         lw,
-		index:       idx,
-		chunksDir:   chunksDir,
-		indexPath:   indexPath,
-		headBytes:   headBytes,
-		flushThresh: flushThreshold,
-	}, nil
+	return &Store{head: head, chunks: chunks}, nil
 }
 
 // Append writes the record to the WAL, buffers it in the head, and flushes the
 // whole head when buffered bytes cross the threshold.
 func (s *Store) Append(labels StreamLabels, tsNs int64, line string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.wal.WriteRecord(labelsToWALPairs(labels), tsNs, line); err != nil {
-		return err
-	}
-	id := StreamIDOf(labels)
-	hs := s.head[id]
-	if hs == nil {
-		hs = &memoryStream{labels: labels}
-		s.head[id] = hs
-	}
-	hs.entries = append(hs.entries, LogEntry{StreamID: id, TimestampNs: tsNs, Line: line})
-	s.headBytes += int64(8 + len(line))
-	if s.flushThresh > 0 && s.headBytes >= s.flushThresh {
-		return s.flushLocked()
-	}
-	return nil
+	return s.head.Append(labels, tsNs, line)
 }
 
-// flushLocked persists every head stream to a chunk, writes the manifest,
-// checkpoints the WAL, then resets the head. The caller holds s.mu.
-func (s *Store) flushLocked() error {
-	if len(s.head) == 0 {
-		return nil
-	}
-	if err := s.writeChunksAndIndexLocked(); err != nil {
-		return err
-	}
-	if err := s.wal.Checkpoint(); err != nil {
-		return err
-	}
-	s.head = make(map[StreamID]*memoryStream)
-	s.headBytes = 0
-	return nil
-}
+// Flush drains the head to chunks + index and checkpoints the WAL. Safe to call
+// when the head is empty (no-op).
+func (s *Store) Flush() error { return s.head.Flush() }
 
-// writeChunksAndIndexLocked builds and persists a chunk per head stream and writes
-// the manifest, without touching the WAL or resetting the head. The caller holds s.mu.
-func (s *Store) writeChunksAndIndexLocked() error {
-	ids := make([]StreamID, 0, len(s.head))
-	for id := range s.head {
-		ids = append(ids, id)
-	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-	for _, id := range ids {
-		hs := s.head[id]
-		// Split so no chunk exceeds the decoder's cap: an oversized chunk would be
-		// written and its WAL checkpointed, then be rejected on read (data loss).
-		for _, c := range splitIntoChunks(hs.entries, logchunk.MaxUncompressedBytes) {
-			ref, err := writeChunkFile(s.chunksDir, id, hs.labels, c)
-			if err != nil {
-				return err
-			}
-			s.index.add(id, hs.labels, ref)
-		}
-	}
-	return s.index.writeManifest(s.indexPath)
-}
+// Close flushes the head (draining it durably) and closes the WAL, returning
+// both errors if both fail.
+func (s *Store) Close() error { return s.head.Close() }
 
 // maxEntryEncodingOverhead bounds a single entry's non-line encoding cost in the
 // chunk block: a signed varint timestamp delta plus a uvarint line length, each at
@@ -199,36 +80,15 @@ func splitIntoChunks(entries []LogEntry, maxUncompressed int) []*logchunk.Chunk 
 	return out
 }
 
-// Close flushes the head (draining it durably) and closes the WAL, returning both
-// errors if both fail.
-//
-// The WAL is closed even when the flush fails, and that ordering is the point: a
-// failed flush is exactly when the WAL matters most. It is then the only durable
-// copy of the head, the one the next start replays from — and LogWAL.Close is
-// what fsyncs its tail, which with batched syncing (WALSyncEveryN) may hold
-// records already acknowledged to clients. Returning early on a flush error left
-// those unsynced and lost them, inverting the guarantee the flush failure was
-// supposed to preserve.
-func (s *Store) Close() error {
-	s.mu.Lock()
-	flushErr := s.flushLocked()
-	s.mu.Unlock()
-	return errors.Join(flushErr, s.wal.Close())
-}
-
 // MatchingStreamIDs returns the sorted stream IDs matching all matchers, across
 // both the persisted index and the still-buffered head.
 func (s *Store) MatchingStreamIDs(matchers []index.Pair) []StreamID {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	set := make(map[StreamID]struct{})
-	for _, id := range s.index.matchingStreamIDs(matchers) {
+	for _, id := range s.head.MatchingStreamIDs(matchers) {
 		set[id] = struct{}{}
 	}
-	for id, hs := range s.head {
-		if streamMatches(hs.labels, matchers) {
-			set[id] = struct{}{}
-		}
+	for _, id := range s.chunks.MatchingStreamIDs(matchers) {
+		set[id] = struct{}{}
 	}
 	out := make([]StreamID, 0, len(set))
 	for id := range set {
@@ -242,67 +102,16 @@ func (s *Store) MatchingStreamIDs(matchers []index.Pair) []StreamID {
 // chunks and the head, sorted by timestamp and deduped by (tsNs, line). The dedup
 // neutralizes the flush crash window (chunk written, WAL not yet checkpointed).
 //
-// Only the index lookup and the head copy hold s.mu; chunk files are read and
-// decompressed outside it, so a query over cold chunks does not block ingestion.
-// That is safe because a chunk file is immutable once written and is never
-// deleted or rewritten (logs have no compaction or retention yet) — a ref taken
-// under the lock stays readable afterwards. Revisit when logs retention lands.
+// The head is read first. A flush holds the head's lock from snapshot to reset
+// and makes the chunks readable before resetting, so an entry missing from this
+// head read was already in the chunk store when that read began.
 func (s *Store) StreamEntries(ctx context.Context, id StreamID, minTs, maxTs int64) ([]LogEntry, error) {
-	s.mu.Lock()
-	refs := append([]ChunkRef(nil), s.index.chunkRefs(id, minTs, maxTs)...)
-	var headEntries []LogEntry
-	if hs := s.head[id]; hs != nil {
-		headEntries = append([]LogEntry(nil), hs.entries...)
+	head := s.head.headEntries(id)
+	persisted, err := s.chunks.StreamEntries(ctx, id, minTs, maxTs)
+	if err != nil {
+		return nil, err
 	}
-	s.mu.Unlock()
-
-	type key struct {
-		ts   int64
-		line string
-	}
-	seen := make(map[key]struct{})
-	var out []LogEntry
-
-	for _, ref := range refs {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		gotID, _, c, err := readChunkFile(filepath.Join(s.chunksDir, ref.Name))
-		if err != nil {
-			return nil, err
-		}
-		// Guard against an index ref pointing at another stream's chunk: the chunk
-		// file embeds its own stream ID, so verify it matches the one we queried.
-		if gotID != id {
-			return nil, fmt.Errorf("logs: chunk %s belongs to stream %d, not %d", ref.Name, gotID, id)
-		}
-		it := c.Iterator()
-		for it.Next() {
-			ts, line := it.At()
-			if ts < minTs || ts > maxTs {
-				continue
-			}
-			k := key{ts, line}
-			if _, dup := seen[k]; dup {
-				continue
-			}
-			seen[k] = struct{}{}
-			out = append(out, LogEntry{StreamID: id, TimestampNs: ts, Line: line})
-		}
-	}
-	for _, e := range headEntries {
-		if e.TimestampNs < minTs || e.TimestampNs > maxTs {
-			continue
-		}
-		k := key{e.TimestampNs, e.Line}
-		if _, dup := seen[k]; dup {
-			continue
-		}
-		seen[k] = struct{}{}
-		out = append(out, e)
-	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].TimestampNs < out[j].TimestampNs })
-	return out, nil
+	return mergeEntries(persisted, head, minTs, maxTs), nil
 }
 
 // streamMatches reports whether labels contain every matcher name=value pair.
@@ -316,70 +125,20 @@ func streamMatches(labels StreamLabels, matchers []index.Pair) bool {
 	return true
 }
 
-// Flush drains the head to chunks + index and checkpoints the WAL. Safe to call
-// when the head is empty (no-op).
-func (s *Store) Flush() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.flushLocked()
-}
-
 // Stats reports distinct stream count, persisted chunk-file count, and the total
 // on-disk bytes of those chunk files. It is read at metrics scrape time.
 //
 // Streams are deduplicated across the head and the index: after a flush the same
 // stream exists in both, and counting it twice would make the gauge climb on every
 // flush without a single new stream being created.
-//
-// chunks and bytes both come from the same directory walk below, rather than
-// chunks from the in-memory index and bytes from disk separately: a chunk file
-// removed out of band would otherwise leave the two disagreeing, with only the
-// byte count reflecting what is actually on disk.
 func (s *Store) Stats() (streams, chunks int, bytes int64, err error) {
-	s.mu.Lock()
-	ids := make(map[StreamID]struct{}, len(s.head)+len(s.index.labels))
-	for id := range s.head {
+	ids := s.head.streamIDs()
+	for id := range s.chunks.streamIDs() {
 		ids[id] = struct{}{}
 	}
-	for id := range s.index.labels {
-		ids[id] = struct{}{}
-	}
-	chunksDir := s.chunksDir
-	s.mu.Unlock()
-
-	// The filesystem walk is deliberately outside the lock: it is the slow part,
-	// and holding the store's mutex through it would stall ingest for the length
-	// of a scrape.
-	//
-	// NewStore creates chunksDir unconditionally (MkdirAllSync), so by the time
-	// Stats can run it must already exist. A missing directory here therefore
-	// does not mean "not flushed yet" -- it means something deleted it out from
-	// under the store, which is an operational failure. Reporting that as zero
-	// chunks/bytes with a nil error would show a confident zero on the
-	// dashboard instead of a gap, and obs_collector_errors_total would never
-	// move. The collector-error policy (ARCHITECTURE_NOTES.md) requires a gap
-	// plus a counted error for any failed read, ENOENT included, so every
-	// ReadDir failure is returned as an error rather than special-cased away.
-	entries, rerr := os.ReadDir(chunksDir)
-	if rerr != nil {
-		return 0, 0, 0, fmt.Errorf("logs: readdir %s: %w", chunksDir, rerr)
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		if !strings.HasSuffix(e.Name(), ".chunk") {
-			continue
-		}
-		fi, ferr := e.Info()
-		if ferr != nil {
-			if os.IsNotExist(ferr) {
-				continue
-			}
-			return 0, 0, 0, fmt.Errorf("logs: info %s: %w", e.Name(), ferr)
-		}
-		chunks++
-		bytes += fi.Size()
+	chunks, bytes, err = s.chunks.fileStats()
+	if err != nil {
+		return 0, 0, 0, err
 	}
 	return len(ids), chunks, bytes, nil
 }
@@ -387,45 +146,32 @@ func (s *Store) Stats() (streams, chunks int, bytes int64, err error) {
 // StreamLabelSet returns a stream's labels from the persisted index, or from the
 // still-buffered head. Stream labels are stable for a given id across a concurrent flush.
 func (s *Store) StreamLabelSet(id StreamID) (StreamLabels, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if l, ok := s.index.labels[id]; ok {
+	if l, ok := s.chunks.StreamLabelSet(id); ok {
 		return l, true
 	}
-	if hs := s.head[id]; hs != nil {
-		return hs.labels, true
-	}
-	return StreamLabels{}, false
+	return s.head.StreamLabelSet(id)
 }
 
 // LabelNames returns all stream label names across head + persisted index, sorted, unique.
 func (s *Store) LabelNames() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	set := make(map[string]struct{})
-	for _, n := range s.index.postings.LabelNames() {
+	for _, n := range s.head.LabelNames() {
 		set[n] = struct{}{}
 	}
-	for _, hs := range s.head {
-		for n := range hs.labels.Map() {
-			set[n] = struct{}{}
-		}
+	for _, n := range s.chunks.LabelNames() {
+		set[n] = struct{}{}
 	}
 	return sortedKeys(set)
 }
 
 // LabelValues returns all values for name across head + persisted index, sorted, unique.
 func (s *Store) LabelValues(name string) []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	set := make(map[string]struct{})
-	for _, v := range s.index.postings.LabelValues(name) {
+	for _, v := range s.head.LabelValues(name) {
 		set[v] = struct{}{}
 	}
-	for _, hs := range s.head {
-		if v, ok := hs.labels.Get(name); ok {
-			set[v] = struct{}{}
-		}
+	for _, v := range s.chunks.LabelValues(name) {
+		set[v] = struct{}{}
 	}
 	return sortedKeys(set)
 }
@@ -446,11 +192,11 @@ var _ Reader = (*Store)(nil)
 // checkpointing the WAL or resetting the head — used only to simulate the flush
 // crash window in tests.
 func (s *Store) writeChunksAndIndexForTest() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.writeChunksAndIndexLocked()
+	s.head.mu.Lock()
+	defer s.head.mu.Unlock()
+	return s.chunks.IngestStreams(context.Background(), s.head.snapshotLocked())
 }
 
 // closeWALForTest closes only the WAL, leaving chunks/index in place — used with
 // writeChunksAndIndexForTest to simulate a crash before checkpoint.
-func (s *Store) closeWALForTest() error { return s.wal.Close() }
+func (s *Store) closeWALForTest() error { return s.head.wal.Close() }
