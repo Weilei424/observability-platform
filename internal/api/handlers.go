@@ -11,6 +11,14 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	if s.ready != nil {
+		if err := s.ready(); err != nil {
+			writeUnavailable(w, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
 	f, err := os.CreateTemp(s.cfg.DataDir, ".readyz-probe-*")
 	if err != nil {
 		writeUnavailable(w, err.Error())
