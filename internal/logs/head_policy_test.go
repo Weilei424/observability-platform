@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -163,4 +165,235 @@ func TestFlushHookIgnoresAnEmptyHead(t *testing.T) {
 		t.Fatalf("hook called %d times for an empty head, want 0", calls)
 	}
 	_ = h.Close()
+}
+
+// failNthSink fails exactly the call numbered failOn (1-indexed) and
+// delegates to target on every other call, until cleared is set true, after
+// which every call delegates regardless of count. It records every call like
+// flakySink.
+type failNthSink struct {
+	mu      sync.Mutex
+	failOn  int
+	calls   int
+	cleared bool
+	target  ChunkSink
+}
+
+func (s *failNthSink) IngestStreams(ctx context.Context, streams []StreamData) error {
+	s.mu.Lock()
+	s.calls++
+	call := s.calls
+	cleared := s.cleared
+	s.mu.Unlock()
+	if !cleared && call == s.failOn {
+		return errors.New("simulated store outage on one batch")
+	}
+	return s.target.IngestStreams(ctx, streams)
+}
+
+// TestHeadFlushLeavesTheHeadIntactWhenABatchFails is the regression for spec
+// §12: "a partial batch failure leaves the head intact." Three streams flush
+// as three one-entry batches (BatchBytes: 4 forces one stream per batch, as
+// in TestHeadBatchesAFlushAndResetsOnlyWhenEveryBatchLanded); the sink fails
+// only the 2nd. flushLocked must return that error without checkpointing or
+// resetting — even though the 1st batch already reached the store — so a
+// fresh head on the same WAL still replays all 3 streams. Once the failure
+// clears and the retry succeeds, the store must hold each entry exactly once:
+// that is the (ts, line) dedup on read absorbing the batch the first,
+// partially-failed attempt already delivered.
+func TestHeadFlushLeavesTheHeadIntactWhenABatchFails(t *testing.T) {
+	dir := t.TempDir()
+	cs, err := OpenChunkStore(filepath.Join(dir, "chunks"), filepath.Join(dir, "index"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &failNthSink{failOn: 2, target: cs}
+	h, walDir := openPolicyHead(t, sink, HeadOptions{BatchBytes: 4}, 1<<30)
+	labels := []StreamLabels{
+		mustLabels(t, map[string]string{"service": "a"}),
+		mustLabels(t, map[string]string{"service": "b"}),
+		mustLabels(t, map[string]string{"service": "c"}),
+	}
+	for i, l := range labels {
+		if err := h.Append(l, int64(i+1), "12345"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := h.Flush(); err == nil {
+		t.Fatal("Flush with the 2nd of 3 batches failing = nil, want an error")
+	}
+	if n := h.StreamCount(); n != 3 {
+		t.Fatalf("head holds %d streams after a partial batch failure, want 3 (untouched, no checkpoint)", n)
+	}
+
+	// Nothing was checkpointed: a fresh head on the same WAL replays all 3
+	// streams, including the one batch 1 already delivered to the store.
+	if err := h.wal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	h2, err := OpenHead(walDir, 1<<20, 1, 1<<30, sink, HeadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := h2.StreamCount(); n != 3 {
+		t.Fatalf("replayed %d streams after a partial batch failure, want 3", n)
+	}
+
+	sink.mu.Lock()
+	sink.cleared = true
+	sink.mu.Unlock()
+	if err := h2.Flush(); err != nil {
+		t.Fatalf("Flush after clearing the failure: %v", err)
+	}
+	if err := h2.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	for i, l := range labels {
+		got, err := cs.StreamEntries(context.Background(), StreamIDOf(l), 0, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0].Line != "12345" || got[0].TimestampNs != int64(i+1) {
+			t.Fatalf("stream %d: store holds %v after the retry, want exactly one (%d,\"12345\")", i, got, i+1)
+		}
+	}
+}
+
+// flatEntry names an entry by its stream's "service" label instead of a
+// StreamID, so batchStreams's output (fresh StreamData values sharing the
+// input's Labels) can be compared to its input by value.
+type flatEntry struct {
+	svc  string
+	ts   int64
+	line string
+}
+
+func flattenStreams(streams []StreamData) []flatEntry {
+	var out []flatEntry
+	for _, sd := range streams {
+		svc, _ := sd.Labels.Get("service")
+		for _, e := range sd.Entries {
+			out = append(out, flatEntry{svc, e.TimestampNs, e.Line})
+		}
+	}
+	return out
+}
+
+func flattenBatches(batches [][]StreamData) []flatEntry {
+	var out []flatEntry
+	for _, b := range batches {
+		out = append(out, flattenStreams(b)...)
+	}
+	return out
+}
+
+// batchWireBytes sums a batch's estimated wire size the same way batchStreams
+// does: each part's one-time open cost plus every one of its entries.
+func batchWireBytes(batch []StreamData) int {
+	n := 0
+	for _, sd := range batch {
+		n += streamOpenWireBytes(sd.Labels)
+		for _, e := range sd.Entries {
+			n += entryWireBytes(e)
+		}
+	}
+	return n
+}
+
+// TestBatchStreamsSizesByEstimatedWireBytes is the regression for spec §12's
+// body-limit requirement: batching must bound the request body it actually
+// sends, not raw line length. Every case asserts the batches concatenate back
+// to the input, in order, and that each batch's estimated wire size fits the
+// limit — except a batch that is a single oversized entry, which cannot be
+// made to fit by construction.
+func TestBatchStreamsSizesByEstimatedWireBytes(t *testing.T) {
+	svc := func(name string) StreamLabels { return mustLabels(t, map[string]string{"service": name}) }
+
+	tests := []struct {
+		name         string
+		streams      []StreamData
+		limit        int
+		wantBatches  int
+		oneOversized bool // the one batch is allowed to exceed limit
+	}{
+		{
+			name: "a stream splits mid-way across several batches",
+			streams: []StreamData{{Labels: svc("a"), Entries: []LogEntry{
+				{TimestampNs: 1, Line: strings.Repeat("a", 10)},
+				{TimestampNs: 2, Line: strings.Repeat("a", 10)},
+				{TimestampNs: 3, Line: strings.Repeat("a", 10)},
+			}}},
+			limit:       100,
+			wantBatches: 3,
+		},
+		{
+			name: "a lone oversized entry travels alone",
+			streams: []StreamData{{Labels: svc("a"), Entries: []LogEntry{
+				{TimestampNs: 1, Line: strings.Repeat("x", 500)},
+			}}},
+			limit:        100,
+			wantBatches:  1,
+			oneOversized: true,
+		},
+		{
+			// A byte-length-only estimate never grows past 0 for empty lines
+			// (len("") == 0), so it would never split these no matter how many
+			// there are. Estimating by wire bytes must split them anyway, since
+			// each still costs its JSON framing.
+			name: "empty lines still cost their framing and must split",
+			streams: []StreamData{{Labels: svc("a"), Entries: []LogEntry{
+				{TimestampNs: 1, Line: ""},
+				{TimestampNs: 2, Line: ""},
+				{TimestampNs: 3, Line: ""},
+				{TimestampNs: 4, Line: ""},
+				{TimestampNs: 5, Line: ""},
+			}}},
+			limit:       80,
+			wantBatches: 5,
+		},
+		{
+			// Two entries whose lines are all control characters and quotes:
+			// counting raw bytes (naively escape-unaware) would total well
+			// under limit and keep both in one batch; the correct escaped cost
+			// (6 per control byte, 2 per quote) must force a split instead.
+			name: "control characters and quotes cost their escaped length, not their raw length",
+			streams: []StreamData{{Labels: svc("a"), Entries: []LogEntry{
+				{TimestampNs: 1, Line: strings.Repeat("\x01\"", 10)},
+				{TimestampNs: 2, Line: strings.Repeat("\x01\"", 10)},
+			}}},
+			limit:       200,
+			wantBatches: 2,
+		},
+		{
+			name: "limit <= 0 means one batch, as today",
+			streams: []StreamData{
+				{Labels: svc("a"), Entries: []LogEntry{{TimestampNs: 1, Line: "x"}}},
+				{Labels: svc("b"), Entries: []LogEntry{{TimestampNs: 2, Line: "y"}}},
+			},
+			limit:       0,
+			wantBatches: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			batches := batchStreams(tt.streams, tt.limit)
+
+			if len(batches) != tt.wantBatches {
+				t.Fatalf("got %d batches, want %d", len(batches), tt.wantBatches)
+			}
+			if got, want := flattenBatches(batches), flattenStreams(tt.streams); !slices.Equal(got, want) {
+				t.Fatalf("batches concatenate to %v, want %v (the input, in order)", got, want)
+			}
+			for i, b := range batches {
+				size := batchWireBytes(b)
+				oversizedException := tt.oneOversized && len(batches) == 1
+				if size > tt.limit && tt.limit > 0 && !oversizedException {
+					t.Fatalf("batch %d = %d estimated wire bytes, want <= %d (limit)", i, size, tt.limit)
+				}
+			}
+		})
+	}
 }
