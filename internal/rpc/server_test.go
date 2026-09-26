@@ -103,6 +103,21 @@ func TestMetricsSelectRouteReportsASourceFailureAs500(t *testing.T) {
 	}
 }
 
+func TestMetricsSelectRouteWithNoMatchIsEmptySeriesList(t *testing.T) {
+	ms := metrics.NewMemoryStore()
+	l, _ := metrics.NewLabels(map[string]string{"__name__": "m", "job": "a"})
+	if err := ms.Append(l, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	srv := readsServer(t, ms, emptyLogs{})
+
+	resp, body := post(t, srv.URL+"/internal/v1/metrics/select",
+		`{"matchers":[{"name":"__name__","value":"nonexistent"}],"min_ms":0,"max_ms":100}`)
+	if resp.StatusCode != http.StatusOK || strings.TrimSpace(body) != `{"series":[]}` {
+		t.Fatalf("status %d body %s, want 200 {\"series\":[]}", resp.StatusCode, body)
+	}
+}
+
 func TestLabelRoutes(t *testing.T) {
 	ms := metrics.NewMemoryStore()
 	l, _ := metrics.NewLabels(map[string]string{"__name__": "m", "job": "a b/c"})
@@ -137,5 +152,13 @@ func TestLogsSelectRoute(t *testing.T) {
 	resp, body := post(t, srv.URL+"/internal/v1/logs/select", `{"matchers":[{"name":"service","value":"api"}],"min_ns":0,"max_ns":10}`)
 	if resp.StatusCode != http.StatusOK || strings.TrimSpace(body) != `{"streams":[]}` {
 		t.Fatalf("status %d body %s, want 200 {\"streams\":[]}", resp.StatusCode, body)
+	}
+}
+
+func TestLogsSelectRouteRejectsEmptyMatcherName(t *testing.T) {
+	srv := readsServer(t, metrics.NewMemoryStore(), emptyLogs{})
+	resp, body := post(t, srv.URL+"/internal/v1/logs/select", `{"matchers":[{"name":"","value":"x"}],"min_ns":0,"max_ns":10}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status %d body %s, want 400", resp.StatusCode, body)
 	}
 }
