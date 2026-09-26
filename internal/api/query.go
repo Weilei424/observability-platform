@@ -105,7 +105,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	samples, err := s.engine.EvalInstantContext(r.Context(), expr, tMs)
 	if err != nil {
-		writePromError(w, http.StatusInternalServerError, "execution", err.Error())
+		writePromEvalError(w, err)
 		return
 	}
 
@@ -179,7 +179,7 @@ func (s *Server) handleQueryRange(w http.ResponseWriter, r *http.Request) {
 
 	series, err := s.engine.EvalRangeContext(r.Context(), expr, startMs, endMs, stepMs)
 	if err != nil {
-		writePromError(w, http.StatusInternalServerError, "execution", err.Error())
+		writePromEvalError(w, err)
 		return
 	}
 
