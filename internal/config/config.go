@@ -2,11 +2,50 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/spf13/viper"
 )
+
+// Target is the component a process runs. One binary serves all of them.
+type Target string
+
+const (
+	TargetAllInOne  Target = "all-in-one"
+	TargetGateway   Target = "gateway"
+	TargetIngester  Target = "ingester"
+	TargetQuerier   Target = "querier"
+	TargetStore     Target = "store"
+	TargetCompactor Target = "compactor"
+)
+
+// Targets lists every valid target.
+var Targets = []Target{TargetAllInOne, TargetGateway, TargetIngester, TargetQuerier, TargetStore, TargetCompactor}
+
+// peerKey is one peer URL setting: its viper key and its environment variable.
+type peerKey struct{ key, env string }
+
+var (
+	peerIngester = peerKey{"ingester_url", "OBS_INGESTER_URL"}
+	peerStore    = peerKey{"store_url", "OBS_STORE_URL"}
+	peerQuerier  = peerKey{"querier_url", "OBS_QUERIER_URL"}
+)
+
+// requiredPeers lists the peer URLs each target needs. Any other peer URL set
+// for a target is an error: a setting that is silently ignored leaves an
+// operator watching behavior they believe they changed.
+var requiredPeers = map[Target][]peerKey{
+	TargetAllInOne:  nil,
+	TargetStore:     nil,
+	TargetGateway:   {peerIngester, peerQuerier},
+	TargetIngester:  {peerStore},
+	TargetCompactor: {peerStore},
+	TargetQuerier:   {peerIngester, peerStore},
+}
 
 type Config struct {
 	HTTPAddr                string
@@ -15,6 +54,11 @@ type Config struct {
 	WALSegmentMaxBytes      int64
 	WALSyncEveryN           int
 	LogsFlushThresholdBytes int64
+
+	Target      Target
+	IngesterURL string
+	StoreURL    string
+	QuerierURL  string
 
 	MaintenanceInterval  time.Duration
 	FlushInterval        time.Duration
@@ -43,6 +87,10 @@ func Load() (*Config, error) {
 	v.SetDefault("compaction_multiplier", 4)
 	v.SetDefault("compaction_levels", 3)
 	v.SetDefault("retention", "0s")
+	v.SetDefault("target", string(TargetAllInOne))
+	v.SetDefault("ingester_url", "")
+	v.SetDefault("store_url", "")
+	v.SetDefault("querier_url", "")
 
 	v.SetConfigName("config")
 	v.SetConfigType("yaml")
@@ -90,6 +138,10 @@ func Load() (*Config, error) {
 		WALSegmentMaxBytes:      v.GetInt64("wal_segment_max_bytes"),
 		WALSyncEveryN:           v.GetInt("wal_sync_every_n"),
 		LogsFlushThresholdBytes: v.GetInt64("logs_flush_threshold_bytes"),
+		Target:                  Target(v.GetString("target")),
+		IngesterURL:             v.GetString("ingester_url"),
+		StoreURL:                v.GetString("store_url"),
+		QuerierURL:              v.GetString("querier_url"),
 		MaintenanceInterval:     maintenanceInterval,
 		FlushInterval:           flushInterval,
 		FlushSealedChunks:       v.GetInt("flush_sealed_chunks"),
@@ -133,6 +185,10 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("config: logs_flush_threshold_bytes must be > 0")
 	}
 
+	if err := cfg.validateTopology(); err != nil {
+		return nil, err
+	}
+
 	return cfg, nil
 }
 
@@ -142,4 +198,52 @@ func parseDuration(s, name string) (time.Duration, error) {
 		return 0, fmt.Errorf("config: invalid %s %q: %w", name, s, err)
 	}
 	return d, nil
+}
+
+// validateTopology checks the target and that exactly the peer URLs it needs
+// are set, each a base http(s) URL.
+func (c *Config) validateTopology() error {
+	required, ok := requiredPeers[c.Target]
+	if !ok {
+		names := make([]string, len(Targets))
+		for i, t := range Targets {
+			names[i] = string(t)
+		}
+		return fmt.Errorf("config: unknown OBS_TARGET %q (want one of %s)", c.Target, strings.Join(names, ", "))
+	}
+	values := map[peerKey]string{peerIngester: c.IngesterURL, peerStore: c.StoreURL, peerQuerier: c.QuerierURL}
+	for _, p := range []peerKey{peerIngester, peerStore, peerQuerier} {
+		needed := slices.Contains(required, p)
+		v := values[p]
+		switch {
+		case needed && v == "":
+			return fmt.Errorf("config: target %s requires %s", c.Target, p.env)
+		case !needed && v != "":
+			return fmt.Errorf("config: %s is set but target %s does not use it; unset it", p.env, c.Target)
+		case v != "":
+			if err := validatePeerURL(p.env, v); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// validatePeerURL requires an absolute http or https URL with a host and
+// nothing after it but an optional "/": clients append their own paths.
+func validatePeerURL(env, raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("config: %s %q is not a URL: %w", env, raw, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("config: %s %q must be an http or https URL", env, raw)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("config: %s %q has no host", env, raw)
+	}
+	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("config: %s %q must be a base URL with no path, query, or fragment", env, raw)
+	}
+	return nil
 }
