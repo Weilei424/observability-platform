@@ -761,7 +761,7 @@ its assertions.
 - [x] Ingester head store — flushes sealed chunks through a `BlockSink` in 16 MiB batches, discards them only after the store acknowledges, and persists its generation floor to `metrics/genfloor` before each flush
 - [x] Compactor maintenance loop with an optional flusher and an optional block manager
 - [x] `logs.Store` split into `Head` + `ChunkStore`, its API unchanged
-- [ ] Logs head in the ingester — a failed flush no longer fails the push; 10 s flush timeout, 30 s backoff, 16 MiB batches, a flush hook
+- [x] Logs head in the ingester — a failed flush no longer fails the push; 10 s flush timeout, 30 s backoff, 16 MiB batches, a flush hook
 
 **Configuration and wiring**
 - [ ] A `target` config key — `all-in-one` (default), `gateway`, `ingester`, `querier`, `store`, `compactor` — and three peer URLs: required peers enforced, peers a target does not use rejected, base http(s) URLs only; the Helm ConfigMap refuses them as template-owned
