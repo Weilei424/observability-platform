@@ -770,7 +770,7 @@ its assertions.
 **The split components**
 - [x] `metrics.Merge` / `logs.Merge` — the ingester read first, then the store; overlap resolved by highest generation; persisted log entries first at equal timestamps
 - [x] Internal wire format — sample values as `strconv.FormatFloat` strings so `NaN` and `±Inf` survive, generations as integers, flushed chunks as base64 of the persisted encoding, invalid UTF-8 refused
-- [ ] `/internal/v1` routes — reads on the ingester and the store; flush-in, blocks, compact, and retention on the store only; flush bodies capped at 64 MiB with `413`
+- [x] `/internal/v1` routes — reads on the ingester and the store; flush-in, blocks, compact, and retention on the store only; flush bodies capped at 64 MiB with `413`
 - [ ] Peer clients — 5 s dial; a transport error or 5xx is unavailable (queries answer `503`), a 4xx is a protocol bug (`500`)
 - [ ] `internal/api` — route sets, an internal mount point, injectable readiness, `503 unavailable` mapping
 - [ ] Gateway — a route-level reverse proxy over exactly the all-in-one route table; forwards `X-Request-Id`; answers `503` in each route family's shape; never proxies `/internal`
