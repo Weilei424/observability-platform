@@ -72,7 +72,7 @@ func (s *Server) handleLabels(w http.ResponseWriter, r *http.Request) {
 	}
 	names, err := s.engine.LabelNamesContext(r.Context(), filter)
 	if err != nil {
-		writePromError(w, http.StatusInternalServerError, "execution", err.Error())
+		writePromEvalError(w, err)
 		return
 	}
 	writePromSuccess(w, names)
@@ -90,7 +90,7 @@ func (s *Server) handleLabelValues(w http.ResponseWriter, r *http.Request) {
 	}
 	values, err := s.engine.LabelValuesContext(r.Context(), name, filter)
 	if err != nil {
-		writePromError(w, http.StatusInternalServerError, "execution", err.Error())
+		writePromEvalError(w, err)
 		return
 	}
 	writePromSuccess(w, values)
@@ -111,7 +111,7 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 	}
 	seriesList, err := s.engine.SeriesContext(r.Context(), filter)
 	if err != nil {
-		writePromError(w, http.StatusInternalServerError, "execution", err.Error())
+		writePromEvalError(w, err)
 		return
 	}
 	result := make([]map[string]string, len(seriesList))
