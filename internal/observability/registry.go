@@ -31,9 +31,9 @@ type LogStatsSource interface {
 }
 
 // RegistryOptions collects the telemetry sources a registry reads from. Every
-// field except Cardinality is optional: tests and the healthcheck probe build a
-// registry with no storage, no WAL, and no log store, and the corresponding
-// metrics are then not registered at all rather than reporting zero.
+// field is optional: a component registers only the sources it owns, and a
+// metric whose source is absent is not registered at all rather than
+// reporting zero.
 type RegistryOptions struct {
 	Cardinality CardinalitySource
 	Storage     StorageStatsSource
@@ -86,12 +86,14 @@ func NewRegistry(opts RegistryOptions) (*prometheus.Registry, *Instruments) {
 	}
 	reg.MustRegister(collectorErrors)
 
-	reg.MustRegister(&cardinalityCollector{
-		src:          opts.Cardinality,
-		activeSeries: prometheus.NewDesc("obs_active_series", "Number of active metric series.", nil, nil),
-		labelNames:   prometheus.NewDesc("obs_label_names_total", "Number of distinct label names.", nil, nil),
-		labelPairs:   prometheus.NewDesc("obs_label_pairs_total", "Number of distinct label name=value pairs.", nil, nil),
-	})
+	if opts.Cardinality != nil {
+		reg.MustRegister(&cardinalityCollector{
+			src:          opts.Cardinality,
+			activeSeries: prometheus.NewDesc("obs_active_series", "Number of active metric series.", nil, nil),
+			labelNames:   prometheus.NewDesc("obs_label_names_total", "Number of distinct label names.", nil, nil),
+			labelPairs:   prometheus.NewDesc("obs_label_pairs_total", "Number of distinct label name=value pairs.", nil, nil),
+		})
+	}
 
 	if opts.Storage != nil {
 		reg.MustRegister(&storageCollector{
