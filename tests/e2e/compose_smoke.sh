@@ -29,7 +29,24 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-COMPOSE_FILE="$REPO_ROOT/deployments/docker/docker-compose.yml"
+# OBS_COMPOSE_TOPOLOGY picks the stack: all-in-one (the default demo) or split
+# (five components). Every assertion made through Grafana runs against both —
+# Grafana must not be able to tell them apart — and split adds its own checks.
+TOPOLOGY="${OBS_COMPOSE_TOPOLOGY:-all-in-one}"
+case "$TOPOLOGY" in
+    all-in-one)
+        COMPOSE_FILE="$REPO_ROOT/deployments/docker/docker-compose.yml"
+        DEFAULT_PREFIX=obs-compose-e2e
+        ;;
+    split)
+        COMPOSE_FILE="$REPO_ROOT/deployments/docker/docker-compose.split.yml"
+        DEFAULT_PREFIX=obs-compose-split-e2e
+        ;;
+    *)
+        echo "FATAL: OBS_COMPOSE_TOPOLOGY must be all-in-one or split, not '$TOPOLOGY'." >&2
+        exit 2
+        ;;
+esac
 
 # A project name of its own, so this never reuses, restarts, or deletes the
 # volumes of a stack someone started with `make local-up` — and a name unique to
@@ -78,7 +95,7 @@ COMPOSE_FILE="$REPO_ROOT/deployments/docker/docker-compose.yml"
 RUN_NONCE="$(od -An -tu4 -N4 /dev/urandom 2>/dev/null | tr -dc 0-9)"
 [ -n "$RUN_NONCE" ] || RUN_NONCE="$RANDOM$RANDOM"
 RUN_ID="runp$(printf '%s' "$$" | tr 0-9 a-j)s$(date +%s | tr -dc 0-9 | tr 0-9 a-j)r$(printf '%s' "$RUN_NONCE" | tr 0-9 a-j)"
-PROJECT="${OBS_COMPOSE_PROJECT:-obs-compose-e2e}-$RUN_ID"
+PROJECT="${OBS_COMPOSE_PROJECT:-$DEFAULT_PREFIX}-$RUN_ID"
 
 # Sourcing hook for tests/e2e/compose_naming_test.go, which asserts that two
 # processes cannot derive the same project name even with the clock pinned.
@@ -129,6 +146,19 @@ FAIL=0
 # in this run, but a producer can also exit between assertions, so the exact set
 # is checked after startup and again at the end.
 EXPECTED_SERVICES="backend grafana load-generator prometheus sample-app"
+
+# What differs by topology: the running set, which container holds log chunks,
+# which one a restart proves durability through, and whose logs a failure dumps.
+if [ "$TOPOLOGY" = split ]; then
+    EXPECTED_SERVICES="compactor gateway grafana ingester load-generator prometheus querier sample-app store"
+    CHUNKS_SERVICE=store
+    RESTART_SERVICE=ingester
+    FAILURE_LOG_SERVICES="gateway ingester querier store grafana sample-app"
+else
+    CHUNKS_SERVICE=backend
+    RESTART_SERVICE=backend
+    FAILURE_LOG_SERVICES="backend grafana sample-app"
+fi
 
 # dc runs a compose command with a bound generous enough for an image build.
 dc() { timeout "${DC_TIMEOUT:-1800}" docker compose -p "$PROJECT" -f "$COMPOSE_FILE" "$@"; }
@@ -227,7 +257,7 @@ check_services() {
 chunk_count() {
     local tmp
     tmp="$(mktemp -d)"
-    if dcq cp backend:/data/logs/chunks "$tmp/chunks" >/dev/null 2>&1; then
+    if dcq cp "$CHUNKS_SERVICE":/data/logs/chunks "$tmp/chunks" >/dev/null 2>&1; then
         find "$tmp/chunks" -name '*.chunk' 2>/dev/null | wc -l
     else
         echo 0
@@ -241,7 +271,7 @@ teardown() {
         echo ""
         echo "-- Container state (run failed) --"
         dcq ps -a 2>&1 | tail -20
-        for svc in backend grafana sample-app; do
+        for svc in $FAILURE_LOG_SERVICES; do
             echo ""
             echo "-- Last 40 log lines: $svc --"
             dcq logs --tail 40 "$svc" 2>&1 | tail -40
@@ -304,7 +334,7 @@ sample_app_metrics_up() {
     [ "${cols:-0}" -ge 2 ]
 }
 
-echo "=== Compose stack test: project=$PROJECT (run_id=$RUN_ID) ==="
+echo "=== Compose stack test: topology=$TOPOLOGY project=$PROJECT (run_id=$RUN_ID) ==="
 
 # ---- Preflight ------------------------------------------------------
 #
@@ -374,7 +404,7 @@ for port in 3000 8080 9090; do
         echo "       Project '$PROJECT' is empty, so the listener belongs to something else:" >&2
         echo "       'make local-up', or a stack a previous OBS_COMPOSE_KEEP_UP=1 run left" >&2
         echo "       behind under its own per-run project name. Find it with:" >&2
-        echo "         docker compose ls | grep obs-compose-e2e" >&2
+        echo "         docker compose ls | grep $DEFAULT_PREFIX" >&2
         echo "       then 'make local-down', or 'docker compose -p <that-project> down -v'." >&2
         exit 2
     fi
@@ -433,7 +463,7 @@ wait_for "sample-app is pushing streams" "$READY_TIMEOUT" sample_app_up
 
 # `compose up` returning success only means the containers were created. This is
 # the first point where all five are expected to be up and stable.
-check_services "all five services running after startup"
+check_services "all expected services running after startup"
 
 # ---- Provisioning, as Grafana loaded it -----------------------------
 echo ""
@@ -529,6 +559,23 @@ if [ "$METRIC_STATUS" = "204" ]; then
     log_pass "seed metric marker (HTTP 204, value $MARKER_VALUE)"
 else
     log_fail "seed metric marker — got HTTP $METRIC_STATUS"
+fi
+
+# Split only: 120 samples seal one chunk, so the ingester's graceful stop below
+# flushes this series to the store. Reading its value back afterwards proves the
+# flush-in path by value, not just WAL replay.
+if [ "$TOPOLOGY" = split ]; then
+    FLUSH_METRICS=""
+    for i in $(seq 0 119); do
+        FLUSH_METRICS="$FLUSH_METRICS{\"name\":\"compose_e2e_flush_marker\",\"labels\":{\"run_id\":\"$RUN_ID\"},\"timestamp_ms\":$(( MARKER_MS - (119 - i) * 1000 )),\"value\":$MARKER_VALUE},"
+    done
+    FLUSH_STATUS=$(curl -s "${CURL_TIMEOUTS[@]}" -o /dev/null -w "%{http_code}" -X POST "$BACKEND/api/v1/ingest/metrics" \
+        -H "Content-Type: application/json" -d "{\"metrics\":[${FLUSH_METRICS%,}]}")
+    if [ "$FLUSH_STATUS" = "204" ]; then
+        log_pass "seed flush marker (120 samples, HTTP 204)"
+    else
+        log_fail "seed flush marker — got HTTP $FLUSH_STATUS"
+    fi
 fi
 
 echo ""
@@ -664,36 +711,24 @@ check_absent "metrics dashboard rate panel — no datasource error" "$BODY" '"er
 echo ""
 echo "-- Platform self-observability --"
 
-# wait_for_scrape <timeout-seconds> — polls until Prometheus reports the backend
-# target up. A fresh Prometheus has not scraped yet, so asserting immediately
-# after startup fails on timing rather than on anything real.
-wait_for_scrape() {
-    local timeout="$1" start=$SECONDS body
-    while [ $((SECONDS - start)) -lt "$timeout" ]; do
-        body="$(curl -s "${CURL_TIMEOUTS[@]}" "$PROMETHEUS/api/v1/query?query=up%7Bjob%3D%22observability-platform-backend%22%7D" 2>/dev/null)"
-        if [ "$(printf '%s' "$body" | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null)" = "1" ]; then
-            log_pass "Prometheus scraped the backend ($((SECONDS - start))s)"
-            return 0
-        fi
-        sleep 2
-    done
-    log_fail "Prometheus never reported the backend target up within ${timeout}s"
-    return 1
+# scrape_ok is true once Prometheus reports every expected target up: the one
+# backend in all-in-one, all five components in split.
+scrape_ok() {
+    local q want body
+    if [ "$TOPOLOGY" = split ]; then
+        q='count(up{service="observability-platform"} == 1)'; want=5
+    else
+        q='up{job="observability-platform-backend"}'; want=1
+    fi
+    body="$(curl -s "${CURL_TIMEOUTS[@]}" -G "$PROMETHEUS/api/v1/query" --data-urlencode "query=$q" 2>/dev/null)"
+    [ "$(printf '%s' "$body" | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null)" = "$want" ]
 }
 
 # The scrape interval is 15s, so 90s allows several attempts without making a
-# real failure take minutes to surface.
-wait_for_scrape 90
-
-# Prometheus must report the backend target as up. This is necessary but NOT
-# sufficient: a scrape that connects and returns zero series still reports up: 1,
+# real failure take minutes to surface. up == 1 is necessary but NOT
+# sufficient: a scrape that connects and returns zero series still reports up,
 # which is why the panel queries below exist.
-up_body="$(curl -s "${CURL_TIMEOUTS[@]}" "$PROMETHEUS/api/v1/query?query=up%7Bjob%3D%22observability-platform-backend%22%7D")"
-if [ "$(printf '%s' "$up_body" | jq -r '.data.result[0].value[1] // "0"')" = "1" ]; then
-    log_pass "Prometheus reports the backend scrape target up"
-else
-    log_fail "Prometheus does not report the backend target up: $up_body"
-fi
+wait_for "Prometheus reports every scrape target up" 90 scrape_ok
 
 # The real assertion: samples actually reached Prometheus and Grafana can read
 # them back through the internals datasource, which is exactly what a dashboard
@@ -738,12 +773,19 @@ fi
 # chunks rather than replayed from the WAL. Restarting proves the persisted path
 # is readable, which is the phase's durability claim.
 echo ""
-echo "-- Restarting the backend --"
-if dc restart backend >/dev/null 2>&1; then
-    log_pass "backend container restarted"
+echo "-- Restarting the $RESTART_SERVICE --"
+if dc restart "$RESTART_SERVICE" >/dev/null 2>&1; then
+    log_pass "$RESTART_SERVICE container restarted"
 else
-    log_fail "backend container restart failed"
+    log_fail "$RESTART_SERVICE container restart failed"
 fi
+
+# Grafana's datasource health checks are constant expressions that the querier
+# answers without touching the ingester, so they pass while it is still
+# replaying its WAL. Wait for the restarted container's own health first.
+service_healthy() { [ "$(dcq ps --format '{{.Health}}' "$1" 2>/dev/null)" = "healthy" ]; }
+wait_for "$RESTART_SERVICE is healthy again" "$READY_TIMEOUT" service_healthy "$RESTART_SERVICE"
+
 wait_for "datasource health passes again after restart" "$READY_TIMEOUT" datasource_ok
 wait_for "prometheus datasource health passes again after restart" "$READY_TIMEOUT" prom_datasource_ok
 
@@ -778,6 +820,90 @@ check_contains "marker survives the restart — error line" "$BODY" "503 in 9ms 
 BODY=$(gapi /api/datasources/uid/obs-loki/resources/label/service/values)
 check_contains "stream index survives the restart" "$BODY" '"compose-e2e"'
 
+if [ "$TOPOLOGY" = split ]; then
+    echo ""
+    echo "-- Split topology --"
+
+    BODY=$(promquery 'compose_e2e_flush_marker')
+    if printf '%s' "$BODY" | jq -e --argjson want "$MARKER_VALUE" \
+            '[.. | arrays | select(length > 0) | select(all(.[]; type == "number")) | .[]] | index($want)' >/dev/null 2>&1; then
+        log_pass "flush marker read back by value after the ingester's graceful stop flushed it"
+    else
+        log_fail "flush marker value $MARKER_VALUE absent after the ingester restart; body: $BODY"
+    fi
+
+    block_count() {
+        local tmp n
+        tmp="$(mktemp -d)"
+        if dcq cp store:/data/metrics/blocks "$tmp/blocks" >/dev/null 2>&1; then
+            n="$(find "$tmp/blocks" -mindepth 1 -maxdepth 1 -type d | wc -l)"
+        else
+            n=0
+        fi
+        rm -rf "$tmp"
+        echo "$n"
+    }
+    if [ "$(block_count)" -ge 1 ]; then
+        log_pass "the store holds at least one flushed block"
+    else
+        log_fail "the store holds no block after the ingester's flush"
+    fi
+
+    # This script sets `pipefail` (top of file), and `dcq logs ... | grep -q
+    # ...` piped straight into a pattern match is exactly the pipeline pipefail
+    # punishes: grep -q exits the instant it finds a match, closing its end of
+    # the pipe: for gateway and ingester, whose logs by this point in the run
+    # are well past a single pipe buffer, `docker compose logs` is still
+    # mid-write when that happens and is killed by SIGPIPE. Under pipefail the
+    # pipeline's exit status becomes THAT non-zero status even though grep
+    # matched and reported success, so the `if` took the wrong branch — not
+    # because the target field was ever missing (every one of these services
+    # writes it on their very first log line, at startup). Capturing to a file
+    # first and grepping the file removes the pipe (and the SIGPIPE) entirely.
+    for svc in gateway ingester querier store compactor; do
+        LOG_FILE="$(mktemp)"
+        dcq logs --no-log-prefix "$svc" >"$LOG_FILE" 2>/dev/null
+        if grep -q "\"target\":\"$svc\"" "$LOG_FILE"; then
+            log_pass "$svc log lines carry target=$svc"
+        else
+            log_fail "$svc log lines do not carry target=$svc"
+        fi
+        rm -f "$LOG_FILE"
+    done
+
+    # A store outage: reads fail closed with 503 unavailable, writes still land.
+    if dc stop store >/dev/null 2>&1; then
+        log_pass "store stopped"
+    else
+        log_fail "store stop failed"
+    fi
+    OUTAGE=$(curl -s "${CURL_TIMEOUTS[@]}" -w '\n%{http_code}' -G "$BACKEND/api/v1/query" --data-urlencode 'query=compose_e2e_marker')
+    if [ "$(printf '%s' "$OUTAGE" | tail -1)" = "503" ] && printf '%s' "$OUTAGE" | grep -q '"errorType":"unavailable"'; then
+        log_pass "a query with the store down answers 503 unavailable"
+    else
+        log_fail "a query with the store down answered: $OUTAGE"
+    fi
+    BODY=$(promquery 'compose_e2e_marker')
+    check_contains "Grafana surfaces the outage rather than an empty panel" "$BODY" "unavailable"
+    OUTAGE_STATUS=$(curl -s "${CURL_TIMEOUTS[@]}" -o /dev/null -w "%{http_code}" -X POST "$BACKEND/api/v1/ingest/metrics" \
+        -H "Content-Type: application/json" \
+        -d "{\"metrics\":[{\"name\":\"compose_e2e_outage\",\"labels\":{\"run_id\":\"$RUN_ID\"},\"timestamp_ms\":$(( $(date +%s) * 1000 )),\"value\":1}]}")
+    if [ "$OUTAGE_STATUS" = "204" ]; then
+        log_pass "writes land while the store is down (HTTP 204)"
+    else
+        log_fail "a write with the store down answered HTTP $OUTAGE_STATUS"
+    fi
+    if dc start store >/dev/null 2>&1; then
+        log_pass "store started again"
+    else
+        log_fail "store start failed"
+    fi
+    reads_recovered() {
+        [ "$(curl -s "${CURL_TIMEOUTS[@]}" -o /dev/null -w '%{http_code}' -G "$BACKEND/api/v1/query" --data-urlencode 'query=compose_e2e_outage')" = "200" ]
+    }
+    wait_for "reads recover once the store is back" "$READY_TIMEOUT" reads_recovered
+fi
+
 # ---- The demo is still live -----------------------------------------
 echo ""
 echo "-- Still live at the end of the run --"
@@ -796,7 +922,7 @@ wait_for "sample-app timestamps advance (new rows after the restart)" 60 sample_
 
 # The demo's other producer writes metrics, not logs, so nothing above would
 # notice it dying; and any service can exit between startup and here.
-check_services "all five services still running at the end"
+check_services "all expected services still running at the end"
 
 # ---- Summary --------------------------------------------------------
 echo ""
