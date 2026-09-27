@@ -779,9 +779,9 @@ its assertions.
 - [x] `tests/integration/split_test.go` — five components in one test process: ingest and read back through the gateway; flush, then read back by value; an overwrite across a flush boundary; an ingester restart followed by an overwrite; a compactor pass; the store down (reads `503`, writes `204`) and back; each target alone with its peers unreachable
 
 **Per-component observability**
-- [ ] Each target registers only the collectors for what it owns; head cardinality becomes optional
-- [ ] `obs_log_flushes_total`, `obs_log_flush_failures_total` — in the ingester a failed log flush no longer fails the push, so without these it would be invisible
-- [ ] Every log line carries `target=<mode>`; new component names `gateway`, `rpc`, `flush`
+- [x] Each target registers only the collectors for what it owns; head cardinality becomes optional
+- [x] `obs_log_flushes_total`, `obs_log_flush_failures_total` — in the ingester a failed log flush no longer fails the push, so without these it would be invisible
+- [x] Every log line carries `target=<mode>`; new component names `gateway`, `rpc`, `flush`
 - [ ] A `component` label on every scrape target; the internals dashboard's HTTP panels filter to the edge (`component=~"all-in-one|gateway"`); a new Component Health panel plots `up` by `component`
 
 **Compose split**
