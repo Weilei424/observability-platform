@@ -782,7 +782,7 @@ its assertions.
 - [x] Each target registers only the collectors for what it owns; head cardinality becomes optional
 - [x] `obs_log_flushes_total`, `obs_log_flush_failures_total` — in the ingester a failed log flush no longer fails the push, so without these it would be invisible
 - [x] Every log line carries `target=<mode>`; new component names `gateway`, `rpc`, `flush`
-- [ ] A `component` label on every scrape target; the internals dashboard's HTTP panels filter to the edge (`component=~"all-in-one|gateway"`); a new Component Health panel plots `up` by `component`
+- [x] A `component` label on every scrape target; the internals dashboard's HTTP panels filter to the edge (`component=~"all-in-one|gateway"`); a new Component Health panel plots `up` by `component`
 
 **Compose split**
 - [ ] `deployments/docker/docker-compose.split.yml` — project `observability-platform-split`; the gateway answers as `backend`; only the gateway, Grafana, and Prometheus publish ports, all loopback; no `depends_on` between components
