@@ -41,12 +41,27 @@ func Build(cfg *config.Config, log *slog.Logger) (*App, error) {
 			return nil, err
 		}
 		return a.App(log), nil
+	case config.TargetIngester:
+		return buildIngester(cfg, log)
+	case config.TargetStore:
+		return buildStore(cfg, log)
+	case config.TargetQuerier:
+		return buildQuerier(cfg, log)
+	case config.TargetGateway:
+		return buildGateway(cfg, log)
+	case config.TargetCompactor:
+		return buildCompactor(cfg, log)
 	default:
 		// Logged here, where it originates, rather than by the caller: every
-		// Build failure path (this one and BuildAllInOne's) then logs exactly
+		// Build failure path (this one and every buildX's) then logs exactly
 		// once, matching the single "startup failed"/specific-cause line main
-		// has always produced instead of doubling up.
-		err := fmt.Errorf("app: target %q is not available yet", cfg.Target)
+		// has always produced instead of doubling up. Every named target now
+		// builds, so this default branch is reached only by a Target string
+		// outside the six config.Targets constants -- unreachable through
+		// config.Load (validateTopology rejects it first), but Build is also
+		// called directly in tests with a hand-built Config that bypasses that
+		// validation.
+		err := fmt.Errorf("app: unknown target %q", cfg.Target)
 		observability.Component(log, "main").Error("startup failed",
 			slog.String("target", string(cfg.Target)), slog.String("error", err.Error()))
 		return nil, err
