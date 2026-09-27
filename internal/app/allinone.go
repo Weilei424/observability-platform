@@ -106,6 +106,9 @@ func BuildAllInOne(cfg *config.Config, log *slog.Logger) (*AllInOne, error) {
 		// its own component (see RegistryOptions.Logger).
 		Logger: log,
 	})
+	// Count all-in-one's own log-store flushes too, for the same dashboard
+	// panels the split ingester's flushes feed.
+	logStore.SetFlushHook(inst.LogFlush.Observe)
 	srv := api.New(api.Deps{
 		Config:      cfg,
 		Logger:      log,
