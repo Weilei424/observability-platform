@@ -45,6 +45,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "logger error: %v\n", err)
 		os.Exit(1)
 	}
+	// Every line names the component that wrote it. The attribute is target,
+	// not component: component names the subsystem within a process, and the
+	// base logger — which becomes api.Deps.Logger — must carry none.
+	log = log.With(slog.String("target", string(cfg.Target)))
+
 	// Route package-level slog calls (e.g. WAL replay recovery warnings) through
 	// the structured JSON application logger instead of the stdlib text default.
 	slog.SetDefault(log)
