@@ -63,9 +63,10 @@ type datasourceFile struct {
 }
 
 type dashboardTarget struct {
-	RefID      string `json:"refId"`
-	Expr       string `json:"expr"`
-	Datasource *dsRef `json:"datasource"`
+	RefID        string `json:"refId"`
+	Expr         string `json:"expr"`
+	LegendFormat string `json:"legendFormat"`
+	Datasource   *dsRef `json:"datasource"`
 }
 
 type dashboardPanel struct {
