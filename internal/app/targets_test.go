@@ -3,10 +3,13 @@ package app_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -139,5 +142,76 @@ func TestBuildLogsOnceWhenAPeerURLFailsToParse(t *testing.T) {
 				t.Errorf("Build(%s) logged %d ERROR lines, want exactly 1:\n%s", tc.target, n, logs.String())
 			}
 		})
+	}
+}
+
+// TestStatelessTargetsNeverTouchDataDir proves it is alwaysReady, not the
+// default disk probe, that answers /readyz for the gateway, querier, and
+// compactor. cfg.DataDir is pointed at a path that does not exist, so the
+// default probe (create-and-remove a temp file under it) would fail loudly;
+// /readyz answering 200 anyway shows these three never reach it. It then
+// confirms the stronger claim ruling 6 makes: Build, Run, and Close never
+// create that directory at all.
+func TestStatelessTargetsNeverTouchDataDir(t *testing.T) {
+	for _, target := range []config.Target{config.TargetGateway, config.TargetQuerier, config.TargetCompactor} {
+		t.Run(string(target), func(t *testing.T) {
+			cfg := withPeers(testConfig(t, target))
+			cfg.DataDir = filepath.Join(t.TempDir(), "absent")
+
+			a, err := app.Build(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			if err != nil {
+				t.Fatalf("Build(%s): %v", target, err)
+			}
+			if rec := do(a.Handler, http.MethodGet, "/readyz", ""); rec.Code != http.StatusOK {
+				t.Errorf("/readyz = %d, want 200 (DataDir does not exist; a disk probe would fail)", rec.Code)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			a.Run(ctx)
+			cancel()
+			a.Close()
+
+			if _, err := os.Stat(cfg.DataDir); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("Stat(%s) = %v, want ErrNotExist: %s must never create its data directory", cfg.DataDir, err, target)
+			}
+		})
+	}
+}
+
+// TestIngesterFlushToADownPeerLogsOnceViaHook proves ruling 3's flush hook
+// actually fires. TestTargetsWithPeersDown's push never exercises it: at the
+// default LogsFlushThresholdBytes (1<<20), oneLine's 13 buffered bytes (8 +
+// len("hello")) never cross the threshold, so the head never dials the
+// (unreachable) store and the hook never runs. Here the threshold is 1 byte,
+// so the first push crosses it immediately, attempts a flush against the
+// down store, and the hook logs that failure once under component "flush".
+// The second push crosses the threshold again but lands inside the head's
+// 30s backoff (logs.DefaultLogFlushBackoff) from the first attempt, so it
+// dials nothing and logs nothing more. Both pushes still answer 204:
+// TolerateFlushErrors is what keeps a failed flush from failing the push
+// that triggered it (the entry is already durable in the WAL).
+func TestIngesterFlushToADownPeerLogsOnceViaHook(t *testing.T) {
+	var logs bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&logs, nil))
+	cfg := withPeers(testConfig(t, config.TargetIngester))
+	cfg.LogsFlushThresholdBytes = 1
+
+	a, err := app.Build(cfg, log)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	t.Cleanup(a.Close)
+
+	for i := 0; i < 2; i++ {
+		if rec := do(a.Handler, http.MethodPost, "/loki/api/v1/push", oneLine); rec.Code != http.StatusNoContent {
+			t.Errorf("push %d with the store down = %d, want 204", i, rec.Code)
+		}
+	}
+
+	if n := countErrorLines(logs.String()); n != 1 {
+		t.Errorf("logged %d ERROR lines, want exactly 1 (one flush attempt, then backoff):\n%s", n, logs.String())
+	}
+	if !strings.Contains(logs.String(), `"component":"flush"`) {
+		t.Errorf("no ERROR line carries component=flush:\n%s", logs.String())
 	}
 }
