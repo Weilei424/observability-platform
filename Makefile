@@ -1,4 +1,4 @@
-.PHONY: build test lint run local-up local-down local-logs local-reset smoke smoke-logs smoke-compose smoke-kind bench bench-go bench-k6 help
+.PHONY: build test lint run local-up local-down local-logs local-reset local-up-split local-down-split local-logs-split local-reset-split smoke smoke-logs smoke-compose smoke-compose-split smoke-kind bench bench-go bench-k6 help
 
 ## build: Compile the backend binary
 build:
@@ -38,6 +38,22 @@ local-logs:
 local-reset:
 	docker compose -f deployments/docker/docker-compose.yml down -v
 
+## local-up-split: Start the split demo (five components plus Prometheus, Grafana, and both producers)
+local-up-split:
+	docker compose -f deployments/docker/docker-compose.split.yml up -d --build
+
+## local-down-split: Stop the split demo, keeping its volumes
+local-down-split:
+	docker compose -f deployments/docker/docker-compose.split.yml down
+
+## local-logs-split: Follow logs from the running split demo
+local-logs-split:
+	docker compose -f deployments/docker/docker-compose.split.yml logs -f
+
+## local-reset-split: Stop the split demo and delete its data and Grafana volumes
+local-reset-split:
+	docker compose -f deployments/docker/docker-compose.split.yml down -v
+
 ## smoke: Run metrics + logs API smoke tests against a running backend (set BACKEND_ADDR to override localhost:8080)
 smoke:
 	bash tests/e2e/smoke.sh
@@ -54,6 +70,10 @@ smoke-logs:
 ## smoke-compose: Bring up the Compose stack and test it through Grafana's API (needs Docker; ports 3000/8080/9090 free)
 smoke-compose:
 	bash tests/e2e/compose_smoke.sh
+
+## smoke-compose-split: Bring up the split Compose stack and test it through Grafana's API (needs Docker; ports 3000/8080/9090 free)
+smoke-compose-split:
+	OBS_COMPOSE_TOPOLOGY=split bash tests/e2e/compose_smoke.sh
 
 ## smoke-kind: Deploy all four Helm charts into a kind cluster and test the restart/persistence path (needs kind, kubectl, helm, docker)
 smoke-kind:
