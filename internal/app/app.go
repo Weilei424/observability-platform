@@ -31,6 +31,11 @@ type closer struct {
 	close     func() error
 }
 
+// alwaysReady is the readiness of a component that owns no data directory:
+// serving is enough. Peer outages surface on requests, never as readiness.
+// The gateway, querier, and compactor all pass it.
+func alwaysReady() error { return nil }
+
 // Build assembles the process for cfg.Target. log must be component-free: it
 // becomes api.Deps.Logger (see the doc comment on that field).
 func Build(cfg *config.Config, log *slog.Logger) (*App, error) {
@@ -70,10 +75,10 @@ func Build(cfg *config.Config, log *slog.Logger) (*App, error) {
 
 // Run starts every background loop and blocks until ctx is done and all of
 // them have returned. The maintenance loop does its final flush on the way out,
-// so Run must return before Close. With zero loops (a target with nothing to
-// run in the background, e.g. a future gateway or querier) Run still blocks
-// on ctx alone: callers rely on Run not returning before shutdown regardless
-// of how many loops a target happens to register.
+// so Run must return before Close. With zero loops (the gateway and querier
+// register none) Run still blocks on ctx alone: callers rely on Run not
+// returning before shutdown regardless of how many loops a target happens to
+// register.
 func (a *App) Run(ctx context.Context) {
 	var wg sync.WaitGroup
 	for _, loop := range a.loops {
