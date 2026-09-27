@@ -73,24 +73,32 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 	}
 	logsLog.Info("logs head ready", slog.String("wal_dir", logsWALDir))
 
-	// The ingester's logs head tolerates flush errors so a push never fails just
-	// because the store is unreachable -- the entry is already durable in the
-	// WAL. That makes this hook the only place a failed flush is ever reported;
-	// a successful flush needs no line (Task 23 adds counting here too).
-	flushLog := observability.Component(log, "flush")
-	logHead.SetFlushHook(func(err error) {
-		if err != nil {
-			flushLog.Error("logs flush failed", slog.String("error", err.Error()))
-		}
-	})
-
 	reg, inst := observability.NewRegistry(observability.RegistryOptions{
 		Cardinality: head,
 		WALs: []observability.WALSource{
 			{Name: "metrics", Stats: func() (int64, int, error) { return wal.DirStats(walDir) }},
 			{Name: "logs", Stats: func() (int64, int, error) { return wal.DirStats(logsWALDir) }},
 		},
+		Omit:   observability.CompactionGroup,
 		Logger: log,
+	})
+
+	// The ingester's logs head tolerates flush errors so a push never fails just
+	// because the store is unreachable -- the entry is already durable in the
+	// WAL. That makes this hook the only place a failed flush is ever reported;
+	// a successful flush needs no line. lastFlushErr records exactly the error
+	// this hook last logged, so the logs closer below (which fires on the final
+	// flush Close() performs on its way out) can tell "the same failure the hook
+	// just reported" apart from a genuine WAL-close error and never log the
+	// former a second time.
+	flushLog := observability.Component(log, "flush")
+	var lastFlushErr error
+	logHead.SetFlushHook(func(err error) {
+		inst.LogFlush.Observe(err)
+		lastFlushErr = err
+		if err != nil {
+			flushLog.Error("logs flush failed", slog.String("error", err.Error()))
+		}
 	})
 	srv := api.New(api.Deps{
 		Config:      cfg,
@@ -112,7 +120,21 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 		loops:   []func(ctx context.Context){flush.Run},
 		closers: []closer{
 			{component: "wal", msg: "wal close error", close: w.Close},
-			{component: "logs", msg: "logs head close error: buffered logs may not have reached the store", close: logHead.Close},
+			// Close's final flush runs the hook above synchronously before Close
+			// returns, so if the only error Close reports is the one the hook just
+			// logged (no additional WAL-close failure joined onto it), swallow it
+			// here rather than logging the same failure a second time under a
+			// different message. errors.Join's Error() concatenates each non-nil
+			// error's own message with "\n", so a join of exactly one error reads
+			// back identical to that error's own message; a second, distinct
+			// WAL-close error appended changes the text and is still logged.
+			{component: "logs", msg: "logs head close error: buffered logs may not have reached the store", close: func() error {
+				err := logHead.Close()
+				if err != nil && lastFlushErr != nil && err.Error() == lastFlushErr.Error() {
+					return nil
+				}
+				return err
+			}},
 		},
 		log: log,
 	}, nil
