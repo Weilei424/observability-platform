@@ -95,6 +95,19 @@ type Server struct {
 }
 
 func New(d Deps) *Server {
+	if d.Upstreams != nil {
+		// A gateway that served fewer than the full public route table would
+		// silently proxy nothing for whatever it dropped (see RoutesNone) or
+		// leak into serving some routes locally in a mixed Deps that was never
+		// a supported configuration; a nil target would panic inside SetURL on
+		// the gateway's very first proxied request instead of at construction.
+		if d.Routes != RoutesAll {
+			panic("api: Deps.Upstreams requires Routes == RoutesAll")
+		}
+		if d.Upstreams.Ingester == nil || d.Upstreams.Querier == nil {
+			panic("api: Deps.Upstreams requires non-nil Ingester and Querier URLs")
+		}
+	}
 	if d.HTTP == nil {
 		d.HTTP = observability.NewHTTPMetrics()
 	}
