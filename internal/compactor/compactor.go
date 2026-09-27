@@ -99,7 +99,11 @@ func (c *Compactor) maybeFlush() {
 	wrote, err := c.flusher.FlushBlock()
 	if err != nil {
 		c.metrics.FlushFailuresTotal.Inc()
-		c.log.Warn("flush failed", slog.String("error", err.Error()))
+		// ERROR, matching the ingester's logs-flush hook (component "flush"): in
+		// split mode a failed flush means the store peer is unreachable (Task 19
+		// logs peer outages at ERROR), and in all-in-one it means the local disk
+		// write itself failed -- exactly as serious.
+		c.log.Error("flush failed", slog.String("error", err.Error()))
 		return
 	}
 	c.lastFlush = c.clock()
@@ -155,7 +159,7 @@ func (c *Compactor) Run(ctx context.Context) {
 		case <-ctx.Done():
 			if c.flusher != nil {
 				if _, err := c.flusher.FlushBlock(); err != nil {
-					c.log.Warn("final flush failed", slog.String("error", err.Error()))
+					c.log.Error("final flush failed", slog.String("error", err.Error()))
 				}
 			}
 			return
