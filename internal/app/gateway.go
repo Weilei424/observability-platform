@@ -26,7 +26,7 @@ func buildGateway(cfg *config.Config, log *slog.Logger) (*App, error) {
 		mainLog.Error("failed to parse querier URL", slog.String("error", err.Error()))
 		return nil, err
 	}
-	reg, inst := observability.NewRegistry(observability.RegistryOptions{Logger: log})
+	reg, inst := observability.NewRegistry(observability.RegistryOptions{Omit: observability.AllGroups, Logger: log})
 	srv := api.New(api.Deps{
 		Config:    cfg,
 		Logger:    log,
