@@ -111,7 +111,7 @@ func TestBuildUnavailableTargetLogsOnceAndLeavesDataDirEmpty(t *testing.T) {
 		t.Fatalf("ReadDir(%s): %v", cfg.DataDir, err)
 	}
 	if len(entries) != 0 {
-		t.Errorf("data dir has %d entries, want 0 (Build must not touch storage for a target it cannot build yet): %v", len(entries), entries)
+		t.Errorf("data dir has %d entries, want 0 (Build must not touch storage for an unknown target): %v", len(entries), entries)
 	}
 
 	if n := countErrorLines(logs.String()); n != 1 {
@@ -200,11 +200,11 @@ func TestAllInOneAppFlushesOnShutdownAndClosersRunOnClose(t *testing.T) {
 }
 
 // TestAppRunWithNoLoopsBlocksUntilCancelled covers a target with nothing to
-// run in the background (a future gateway or querier): Run's doc comment
-// promises it blocks until ctx is done regardless of how many loops are
-// registered, and with zero loops the wg alone (Add is never called) would
-// otherwise let Run return immediately. App's zero value has no loops and no
-// closers, and its exported fields need no keyed literal to reach that
+// run in the background (the gateway and querier, for instance): Run's doc
+// comment promises it blocks until ctx is done regardless of how many loops
+// are registered, and with zero loops the wg alone (Add is never called)
+// would otherwise let Run return immediately. App's zero value has no loops
+// and no closers, and its exported fields need no keyed literal to reach that
 // state, so this needs nothing from BuildAllInOne.
 func TestAppRunWithNoLoopsBlocksUntilCancelled(t *testing.T) {
 	var a app.App
