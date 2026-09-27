@@ -21,7 +21,10 @@ func buildCompactor(cfg *config.Config, log *slog.Logger) (*App, error) {
 		observability.Component(log, "main").Error("failed to build store client", slog.String("error", err.Error()))
 		return nil, err
 	}
-	reg, inst := observability.NewRegistry(observability.RegistryOptions{Logger: log})
+	reg, inst := observability.NewRegistry(observability.RegistryOptions{
+		Omit:   observability.FlushGroup | observability.IngestGroup | observability.LogFlushGroup,
+		Logger: log,
+	})
 	srv := api.New(api.Deps{
 		Config:   cfg,
 		Logger:   log,
