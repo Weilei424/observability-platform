@@ -30,6 +30,25 @@ type LogStatsSource interface {
 	Stats() (streams, chunks int, bytes int64, err error)
 }
 
+// InstrumentGroups names push-model instrument groups a component may not own.
+type InstrumentGroups uint8
+
+const (
+	// FlushGroup is obs_flushes_total and obs_flush_failures_total: whoever
+	// flushes the metrics head.
+	FlushGroup InstrumentGroups = 1 << iota
+	// CompactionGroup is obs_compactions_total, obs_compaction_failures_total,
+	// obs_compaction_duration_seconds, and obs_retention_deleted_blocks_total.
+	CompactionGroup
+	// IngestGroup is the accepted and rejected sample and log-line counters.
+	IngestGroup
+	// LogFlushGroup is obs_log_flushes_total and obs_log_flush_failures_total.
+	LogFlushGroup
+
+	// AllGroups is every push-model group: what the store, querier, and gateway omit.
+	AllGroups = FlushGroup | CompactionGroup | IngestGroup | LogFlushGroup
+)
+
 // RegistryOptions collects the telemetry sources a registry reads from. Every
 // field is optional: a component registers only the sources it owns, and a
 // metric whose source is absent is not registered at all rather than
@@ -39,6 +58,12 @@ type RegistryOptions struct {
 	Storage     StorageStatsSource
 	WALs        []WALSource
 	Logs        LogStatsSource
+
+	// Omit lists the push-model groups this component does not own. Their
+	// handles in Instruments still work but are never registered, so a
+	// component exports no counter for work it cannot do. The zero value omits
+	// nothing: all-in-one's shape.
+	Omit InstrumentGroups
 
 	// Logger receives the collectors' read-failure and recovery lines. It
 	// must be component-free, for the same reason as api.Deps.Logger: each
@@ -66,6 +91,32 @@ type Instruments struct {
 	Maintenance *Metrics
 	HTTP        *HTTPMetrics
 	Ingest      *IngestMetrics
+	LogFlush    *LogFlushMetrics
+}
+
+// LogFlushMetrics count log-store flushes. In the ingester a failed flush no
+// longer fails the push that triggered it, so without these a store outage
+// would show up only in the logs.
+type LogFlushMetrics struct {
+	Flushes  prometheus.Counter
+	Failures prometheus.Counter
+}
+
+// NewLogFlushMetrics builds the instruments without registering them.
+func NewLogFlushMetrics() *LogFlushMetrics {
+	return &LogFlushMetrics{
+		Flushes:  prometheus.NewCounter(prometheus.CounterOpts{Name: "obs_log_flushes_total", Help: "Total number of successful log-store flushes."}),
+		Failures: prometheus.NewCounter(prometheus.CounterOpts{Name: "obs_log_flush_failures_total", Help: "Total number of failed log-store flushes."}),
+	}
+}
+
+// Observe counts one flush attempt. It is the logs head's flush hook.
+func (m *LogFlushMetrics) Observe(err error) {
+	if err != nil {
+		m.Failures.Inc()
+		return
+	}
+	m.Flushes.Inc()
 }
 
 // NewRegistry returns a Prometheus registry plus the push-model instrument
@@ -119,16 +170,25 @@ func NewRegistry(opts RegistryOptions) (*prometheus.Registry, *Instruments) {
 		FlushesTotal:            prometheus.NewCounter(prometheus.CounterOpts{Name: "obs_flushes_total", Help: "Total number of successful head flushes."}),
 		FlushFailuresTotal:      prometheus.NewCounter(prometheus.CounterOpts{Name: "obs_flush_failures_total", Help: "Total number of failed head flushes."}),
 	}
-	reg.MustRegister(
-		m.CompactionsTotal, m.CompactionFailuresTotal, m.CompactionDuration,
-		m.RetentionDeletedTotal, m.FlushesTotal, m.FlushFailuresTotal,
-	)
+	if opts.Omit&CompactionGroup == 0 {
+		reg.MustRegister(m.CompactionsTotal, m.CompactionFailuresTotal, m.CompactionDuration, m.RetentionDeletedTotal)
+	}
+	if opts.Omit&FlushGroup == 0 {
+		reg.MustRegister(m.FlushesTotal, m.FlushFailuresTotal)
+	}
 
 	httpMetrics := NewHTTPMetrics()
 	reg.MustRegister(httpMetrics.collectors()...)
 
 	ingestMetrics := NewIngestMetrics()
-	reg.MustRegister(ingestMetrics.collectors()...)
+	if opts.Omit&IngestGroup == 0 {
+		reg.MustRegister(ingestMetrics.collectors()...)
+	}
 
-	return reg, &Instruments{Maintenance: m, HTTP: httpMetrics, Ingest: ingestMetrics}
+	logFlush := NewLogFlushMetrics()
+	if opts.Omit&LogFlushGroup == 0 {
+		reg.MustRegister(logFlush.Flushes, logFlush.Failures)
+	}
+
+	return reg, &Instruments{Maintenance: m, HTTP: httpMetrics, Ingest: ingestMetrics, LogFlush: logFlush}
 }
