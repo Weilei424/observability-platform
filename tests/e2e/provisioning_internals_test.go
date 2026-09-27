@@ -257,6 +257,8 @@ func registeredMetricNames(t *testing.T) map[string]bool {
 	inst.Maintenance.RetentionDeletedTotal.Inc()
 	inst.Maintenance.FlushesTotal.Inc()
 	inst.Maintenance.FlushFailuresTotal.Inc()
+	inst.LogFlush.Flushes.Inc()
+	inst.LogFlush.Failures.Inc()
 
 	// Gather once and discard the result before the real read below.
 	//
