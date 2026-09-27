@@ -1,0 +1,185 @@
+# The split topology: the five components as separate containers, with Grafana,
+# Prometheus, and both producers exactly as in docker-compose.yml. The gateway
+# answers as `backend` on the Compose network, so every datasource, producer, and
+# runbook URL that names the backend reaches it unchanged — Grafana cannot tell
+# the difference, which tests/e2e/compose_smoke.sh checks.
+#
+# Every durable directory has one owner: the ingester keeps the WALs, the store
+# keeps blocks and log chunks. No volume is shared between components.
+#
+# The components have no depends_on between one another, on purpose: each must
+# start with its peers down (tests/e2e/compose_split_test.go pins that).
+name: observability-platform-split
+
+services:
+  gateway:
+    restart: unless-stopped
+    build:
+      context: ../../
+      dockerfile: deployments/docker/Dockerfile
+      target: backend
+    environment:
+      OBS_TARGET: gateway
+      OBS_LOG_LEVEL: info
+      OBS_INGESTER_URL: http://ingester:8080
+      OBS_QUERIER_URL: http://querier:8080
+    # Loopback only, as in docker-compose.yml. The gateway is the only component
+    # published at all: the internal API on every other one stays on the
+    # Compose network.
+    ports:
+      - "127.0.0.1:8080:8080"
+    networks:
+      default:
+        aliases: [backend]
+    healthcheck:
+      test: ["CMD", "/server", "-healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  ingester:
+    restart: unless-stopped
+    build:
+      context: ../../
+      dockerfile: deployments/docker/Dockerfile
+      target: backend
+    environment:
+      OBS_TARGET: ingester
+      OBS_DATA_DIR: /data
+      OBS_LOG_LEVEL: info
+      OBS_STORE_URL: http://store:8080
+      # Demo-only, as in docker-compose.yml: at demo volume the 8 MiB default
+      # would never flush, and the store's chunk path would never run.
+      OBS_LOGS_FLUSH_THRESHOLD_BYTES: "16384"
+    volumes:
+      - obs-ingester-data:/data
+    healthcheck:
+      test: ["CMD", "/server", "-healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  querier:
+    restart: unless-stopped
+    build:
+      context: ../../
+      dockerfile: deployments/docker/Dockerfile
+      target: backend
+    environment:
+      OBS_TARGET: querier
+      OBS_LOG_LEVEL: info
+      OBS_INGESTER_URL: http://ingester:8080
+      OBS_STORE_URL: http://store:8080
+    healthcheck:
+      test: ["CMD", "/server", "-healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  store:
+    restart: unless-stopped
+    build:
+      context: ../../
+      dockerfile: deployments/docker/Dockerfile
+      target: backend
+    environment:
+      OBS_TARGET: store
+      OBS_DATA_DIR: /data
+      OBS_LOG_LEVEL: info
+    volumes:
+      - obs-store-data:/data
+    healthcheck:
+      test: ["CMD", "/server", "-healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  compactor:
+    restart: unless-stopped
+    build:
+      context: ../../
+      dockerfile: deployments/docker/Dockerfile
+      target: backend
+    environment:
+      OBS_TARGET: compactor
+      OBS_LOG_LEVEL: info
+      OBS_STORE_URL: http://store:8080
+    healthcheck:
+      test: ["CMD", "/server", "-healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  prometheus:
+    restart: unless-stopped
+    image: prom/prometheus:v2.53.0
+    ports:
+      - "127.0.0.1:9090:9090"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=24h
+    volumes:
+      - ../../observability/prometheus/prometheus.split.yml:/etc/prometheus/prometheus.yml:ro
+      - obs-prometheus-data:/prometheus
+    depends_on:
+      gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  grafana:
+    restart: unless-stopped
+    image: grafana/grafana:11.1.0
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - obs-grafana-data:/var/lib/grafana
+      - ../../observability/grafana/datasources:/etc/grafana/provisioning/datasources
+      - ../../observability/grafana/dashboards:/etc/grafana/provisioning/dashboards
+
+  # The producers wait for the gateway and the ingester: a write needs both.
+  load-generator:
+    build:
+      context: ../../
+      dockerfile: deployments/docker/Dockerfile
+      target: loadgen
+    environment:
+      OBS_BACKEND_ADDR: http://backend:8080
+    depends_on:
+      gateway:
+        condition: service_healthy
+      ingester:
+        condition: service_healthy
+    restart: on-failure
+
+  sample-app:
+    build:
+      context: ../../
+      dockerfile: deployments/docker/Dockerfile
+      target: sampleapp
+    environment:
+      OBS_BACKEND_ADDR: http://backend:8080
+    depends_on:
+      gateway:
+        condition: service_healthy
+      ingester:
+        condition: service_healthy
+    restart: on-failure
+
+volumes:
+  obs-ingester-data:
+  obs-store-data:
+  obs-grafana-data:
+  obs-prometheus-data:
