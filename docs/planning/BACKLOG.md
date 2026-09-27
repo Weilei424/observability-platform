@@ -785,8 +785,8 @@ its assertions.
 - [x] A `component` label on every scrape target; the internals dashboard's HTTP panels filter to the edge (`component=~"all-in-one|gateway"`); a new Component Health panel plots `up` by `component`
 
 **Compose split**
-- [ ] `deployments/docker/docker-compose.split.yml` — project `observability-platform-split`; the gateway answers as `backend`; only the gateway, Grafana, and Prometheus publish ports, all loopback; no `depends_on` between components
-- [ ] `observability/prometheus/prometheus.split.yml`, and Make targets `local-up-split`, `local-down-split`, `local-logs-split`, `local-reset-split`, `smoke-compose-split`
+- [x] `deployments/docker/docker-compose.split.yml` — project `observability-platform-split`; the gateway answers as `backend`; only the gateway, Grafana, and Prometheus publish ports, all loopback; no `depends_on` between components
+- [x] `observability/prometheus/prometheus.split.yml`, and Make targets `local-up-split`, `local-down-split`, `local-logs-split`, `local-reset-split`, `smoke-compose-split`
 - [ ] `compose_smoke.sh` topology switch with split checks — a by-value round trip across an ingester restart and a store-outage drill; CI runs both topologies
 
 **Helm split**
