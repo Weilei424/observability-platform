@@ -369,6 +369,122 @@ func assertMetricSet(t *testing.T, label string, samples []metrics.Sample, base 
 	}
 }
 
+// queryRangeGateway runs a Prometheus-compatible query_range for query over
+// [startMs, endMs] at stepMs through the gateway -- the actual public API a
+// Grafana panel would hit, and the one component the ingester/store-only
+// checks above (metricSelectFrom, metricsMergedSnapshot) cannot exercise,
+// since those bypass the gateway, the querier process, and the query engine
+// entirely. On a non-200 answer the point map is nil; the caller decides
+// whether that is expected.
+func (c *cluster) queryRangeGateway(t *testing.T, query string, startMs, endMs, stepMs int64) (status int, points map[int64]float64) {
+	t.Helper()
+	resp, err := httpClient.Get(c.gatewayURL + "/api/v1/query_range?" + url.Values{
+		"query": {query},
+		"start": {fmt.Sprintf("%.3f", float64(startMs)/1000)},
+		"end":   {fmt.Sprintf("%.3f", float64(endMs)/1000)},
+		"step":  {fmt.Sprintf("%.3f", float64(stepMs)/1000)},
+	}.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body struct {
+		ErrorType string `json:"errorType"`
+		Data      struct {
+			Result []struct {
+				Values [][2]any `json:"values"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode query_range response: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return resp.StatusCode, nil
+	}
+	if len(body.Data.Result) != 1 {
+		t.Fatalf("query_range %s: got %d series, want exactly 1", query, len(body.Data.Result))
+	}
+	points = make(map[int64]float64, len(body.Data.Result[0].Values))
+	for _, v := range body.Data.Result[0].Values {
+		tsSec, ok := v[0].(float64)
+		if !ok {
+			t.Fatalf("query_range %s: point timestamp %v is not a number", query, v[0])
+		}
+		valStr, ok := v[1].(string)
+		if !ok {
+			t.Fatalf("query_range %s: point value %v is not a string", query, v[1])
+		}
+		val, err := strconv.ParseFloat(valStr, 64)
+		if err != nil {
+			t.Fatalf("query_range %s: point value %q: %v", query, valStr, err)
+		}
+		tsMs := int64(math.Round(tsSec * 1000))
+		if _, dup := points[tsMs]; dup {
+			t.Fatalf("query_range %s: duplicate point at ts %d", query, tsMs)
+		}
+		points[tsMs] = val
+	}
+	return resp.StatusCode, points
+}
+
+// holdForwardExpected reconstructs, from the exact discrete samples known so
+// far (expected: offset in ms from base -> value), what a range query must
+// return at every 1-second tick in [0, maxOffsetMs] under
+// metrics.QueryEngine.RangeQueryContext's real, documented semantics: each
+// tick's value is the latest sample at or before it. A tick with no sample of
+// its own therefore repeats the nearest earlier one -- this is not an
+// approximation of the engine's behavior, it is that behavior, computed
+// test-side so the assertion can be exact even while ingestion is still
+// mid-flight (e.g. the offsets between the most recent flush and the next
+// batch not yet written).
+func holdForwardExpected(expected map[int64]float64, maxOffsetMs int64) map[int64]float64 {
+	out := make(map[int64]float64, maxOffsetMs/1000+1)
+	var cur float64
+	haveCur := false
+	for off := int64(0); off <= maxOffsetMs; off += 1000 {
+		if v, ok := expected[off]; ok {
+			cur, haveCur = v, true
+		}
+		if haveCur {
+			out[off] = cur
+		}
+	}
+	return out
+}
+
+// assertMetricRangeGateway runs the gateway's /api/v1/query_range over
+// [base, base+240s] at a 1s step -- spec §18/§12.3's actual read path, through
+// the gateway, the querier process, its HTTP API, and the query engine, not a
+// client-side reconstruction of the merge -- and fails unless every one of the
+// 241 (ts, value) points matches expected exactly.
+func assertMetricRangeGateway(t *testing.T, label string, c *cluster, base int64, expected map[int64]float64) {
+	t.Helper()
+	code, points := c.queryRangeGateway(t, "split_metric", base, base+240_000, 1000)
+	if code != http.StatusOK {
+		t.Fatalf("%s: query_range = %d, want 200", label, code)
+	}
+	got := make(map[int64]float64, len(points))
+	for tsMs, v := range points {
+		got[tsMs-base] = v
+	}
+	if len(got) != len(points) {
+		t.Fatalf("%s: query_range returned duplicate timestamps", label)
+	}
+	if len(got) != len(expected) {
+		t.Fatalf("%s: query_range got %d points, want %d\n got  %v\n want %v", label, len(got), len(expected), got, expected)
+	}
+	for off, want := range expected {
+		v, ok := got[off]
+		if !ok {
+			t.Fatalf("%s: query_range missing point at offset %dms (want %v)", label, off, want)
+		}
+		if v != want {
+			t.Fatalf("%s: query_range offset %dms = %v, want %v", label, off, v, want)
+		}
+	}
+}
+
 func metricValue(t *testing.T, baseURL, name string) float64 {
 	t.Helper()
 	resp, err := httpClient.Get(baseURL + "/metrics")
@@ -452,7 +568,10 @@ func TestSplitClusterEndToEnd(t *testing.T) {
 	}
 	eventually(t, "log chunks on the store", func() bool { return metricValue(t, c.storeURL, "obs_log_chunks_total") >= 1 })
 	logsStartNs, logsEndNs := base*1_000_000, (base+1000)*1_000_000
-	_, entries, _ := c.lokiQueryRange(t, `{service="split"}`, logsStartNs, logsEndNs)
+	status, entries, _ := c.lokiQueryRange(t, `{service="split"}`, logsStartNs, logsEndNs)
+	if status != http.StatusOK {
+		t.Fatalf("loki query_range after the initial push = %d, want 200", status)
+	}
 	assertLogSet(t, "after the initial push", entries, expectedLogs)
 
 	// Restart the ingester: WAL replay plus the persisted generation floor.
@@ -466,8 +585,15 @@ func TestSplitClusterEndToEnd(t *testing.T) {
 	if v, _, _ := c.instant(t, "split_metric", base+60_000); v != "6000" {
 		t.Fatalf("post-restart overwrite = %q, want 6000", v)
 	}
-	assertMetricSet(t, "after the ingester restart", metricsMergedSnapshot(t, c), base, expectedMetrics)
-	_, entries, _ = c.lokiQueryRange(t, `{service="split"}`, logsStartNs, logsEndNs)
+	// The gateway's actual read path (spec §18/§12.3): through the gateway, the
+	// querier process, its HTTP API, and the query engine -- not the
+	// client-side merge reconstruction below, kept only as an extra.
+	assertMetricRangeGateway(t, "after the ingester restart", c, base, holdForwardExpected(expectedMetrics, 240_000))
+	assertMetricSet(t, "after the ingester restart (client-side merge, extra)", metricsMergedSnapshot(t, c), base, expectedMetrics)
+	status, entries, _ = c.lokiQueryRange(t, `{service="split"}`, logsStartNs, logsEndNs)
+	if status != http.StatusOK {
+		t.Fatalf("loki query_range after the ingester restart = %d, want 200", status)
+	}
 	assertLogSet(t, "after the ingester restart", entries, expectedLogs)
 
 	// A second sealed chunk gives the compactor two blocks in one window.
@@ -479,8 +605,12 @@ func TestSplitClusterEndToEnd(t *testing.T) {
 	if v, _, _ := c.instant(t, "split_metric", base+60_000); v != "6000" {
 		t.Fatalf("after compaction = %q, want 6000", v)
 	}
-	assertMetricSet(t, "after the compaction", metricsMergedSnapshot(t, c), base, expectedMetrics)
-	_, entries, _ = c.lokiQueryRange(t, `{service="split"}`, logsStartNs, logsEndNs)
+	assertMetricRangeGateway(t, "after the compaction", c, base, holdForwardExpected(expectedMetrics, 240_000))
+	assertMetricSet(t, "after the compaction (client-side merge, extra)", metricsMergedSnapshot(t, c), base, expectedMetrics)
+	status, entries, _ = c.lokiQueryRange(t, `{service="split"}`, logsStartNs, logsEndNs)
+	if status != http.StatusOK {
+		t.Fatalf("loki query_range after the compaction = %d, want 200", status)
+	}
 	assertLogSet(t, "after the compaction", entries, expectedLogs)
 
 	// Store down: reads fail closed, writes still land -- for both metrics and
@@ -505,8 +635,15 @@ func TestSplitClusterEndToEnd(t *testing.T) {
 		return code == http.StatusOK && v == "300"
 	})
 	// After recovery, re-read everything the store held before the outage (the
-	// 50->5000 and 60->6000 overwrites included) plus what landed during it.
-	assertMetricSet(t, "after the store recovers", metricsMergedSnapshot(t, c), base, expectedMetrics)
-	_, entries, _ = c.lokiQueryRange(t, `{service="split"}`, logsStartNs, logsEndNs)
+	// 50->5000 and 60->6000 overwrites included). The gateway range check stays
+	// bounded to [0, 240s] (300 is outside that window and already reconfirmed
+	// by the "reads to recover" poll above and expectedMetrics' 300 entry, which
+	// the client-side merge check below still covers over the full range).
+	assertMetricRangeGateway(t, "after the store recovers", c, base, holdForwardExpected(expectedMetrics, 240_000))
+	assertMetricSet(t, "after the store recovers (client-side merge, extra)", metricsMergedSnapshot(t, c), base, expectedMetrics)
+	status, entries, _ = c.lokiQueryRange(t, `{service="split"}`, logsStartNs, logsEndNs)
+	if status != http.StatusOK {
+		t.Fatalf("loki query_range after the store recovers = %d, want 200", status)
+	}
 	assertLogSet(t, "after the store recovers", entries, expectedLogs)
 }
