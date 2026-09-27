@@ -59,14 +59,19 @@ jobs:
           push: false
 
   compose-e2e:
-    name: Compose Stack E2E (through Grafana)
+    name: Compose Stack E2E (${{ matrix.topology }}, through Grafana)
     runs-on: ubuntu-latest
     # Starts the real demo stack and drives it through Grafana's HTTP API. The
-    # job above proves the images build; only this one proves the five services
+    # job above proves the images build; only this one proves the services
     # actually talk to each other — provisioning mounts, datasource resolution,
-    # dashboard loading, the sample app producing, and the storage path.
+    # dashboard loading, the sample app producing, and the storage path — in
+    # both the all-in-one and the split topology.
     needs: build-test-lint
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        topology: [all-in-one, split]
 
     steps:
       - name: Checkout
@@ -74,6 +79,8 @@ jobs:
 
       - name: Compose stack test
         run: bash tests/e2e/compose_smoke.sh
+        env:
+          OBS_COMPOSE_TOPOLOGY: ${{ matrix.topology }}
 
   helm-k8s-e2e:
     name: Helm + Kubernetes E2E (kind)
