@@ -18,6 +18,7 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/rpc"
 	"github.com/masonwheeler/observability-platform/internal/storage/index"
+	"github.com/masonwheeler/observability-platform/internal/storage/wal"
 )
 
 // The same data, three ways: all-in-one's stores; the split's ingester head and
@@ -42,6 +43,18 @@ func newConformance(t *testing.T) conformance {
 	}
 	t.Cleanup(func() { _ = aioBlocks.Close() })
 	aioBlocks.MemStore().EnsureGenFloor(genFloor)
+
+	// Write through a real metrics.WALStore, the same wrapper both all-in-one
+	// and the ingester put in front of their head, rather than calling
+	// aioBlocks.Append/FlushBlock directly: that keeps the "all-in-one"
+	// reference on the real production write path (WAL durability and the
+	// generation-exhaustion preflight included), not a shortcut around it.
+	aioWAL, err := wal.Open(filepath.Join(aioDir, "metrics", "wal"), 1<<20, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = aioWAL.Close() })
+	aioStore := metrics.NewWALStore(aioWAL, aioBlocks, aioDir)
 
 	storeBlocks, err := metrics.NewBlockStore(storeDir)
 	if err != nil {
@@ -112,7 +125,7 @@ func newConformance(t *testing.T) conformance {
 			l := series[r.IntN(len(series))]
 			ts := int64(r.IntN(3*3600)) * 1000
 			v := value()
-			if err := aioBlocks.Append(l, ts, v); err != nil {
+			if err := aioStore.Append(l, ts, v); err != nil {
 				t.Fatal(err)
 			}
 			if err := head.Append(l, ts, v); err != nil {
@@ -130,7 +143,7 @@ func newConformance(t *testing.T) conformance {
 		}
 	}
 	round(1500)
-	if _, err := aioBlocks.FlushBlock(); err != nil {
+	if _, err := aioStore.FlushBlock(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := head.FlushBlock(); err != nil {
@@ -159,7 +172,7 @@ func newConformance(t *testing.T) conformance {
 	st := serve(storeBlocks, logs.AsSource(chunks))
 
 	return conformance{
-		aioMetrics:    aioBlocks,
+		aioMetrics:    aioStore,
 		splitMetrics:  metrics.Merge(head, storeBlocks),
 		remoteMetrics: metrics.Merge(rpc.NewMetricsSource(ing), rpc.NewMetricsSource(st)),
 		aioLogs:       logs.AsSource(aioLogs),
@@ -241,11 +254,64 @@ func TestEverySourceAgrees(t *testing.T) {
 			}
 		}
 	}
+	// Label discovery must agree across every source too, for both families and
+	// both methods (names and values) — not metrics label values alone. Every
+	// call's error is checked: a discarded error here would let a source that
+	// fails outright pass as "empty and therefore equal".
+	wantMetricNames, err := c.aioMetrics.SelectLabelNames(context.Background())
+	if err != nil {
+		t.Fatalf("aio metrics SelectLabelNames: %v", err)
+	}
+	for name, src := range map[string]metrics.Source{"split": c.splitMetrics, "remote": c.remoteMetrics} {
+		got, err := src.SelectLabelNames(context.Background())
+		if err != nil {
+			t.Fatalf("%s metrics SelectLabelNames: %v", name, err)
+		}
+		if fmt.Sprint(got) != fmt.Sprint(wantMetricNames) {
+			t.Fatalf("%s metrics label names = %v, want %v", name, got, wantMetricNames)
+		}
+	}
 	for _, name := range []string{"job", "city", "__name__"} {
-		want, _ := c.aioMetrics.SelectLabelValues(context.Background(), name)
+		want, err := c.aioMetrics.SelectLabelValues(context.Background(), name)
+		if err != nil {
+			t.Fatalf("aio metrics SelectLabelValues(%s): %v", name, err)
+		}
 		for label, src := range map[string]metrics.Source{"split": c.splitMetrics, "remote": c.remoteMetrics} {
-			if got, _ := src.SelectLabelValues(context.Background(), name); fmt.Sprint(got) != fmt.Sprint(want) {
-				t.Fatalf("%s label values for %s = %v, want %v", label, name, got, want)
+			got, err := src.SelectLabelValues(context.Background(), name)
+			if err != nil {
+				t.Fatalf("%s metrics SelectLabelValues(%s): %v", label, name, err)
+			}
+			if fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Fatalf("%s metrics label values for %s = %v, want %v", label, name, got, want)
+			}
+		}
+	}
+
+	wantLogNames, err := c.aioLogs.SelectLabelNames(context.Background())
+	if err != nil {
+		t.Fatalf("aio logs SelectLabelNames: %v", err)
+	}
+	for name, src := range map[string]logs.Source{"split": c.splitLogs, "remote": c.remoteLogs} {
+		got, err := src.SelectLabelNames(context.Background())
+		if err != nil {
+			t.Fatalf("%s logs SelectLabelNames: %v", name, err)
+		}
+		if fmt.Sprint(got) != fmt.Sprint(wantLogNames) {
+			t.Fatalf("%s logs label names = %v, want %v", name, got, wantLogNames)
+		}
+	}
+	for _, name := range []string{"service"} {
+		want, err := c.aioLogs.SelectLabelValues(context.Background(), name)
+		if err != nil {
+			t.Fatalf("aio logs SelectLabelValues(%s): %v", name, err)
+		}
+		for label, src := range map[string]logs.Source{"split": c.splitLogs, "remote": c.remoteLogs} {
+			got, err := src.SelectLabelValues(context.Background(), name)
+			if err != nil {
+				t.Fatalf("%s logs SelectLabelValues(%s): %v", label, name, err)
+			}
+			if fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Fatalf("%s logs label values for %s = %v, want %v", label, name, got, want)
 			}
 		}
 	}
