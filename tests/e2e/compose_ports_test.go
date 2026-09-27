@@ -61,11 +61,11 @@ func splitHostIP(raw string) string {
 	return ""
 }
 
-func composePublishedPorts(t *testing.T) []publishedPort {
+func composePublishedPortsIn(t *testing.T, path string) []publishedPort {
 	t.Helper()
-	b, err := os.ReadFile(filepath.FromSlash(composePath))
+	b, err := os.ReadFile(filepath.FromSlash(path))
 	if err != nil {
-		t.Fatalf("read %s: %v", composePath, err)
+		t.Fatalf("read %s: %v", path, err)
 	}
 	var compose struct {
 		Services map[string]struct {
@@ -73,7 +73,7 @@ func composePublishedPorts(t *testing.T) []publishedPort {
 		} `yaml:"services"`
 	}
 	if err := yaml.Unmarshal(b, &compose); err != nil {
-		t.Fatalf("%s is not valid YAML: %v", composePath, err)
+		t.Fatalf("%s is not valid YAML: %v", path, err)
 	}
 
 	var out []publishedPort
@@ -93,12 +93,17 @@ func composePublishedPorts(t *testing.T) []publishedPort {
 				})
 			default:
 				t.Errorf("%s: service %q has a port entry this test cannot read (%T); it may be published to the network without being checked",
-					composePath, name, entry)
+					path, name, entry)
 			}
 		}
 	}
 	slices.SortFunc(out, func(a, b publishedPort) int { return strings.Compare(a.Raw, b.Raw) })
 	return out
+}
+
+func composePublishedPorts(t *testing.T) []publishedPort {
+	t.Helper()
+	return composePublishedPortsIn(t, composePath)
 }
 
 // TestComposePublishedPortsAreLoopbackOnly is the assertion itself.
