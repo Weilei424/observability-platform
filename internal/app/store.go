@@ -41,6 +41,7 @@ func buildStore(cfg *config.Config, log *slog.Logger) (*App, error) {
 	reg, inst := observability.NewRegistry(observability.RegistryOptions{
 		Storage: blocks,
 		Logs:    chunks,
+		Omit:    observability.AllGroups,
 		Logger:  log,
 	})
 	srv := api.New(api.Deps{
