@@ -82,24 +82,28 @@ func countErrorLines(s string) int {
 }
 
 // TestBuildUnavailableTargetLogsOnceAndLeavesDataDirEmpty covers a target
-// Build cannot construct yet (every non-all-in-one target, until a later
-// task fills them in). Build must fail without touching storage -- nothing
-// in cfg.DataDir, since it never reaches BuildAllInOne's data-dir/WAL/block-
-// store bring-up -- and must log the failure exactly once, from the site
-// that actually knows the cause (Build's own default branch), rather than
-// leaving it to a caller that would otherwise add a second, generic line on
-// top.
+// Build does not recognize. Every target in config.Targets now builds (Phase
+// 6.1 fills in the last of them), so Build's default branch is reachable only
+// by a Target string outside that set -- unreachable through config.Load,
+// which rejects it in validateTopology first, but Build is also called
+// directly here with a hand-built Config that bypasses that validation. Build
+// must fail without touching storage -- nothing in cfg.DataDir, since it never
+// reaches any builder's data-dir/WAL/block-store bring-up -- and must log the
+// failure exactly once, from the site that actually knows the cause (Build's
+// own default branch), rather than leaving it to a caller that would
+// otherwise add a second, generic line on top.
 func TestBuildUnavailableTargetLogsOnceAndLeavesDataDirEmpty(t *testing.T) {
 	var logs bytes.Buffer
 	log := slog.New(slog.NewJSONHandler(&logs, nil))
-	cfg := testConfig(t, config.TargetGateway)
+	const bogusTarget config.Target = "no-such-target"
+	cfg := testConfig(t, bogusTarget)
 
 	_, err := app.Build(cfg, log)
 	if err == nil {
-		t.Fatal("Build: want an error for a target that is not available yet, got nil")
+		t.Fatal("Build: want an error for a target it does not recognize, got nil")
 	}
-	if !strings.Contains(err.Error(), string(config.TargetGateway)) {
-		t.Errorf("error = %q, want it to name the target %q", err.Error(), config.TargetGateway)
+	if !strings.Contains(err.Error(), string(bogusTarget)) {
+		t.Errorf("error = %q, want it to name the target %q", err.Error(), bogusTarget)
 	}
 
 	entries, err := os.ReadDir(cfg.DataDir)
