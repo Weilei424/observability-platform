@@ -215,3 +215,38 @@ func TestIngesterFlushToADownPeerLogsOnceViaHook(t *testing.T) {
 		t.Errorf("no ERROR line carries component=flush:\n%s", logs.String())
 	}
 }
+
+// TestIngesterFinalLogsFlushFailureLogsExactlyOnce covers the other path into
+// the same hook: Head.Close's own final flush, run once during App.Close with
+// no threshold flush and no maintenance loop involved. The pushed line (13
+// bytes) never crosses the default 1<<20 LogsFlushThresholdBytes, so unlike
+// TestIngesterFlushToADownPeerLogsOnceViaHook above, the hook has not fired at
+// all before Close runs, and the head is not in backoff. Without the closer's
+// own dedup (ruling 2), Close would report a "logs head close error" on top of
+// the hook's own "logs flush failed" -- one failure logged as two ERROR lines.
+func TestIngesterFinalLogsFlushFailureLogsExactlyOnce(t *testing.T) {
+	var logs bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&logs, nil))
+	cfg := withPeers(testConfig(t, config.TargetIngester))
+
+	a, err := app.Build(cfg, log)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	if rec := do(a.Handler, http.MethodPost, "/loki/api/v1/push", oneLine); rec.Code != http.StatusNoContent {
+		t.Fatalf("push with the store down = %d, want 204", rec.Code)
+	}
+
+	a.Close()
+
+	if n := countErrorLines(logs.String()); n != 1 {
+		t.Errorf("logged %d ERROR lines, want exactly 1 (one failed final flush, logged once):\n%s", n, logs.String())
+	}
+	if !strings.Contains(logs.String(), `"component":"flush"`) {
+		t.Errorf("no ERROR line carries component=flush:\n%s", logs.String())
+	}
+	if strings.Contains(logs.String(), "logs head close error") {
+		t.Errorf("the logs closer re-logged the flush failure the hook already reported:\n%s", logs.String())
+	}
+}
