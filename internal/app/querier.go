@@ -11,10 +11,6 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/rpc"
 )
 
-// alwaysReady is the readiness of a component that owns no data directory:
-// serving is enough. Peer outages surface on requests, never as readiness.
-func alwaysReady() error { return nil }
-
 // buildQuerier assembles the querier: the nine read routes over the ingester
 // and store merged -- ingester first, which is what keeps a flush invisible.
 func buildQuerier(cfg *config.Config, log *slog.Logger) (*App, error) {
