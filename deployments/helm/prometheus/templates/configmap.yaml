@@ -18,3 +18,4 @@ data:
           - targets: ["{{ trimPrefix "http://" .Values.backend.url }}"]
             labels:
               service: observability-platform
+              component: all-in-one
