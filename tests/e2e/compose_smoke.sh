@@ -142,6 +142,15 @@ fi
 PASS=0
 FAIL=0
 
+# LOG_FILE names the temp file the split log-target check (below) is currently
+# using; teardown() removes whatever it currently points at, so a temp file
+# does not leak if the script exits mid-loop (a signal, an unbound-variable
+# abort under `set -u`) rather than reaching that loop iteration's own
+# `rm -f`. Declared empty here so `set -u` doesn't reject `[ -n "$LOG_FILE" ]`
+# in teardown on a run that never reaches the split-only block at all
+# (all-in-one topology).
+LOG_FILE=""
+
 # The expected running set. Every service is asserted on its own data elsewhere
 # in this run, but a producer can also exit between assertions, so the exact set
 # is checked after startup and again at the end.
@@ -176,9 +185,17 @@ dockerq() { timeout 60 docker "$@"; }
 log_pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 log_fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 
+# check_contains/check_absent read $body through a here-string, not a pipe:
+# with pipefail (set at the top of this script), `printf ... | grep -qF ...`
+# on a body over one pipe buffer lets grep's early exit (on match) SIGPIPE-kill
+# printf before it finishes writing, and pipefail promotes that non-zero
+# printf status to the whole pipeline even though grep matched — see the
+# identical bug this cost the Step-4 log-target check, fixed the same way.
+# A here-string has no live writer to kill: bash materializes it before grep
+# ever runs, so grep's early exit is harmless.
 check_contains() {
     local label="$1" body="$2" needle="$3"
-    if printf '%s' "$body" | grep -qF -- "$needle"; then
+    if grep -qF -- "$needle" <<< "$body"; then
         log_pass "$label"
     else
         log_fail "$label — missing '$needle' in: $(printf '%s' "$body" | head -c 400)"
@@ -189,7 +206,7 @@ check_absent() {
     local label="$1" body="$2" needle="$3"
     if [ -z "$body" ]; then
         log_fail "$label — empty response body"
-    elif printf '%s' "$body" | grep -qF -- "$needle"; then
+    elif grep -qF -- "$needle" <<< "$body"; then
         log_fail "$label — unexpected '$needle' in: $(printf '%s' "$body" | head -c 400)"
     else
         log_pass "$label"
@@ -267,6 +284,10 @@ chunk_count() {
 
 teardown() {
     local rc=$?
+    # Independent of Docker/stack ownership below: a leaked temp file is a
+    # leaked temp file regardless of whether this run owns the compose
+    # project, so it is cleaned up unconditionally and first.
+    [ -n "$LOG_FILE" ] && rm -f "$LOG_FILE"
     if [ "$FAIL" -ne 0 ] || [ "$rc" -ne 0 ]; then
         echo ""
         echo "-- Container state (run failed) --"
@@ -314,10 +335,15 @@ wait_for() {
     return 1
 }
 
-grafana_up()     { curl -sf "${CURL_TIMEOUTS[@]}" -u "$GRAFANA_AUTH" "$GRAFANA/api/health" | grep -q '"database": *"ok"'; }
-datasource_ok()  { gapi /api/datasources/uid/obs-loki/health | grep -q '"status":"OK"'; }
-sample_app_up()  { gapi /api/datasources/uid/obs-loki/resources/label/service/values | grep -q '"worker"'; }
-prom_datasource_ok()   { gapi /api/datasources/uid/obs-prometheus/health | grep -q '"status":"OK"'; }
+# No `-q` here: these pipe a live curl's output straight into grep, and with
+# pipefail an early `-q` exit can SIGPIPE-kill curl before it finishes writing,
+# poisoning the pipeline's exit status even on a real match (see check_contains
+# above for the full mechanism). Dropping `-q` and redirecting output instead
+# makes grep read to EOF, so curl is never cut off mid-write.
+grafana_up()     { curl -sf "${CURL_TIMEOUTS[@]}" -u "$GRAFANA_AUTH" "$GRAFANA/api/health" | grep '"database": *"ok"' >/dev/null; }
+datasource_ok()  { gapi /api/datasources/uid/obs-loki/health | grep '"status":"OK"' >/dev/null; }
+sample_app_up()  { gapi /api/datasources/uid/obs-loki/resources/label/service/values | grep '"worker"' >/dev/null; }
+prom_datasource_ok()   { gapi /api/datasources/uid/obs-prometheus/health | grep '"status":"OK"' >/dev/null; }
 # The self-observability Prometheus (Phase 5.3): a separate service that scrapes
 # the backend's own /metrics. Distinct from prom_datasource_ok above, which
 # proves Grafana reaches the backend's Prometheus-compatible query API, not this
@@ -575,6 +601,20 @@ if [ "$TOPOLOGY" = split ]; then
         log_pass "seed flush marker (120 samples, HTTP 204)"
     else
         log_fail "seed flush marker — got HTTP $FLUSH_STATUS"
+    fi
+
+    # Spec 10.2 item 2: read the marker back by value from the ingester's own
+    # head, before anything downstream of it (restart, flush, store) runs. The
+    # later "flush marker read back by value after the ingester's graceful stop
+    # flushed it" check proves the store side of this path; this proves the
+    # write actually landed in the head in the first place, so a later failure
+    # there can be pinned on the flush/restart rather than the seed itself.
+    BODY=$(promquery 'compose_e2e_flush_marker')
+    if printf '%s' "$BODY" | jq -e --argjson want "$MARKER_VALUE" \
+            '[.. | arrays | select(length > 0) | select(all(.[]; type == "number")) | .[]] | index($want)' >/dev/null 2>&1; then
+        log_pass "flush marker read back by value from the ingester's head, before the restart"
+    else
+        log_fail "flush marker value $MARKER_VALUE absent from the ingester's head; body: $BODY"
     fi
 fi
 
@@ -869,16 +909,19 @@ if [ "$TOPOLOGY" = split ]; then
             log_fail "$svc log lines do not carry target=$svc"
         fi
         rm -f "$LOG_FILE"
+        LOG_FILE=""
     done
 
-    # A store outage: reads fail closed with 503 unavailable, writes still land.
+    # A store outage: reads fail closed with 503 unavailable, writes still
+    # land, for both families the spec covers (metrics and logs, §8.1) — not
+    # just metrics.
     if dc stop store >/dev/null 2>&1; then
         log_pass "store stopped"
     else
         log_fail "store stop failed"
     fi
     OUTAGE=$(curl -s "${CURL_TIMEOUTS[@]}" -w '\n%{http_code}' -G "$BACKEND/api/v1/query" --data-urlencode 'query=compose_e2e_marker')
-    if [ "$(printf '%s' "$OUTAGE" | tail -1)" = "503" ] && printf '%s' "$OUTAGE" | grep -q '"errorType":"unavailable"'; then
+    if [ "$(printf '%s' "$OUTAGE" | tail -1)" = "503" ] && grep -qF -- '"errorType":"unavailable"' <<< "$OUTAGE"; then
         log_pass "a query with the store down answers 503 unavailable"
     else
         log_fail "a query with the store down answered: $OUTAGE"
@@ -893,6 +936,31 @@ if [ "$TOPOLOGY" = split ]; then
     else
         log_fail "a write with the store down answered HTTP $OUTAGE_STATUS"
     fi
+
+    # The logs family gets the same fail-closed contract, checked independently
+    # of any flush: a raw Loki query_range (what the querier answers directly,
+    # not through Grafana), the same query through Grafana's own datasource
+    # proxy (so a viewer sees the outage rather than an empty panel), and a
+    # Loki push, all while the store is still down. None of these read back
+    # specific content, so none depend on whether the queried stream has been
+    # flushed to the store yet.
+    LOKI_OUTAGE=$(curl -s "${CURL_TIMEOUTS[@]}" -w '\n%{http_code}' -G "$BACKEND/loki/api/v1/query_range" --data-urlencode 'query={service="compose-e2e"}')
+    if [ "$(printf '%s' "$LOKI_OUTAGE" | tail -1)" = "503" ] && grep -qF -- 'unavailable' <<< "$LOKI_OUTAGE"; then
+        log_pass "a Loki query with the store down answers 503 unavailable"
+    else
+        log_fail "a Loki query with the store down answered: $LOKI_OUTAGE"
+    fi
+    BODY=$(dsquery '{service=\"compose-e2e\"} |= \"\"')
+    check_contains "Grafana surfaces the Loki outage rather than empty logs" "$BODY" "unavailable"
+    LOKI_OUTAGE_STATUS=$(curl -s "${CURL_TIMEOUTS[@]}" -o /dev/null -w "%{http_code}" -X POST "$BACKEND/loki/api/v1/push" \
+        -H "Content-Type: application/json" \
+        -d "{\"streams\":[{\"stream\":{\"service\":\"compose-e2e\",\"level\":\"info\",\"env\":\"local\"},\"values\":[[\"$(date +%s%N)\",\"outage push run_id=$RUN_ID\"]]}]}")
+    if [ "$LOKI_OUTAGE_STATUS" = "204" ]; then
+        log_pass "a Loki push lands while the store is down (HTTP 204)"
+    else
+        log_fail "a Loki push with the store down answered HTTP $LOKI_OUTAGE_STATUS"
+    fi
+
     if dc start store >/dev/null 2>&1; then
         log_pass "store started again"
     else
@@ -902,6 +970,26 @@ if [ "$TOPOLOGY" = split ]; then
         [ "$(curl -s "${CURL_TIMEOUTS[@]}" -o /dev/null -w '%{http_code}' -G "$BACKEND/api/v1/query" --data-urlencode 'query=compose_e2e_outage')" = "200" ]
     }
     wait_for "reads recover once the store is back" "$READY_TIMEOUT" reads_recovered
+
+    # Recovery is more than "the store answers again": the store's own,
+    # pre-outage data (flushed before the restart, earlier in this block) and
+    # the write made *during* the outage (buffered in the ingester's head
+    # while the store was down) must both still read back by value now that
+    # the store is back.
+    BODY=$(promquery 'compose_e2e_flush_marker')
+    if printf '%s' "$BODY" | jq -e --argjson want "$MARKER_VALUE" \
+            '[.. | arrays | select(length > 0) | select(all(.[]; type == "number")) | .[]] | index($want)' >/dev/null 2>&1; then
+        log_pass "flush marker still readable by value once the store recovers"
+    else
+        log_fail "flush marker value $MARKER_VALUE absent once the store recovered; body: $BODY"
+    fi
+    BODY=$(promquery 'compose_e2e_outage')
+    if printf '%s' "$BODY" | jq -e \
+            '[.. | arrays | select(length > 0) | select(all(.[]; type == "number")) | .[]] | index(1)' >/dev/null 2>&1; then
+        log_pass "the outage-time write reads back by value once the store recovers"
+    else
+        log_fail "the outage-time write's value is absent once the store recovered; body: $BODY"
+    fi
 fi
 
 # ---- The demo is still live -----------------------------------------
@@ -916,7 +1004,12 @@ echo "-- Still live at the end of the run --"
 FRESH_FROM_MS=$(( $(date +%s) * 1000 ))
 FRESH_TO_MS=$(( FRESH_FROM_MS + 120000 ))
 sample_app_producing_now() {
-    dsquery '{service=\"api\"}' "$FRESH_FROM_MS" "$FRESH_TO_MS" | grep -q 'request_id='
+    # Captured to a variable first, then matched with a here-string: dsquery's
+    # curl is a live writer, and `-q`'s early exit on a match can SIGPIPE-kill
+    # it before it finishes under this script's pipefail (see check_contains).
+    local body
+    body="$(dsquery '{service=\"api\"}' "$FRESH_FROM_MS" "$FRESH_TO_MS")"
+    grep -qF -- 'request_id=' <<< "$body"
 }
 wait_for "sample-app timestamps advance (new rows after the restart)" 60 sample_app_producing_now
 
