@@ -43,6 +43,44 @@
         "OBS_COMPACTION_LEVELS": { "type": ["string", "integer"] },
         "OBS_RETENTION": { "type": ["string"] }
       }
+    },
+    "topology": {
+      "description": "all-in-one runs one StatefulSet; split runs the five Phase 6.1 components.",
+      "enum": ["all-in-one", "split"]
+    },
+    "split": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "gateway": { "$ref": "#/$defs/statelessComponent" },
+        "querier": { "$ref": "#/$defs/statelessComponent" },
+        "compactor": { "$ref": "#/$defs/statelessComponent" },
+        "ingester": { "$ref": "#/$defs/statefulComponent" },
+        "store": { "$ref": "#/$defs/statefulComponent" }
+      }
+    }
+  },
+  "$defs": {
+    "statelessComponent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "replicas": { "type": "integer", "minimum": 1 },
+        "resources": { "type": "object" }
+      }
+    },
+    "statefulComponent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "replicas": { "type": "integer", "minimum": 1 },
+        "resources": { "type": "object" },
+        "persistence": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "size": { "type": "string" } }
+        }
+      }
     }
   }
 }
