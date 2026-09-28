@@ -1,7 +1,15 @@
-observability-platform backend installed as release {{ .Release.Name }}.
+observability-platform backend installed as release {{ .Release.Name }} (topology: {{ .Values.topology }}).
 
 Wait for it to become ready:
+{{- if eq .Values.topology "split" }}
+  kubectl rollout status statefulset/{{ include "backend.componentName" (list . "ingester") }} -n {{ .Release.Namespace }}
+  kubectl rollout status statefulset/{{ include "backend.componentName" (list . "store") }} -n {{ .Release.Namespace }}
+  kubectl rollout status deployment/{{ include "backend.componentName" (list . "querier") }} -n {{ .Release.Namespace }}
+  kubectl rollout status deployment/{{ include "backend.componentName" (list . "compactor") }} -n {{ .Release.Namespace }}
+  kubectl rollout status deployment/{{ include "backend.name" . }} -n {{ .Release.Namespace }}
+{{- else }}
   kubectl rollout status statefulset/{{ include "backend.name" . }} -n {{ .Release.Namespace }}
+{{- end }}
 
 Reach the API locally:
   kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "backend.name" . }} 8080:{{ .Values.service.port }}
@@ -13,3 +21,6 @@ itself (that's the rollout status command above); it only confirms the API answe
 
 Other charts address this backend at:
   http://{{ include "backend.name" . }}:{{ .Values.service.port }}
+{{- if eq .Values.topology "split" }}
+  — the gateway, which proxies writes to the ingester and reads to the querier.
+{{- end }}
