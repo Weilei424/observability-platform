@@ -1,0 +1,84 @@
+{{- if eq .Values.topology "split" }}
+{{- $root := . }}
+{{- range $component := list "ingester" "store" }}
+{{- $v := index $root.Values.split $component }}
+{{- $name := include "backend.componentName" (list $root $component) }}
+---
+# A StatefulSet, as the all-in-one backend is: this component owns a data
+# directory on a ReadWriteOnce volume, and a Deployment's rolling update would
+# wait forever for the volume the old pod still holds.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "backend.componentLabels" (list $root $component) | nindent 4 }}
+spec:
+  replicas: {{ $v.replicas }}
+  serviceName: {{ $name }}-headless
+  selector:
+    matchLabels:
+      {{- include "backend.componentSelectorLabels" (list $root $component) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "backend.componentLabels" (list $root $component) | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $root.Template.BasePath "/split-configmaps.yaml") $root | sha256sum }}
+    spec:
+      # The default 30s grace period is too short: the ingester's graceful
+      # shutdown can take about 40s against a slow store (a 30s metrics flush
+      # plus a 10s logs flush), and Kubernetes would SIGKILL it mid-flush. The
+      # Compose split already gives it 45s (stop_grace_period); this adds
+      # headroom on top.
+      terminationGracePeriodSeconds: 60
+      {{- include "backend.podSecurityContext" $root | nindent 6 }}
+      containers:
+        - name: {{ $component }}
+          {{- include "backend.splitContainer" (list $root $component true $v.resources) | nindent 10 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        {{- if $root.Values.persistence.storageClassName }}
+        storageClassName: {{ $root.Values.persistence.storageClassName }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $v.persistence.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "backend.componentLabels" (list $root $component) | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ $root.Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "backend.componentSelectorLabels" (list $root $component) | nindent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-headless
+  labels:
+    {{- include "backend.componentLabels" (list $root $component) | nindent 4 }}
+spec:
+  clusterIP: None
+  ports:
+    - port: {{ $root.Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "backend.componentSelectorLabels" (list $root $component) | nindent 4 }}
+{{- end }}
+{{- end }}
