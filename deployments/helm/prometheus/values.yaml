@@ -14,6 +14,21 @@ backend:
   # fails if this URL does not resolve to a Service the backend chart creates.
   url: http://observability-backend:8080
 
+# Match the backend chart's topology. all-in-one scrapes backend.url; split
+# scrapes every component below, each labelled with its component, which the
+# internals dashboard reads to count requests once and to show which process is
+# down. Each URL is a claim about a Service the backend chart creates in split;
+# tests/e2e/helm_split_prometheus_test.go checks every one.
+topology: all-in-one
+
+split:
+  targets:
+    gateway: http://observability-backend:8080
+    ingester: http://observability-ingester:8080
+    querier: http://observability-querier:8080
+    store: http://observability-store:8080
+    compactor: http://observability-compactor:8080
+
 scrapeInterval: 15s
 
 # Demo telemetry on an emptyDir, deliberately: this chart is here so the
