@@ -790,9 +790,9 @@ its assertions.
 - [x] `compose_smoke.sh` topology switch with split checks — a by-value round trip across an ingester restart and a store-outage drill; CI runs both topologies
 
 **Helm split**
-- [ ] Backend chart `topology: all-in-one | split` — the gateway keeps the `observability-backend` Service; the ingester and store are StatefulSets; the ingester, store, and compactor refuse more than one replica
+- [x] Backend chart `topology: all-in-one | split` — the gateway keeps the `observability-backend` Service; the ingester and store are StatefulSets; the ingester, store, and compactor refuse more than one replica
 - [ ] Prometheus chart `topology` switch — scrapes every split component
-- [ ] Chart tests — the split render lints; each Service selects only its component; ConfigMaps load and reach their peers; every probe path is a real route; the cross-chart contract holds through the gateway
+- [x] Chart tests — the split render lints; each Service selects only its component; ConfigMaps load and reach their peers; every probe path is a real route; the cross-chart contract holds through the gateway
 - [ ] `kind_smoke.sh` topology switch — a by-value round trip across ingester and store restarts; `smoke-kind-split` in CI
 
 **Docs**
