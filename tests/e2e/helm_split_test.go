@@ -1,6 +1,8 @@
 package e2e_test
 
 import (
+	"errors"
+	"io"
 	"os/exec"
 	"regexp"
 	"slices"
@@ -12,7 +14,7 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/config"
 )
 
-// componentOf reads the component a split object belongs to from its name.
+// splitNames reads the component a split object belongs to from its name.
 var splitNames = map[string]string{
 	"observability-backend":   "gateway",
 	"observability-querier":   "querier",
@@ -218,9 +220,10 @@ func TestSplitGatewayKeepsTheCrossChartContract(t *testing.T) {
 	}
 }
 
-// statefulPodSpec is the minimal shape needed to read
-// terminationGracePeriodSeconds, which k8sObject does not decode.
-type statefulPodSpec struct {
+// podSpecObject is the minimal shape needed to read
+// terminationGracePeriodSeconds and volume wiring, none of which k8sObject
+// decodes.
+type podSpecObject struct {
 	Kind     string `yaml:"kind"`
 	Metadata struct {
 		Name string `yaml:"name"`
@@ -229,9 +232,50 @@ type statefulPodSpec struct {
 		Template struct {
 			Spec struct {
 				TerminationGracePeriodSeconds *int64 `yaml:"terminationGracePeriodSeconds"`
+				Volumes                       []struct {
+					Name string `yaml:"name"`
+				} `yaml:"volumes"`
+				Containers []struct {
+					Name         string `yaml:"name"`
+					VolumeMounts []struct {
+						Name string `yaml:"name"`
+					} `yaml:"volumeMounts"`
+				} `yaml:"containers"`
 			} `yaml:"spec"`
 		} `yaml:"template"`
 	} `yaml:"spec"`
+}
+
+// renderPodSpecObjects runs `helm template` and decodes the result into
+// podSpecObject, the same way render() does for k8sObject — used only for
+// the pod-spec fields k8sObject does not decode (terminationGracePeriodSeconds,
+// volumes, volumeMounts).
+func renderPodSpecObjects(t *testing.T, extra ...string) []podSpecObject {
+	t.Helper()
+	helmAvailable(t)
+	args := append([]string{"template", "obs", backendChart}, extra...)
+	out, err := exec.Command("helm", args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	}
+
+	var objs []podSpecObject
+	dec := yaml.NewDecoder(strings.NewReader(string(out)))
+	for {
+		var o podSpecObject
+		err := dec.Decode(&o)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("rendered output is not valid YAML: %v", err)
+		}
+		if o.Kind == "" {
+			continue
+		}
+		objs = append(objs, o)
+	}
+	return objs
 }
 
 // TestSplitStatefulSetsGetAGracefulShutdownBudget pins the controller ruling:
@@ -240,19 +284,8 @@ type statefulPodSpec struct {
 // period would SIGKILL it mid-flush. The Compose split already uses 45s; this
 // chart uses 60s for headroom.
 func TestSplitStatefulSetsGetAGracefulShutdownBudget(t *testing.T) {
-	helmAvailable(t)
-	out, err := exec.Command("helm", "template", "obs", backendChart, "--set", "topology=split").CombinedOutput()
-	if err != nil {
-		t.Fatalf("helm template --set topology=split failed: %v\n%s", err, out)
-	}
-
 	checked := 0
-	dec := yaml.NewDecoder(strings.NewReader(string(out)))
-	for {
-		var o statefulPodSpec
-		if err := dec.Decode(&o); err != nil {
-			break
-		}
+	for _, o := range renderPodSpecObjects(t, "--set", "topology=split") {
 		if o.Kind != "StatefulSet" {
 			continue
 		}
@@ -264,5 +297,99 @@ func TestSplitStatefulSetsGetAGracefulShutdownBudget(t *testing.T) {
 	}
 	if checked != 2 {
 		t.Fatalf("checked %d StatefulSets, want 2 (ingester and store)", checked)
+	}
+}
+
+// baseAllInOneChecksumConfig is the StatefulSet's checksum/config annotation
+// rendered from commit 2016c11 (the tip of main immediately before this
+// task), with topology's default values (i.e. no --set at all — the render
+// every existing all-in-one install upgrades from). Computed once via:
+//
+//	git archive 2016c11 deployments/helm/backend | tar -x -C <scratch>
+//	helm template obs <scratch>/deployments/helm/backend | grep checksum/config
+//
+// which printed 9fc5ea170f84250f2fe4945ee16a45f65244b8925e15da0af7936b5ae1bee3a2.
+//
+// A hardcoded hash is brittle to any *intentional* change to
+// templates/configmap.yaml (a real key rename, a comment edit inside the
+// hashed include, etc.) — such a change must update this constant along with
+// it, and the failure message below says so. The alternative of asserting
+// two renders (before/after this task's commits) produce the same value
+// would not survive past this one commit range, and comparing against a
+// second `helm template` of a fresh git checkout on every test run is slower
+// and reintroduces a git dependency for no benefit over a literal recorded
+// once. A hardcoded hash is preferred here because the ConfigMap's rendered
+// content for default values is not expected to change again in this task.
+const baseAllInOneChecksumConfig = "9fc5ea170f84250f2fe4945ee16a45f65244b8925e15da0af7936b5ae1bee3a2"
+
+// TestAllInOneChecksumConfigUnchangedFromBase is the regression test for the
+// bug fixed in configmap.yaml: `{{- if eq .Values.topology "all-in-one" }}`
+// (no trailing `-`) emitted a leading newline into the raw output of
+// `include ".../configmap.yaml"` that the checksum hashes, even though Helm
+// trims that newline from the written manifest — so the ConfigMap object was
+// byte-identical while checksum/config differed. Every `helm upgrade` of an
+// existing all-in-one install would then roll its single-replica
+// StatefulSet with no actual config change. If this ever regresses again —
+// a stray newline from any future edit to the file the include reads, in
+// either direction — this test catches it without needing a live cluster.
+func TestAllInOneChecksumConfigUnchangedFromBase(t *testing.T) {
+	var found string
+	for _, o := range render(t, backendChart) {
+		if o.Kind != "StatefulSet" {
+			continue
+		}
+		found = o.Spec.Template.Metadata.Annotations["checksum/config"]
+	}
+	if found == "" {
+		t.Fatal("no StatefulSet with a checksum/config annotation was rendered; the all-in-one chart must have changed shape")
+	}
+	if found != baseAllInOneChecksumConfig {
+		t.Errorf("checksum/config = %s, want %s (the value at commit 2016c11 for default values); "+
+			"every all-in-one install would restart on upgrade with no config change. "+
+			"If templates/configmap.yaml genuinely changed on purpose, recompute and update baseAllInOneChecksumConfig",
+			found, baseAllInOneChecksumConfig)
+	}
+}
+
+// TestSplitStatelessComponentsMountNoVolume pins the gateway, querier, and
+// compactor never touching the data dir: they must answer ready without
+// disk, so they mount no volume and declare no volumeMounts.
+func TestSplitStatelessComponentsMountNoVolume(t *testing.T) {
+	checked := 0
+	for _, o := range renderPodSpecObjects(t, "--set", "topology=split") {
+		if o.Kind != "Deployment" {
+			continue
+		}
+		if len(o.Spec.Template.Spec.Volumes) != 0 {
+			t.Errorf("%s: pod template has %d volumes, want 0", o.Metadata.Name, len(o.Spec.Template.Spec.Volumes))
+		}
+		for _, c := range o.Spec.Template.Spec.Containers {
+			if len(c.VolumeMounts) != 0 {
+				t.Errorf("%s container %q has %d volumeMounts, want 0", o.Metadata.Name, c.Name, len(c.VolumeMounts))
+			}
+			checked++
+		}
+	}
+	if checked != 3 {
+		t.Fatalf("checked %d stateless containers, want 3 (gateway, querier, compactor)", checked)
+	}
+}
+
+// TestSplitRejectsTemplateOwnedConfigKeys pins Task 12's refusal in the split
+// topology too: the chart, not the operator, decides each component's target
+// and peer URLs, and split-configmaps.yaml has its own render path that must
+// not bypass that guard.
+func TestSplitRejectsTemplateOwnedConfigKeys(t *testing.T) {
+	helmAvailable(t)
+	for _, key := range []string{"config.OBS_TARGET=gateway", "config.OBS_STORE_URL=http://elsewhere:8080"} {
+		out, err := exec.Command("helm", "template", "backend", backendChart,
+			"--set", "topology=split", "--set-string", key).CombinedOutput()
+		if err == nil {
+			t.Errorf("--set-string %s rendered with topology=split; it must fail", key)
+			continue
+		}
+		if !strings.Contains(string(out), "the chart decides each component's target and peer URLs") {
+			t.Errorf("--set-string %s failed without Task 12's message: %s", key, out)
+		}
 	}
 }
