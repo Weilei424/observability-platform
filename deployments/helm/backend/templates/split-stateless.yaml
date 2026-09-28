@@ -1,0 +1,45 @@
+{{- if eq .Values.topology "split" }}
+{{- $root := . }}
+{{- range $component := list "gateway" "querier" "compactor" }}
+{{- $v := index $root.Values.split $component }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "backend.componentName" (list $root $component) }}
+  labels:
+    {{- include "backend.componentLabels" (list $root $component) | nindent 4 }}
+spec:
+  replicas: {{ $v.replicas }}
+  selector:
+    matchLabels:
+      {{- include "backend.componentSelectorLabels" (list $root $component) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "backend.componentLabels" (list $root $component) | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $root.Template.BasePath "/split-configmaps.yaml") $root | sha256sum }}
+    spec:
+      {{- include "backend.podSecurityContext" $root | nindent 6 }}
+      containers:
+        - name: {{ $component }}
+          {{- include "backend.splitContainer" (list $root $component false $v.resources) | nindent 10 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "backend.componentName" (list $root $component) }}
+  labels:
+    {{- include "backend.componentLabels" (list $root $component) | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ $root.Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "backend.componentSelectorLabels" (list $root $component) | nindent 4 }}
+{{- end }}
+{{- end }}
