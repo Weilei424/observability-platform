@@ -41,3 +41,43 @@ config:
 startupProbe:
   periodSeconds: 5
   failureThreshold: 30
+
+# all-in-one runs the whole backend as one StatefulSet — the default, as before.
+# split runs the five components of Phase 6.1. The gateway takes this chart's
+# Service name, so the grafana, producers, and prometheus charts need no change
+# beyond the prometheus chart's own topology switch.
+topology: all-in-one
+
+# Settings for topology: split; ignored in all-in-one. The ingester, store, and
+# compactor are singletons until Phase 6.2 and the chart refuses more than one.
+# Their PVCs use persistence.storageClassName above.
+split:
+  gateway:
+    replicas: 1
+    resources:
+      requests: { cpu: 50m, memory: 64Mi }
+      limits: { memory: 256Mi }
+  querier:
+    replicas: 1
+    resources:
+      requests: { cpu: 50m, memory: 64Mi }
+      limits: { memory: 512Mi }
+  compactor:
+    replicas: 1
+    resources:
+      requests: { cpu: 50m, memory: 64Mi }
+      limits: { memory: 256Mi }
+  ingester:
+    replicas: 1
+    persistence:
+      size: 1Gi
+    resources:
+      requests: { cpu: 100m, memory: 128Mi }
+      limits: { memory: 512Mi }
+  store:
+    replicas: 1
+    persistence:
+      size: 2Gi
+    resources:
+      requests: { cpu: 100m, memory: 128Mi }
+      limits: { memory: 512Mi }
