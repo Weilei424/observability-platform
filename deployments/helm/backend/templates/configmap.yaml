@@ -6,7 +6,7 @@
 {{- fail (printf "config.%s is not settable: the chart decides each component's target and peer URLs." $key) }}
 {{- end }}
 {{- end }}
-{{- if eq .Values.topology "all-in-one" }}
+{{- if eq .Values.topology "all-in-one" -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
