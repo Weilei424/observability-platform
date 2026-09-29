@@ -62,6 +62,13 @@ private WAL, so a query would see whichever shard it landed on.
 | `split.<component>.resources` | see `values.yaml` | Per-component requests and limits |
 | `split.ingester.persistence.size`, `split.store.persistence.size` | `1Gi`, `2Gi` | PVC sizes; `persistence.storageClassName` applies to both |
 
+The ingester and store StatefulSets set `terminationGracePeriodSeconds: 60`,
+fixed rather than a value the chart exposes: a graceful shutdown against a slow
+peer can take about 40s (a 30s metrics flush plus a 10s logs flush), and
+Kubernetes would otherwise SIGKILL the pod mid-flush before it finishes. The
+Compose split gives the same two services a 45s `stop_grace_period` for the
+same reason; the chart's 60s adds headroom on top.
+
 `OBS_TARGET`, `OBS_INGESTER_URL`, `OBS_STORE_URL`, and `OBS_QUERIER_URL` are
 rendered by the chart from `topology` and are refused under `config` — setting
 one there would emit the key twice and could contradict what the chart itself
