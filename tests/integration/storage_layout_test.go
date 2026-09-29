@@ -59,8 +59,21 @@ func TestStorageLayoutDocMatchesDisk(t *testing.T) {
 
 	dataDir := produceStorageTree(t)
 
-	produced := map[string]bool{}
-	err = filepath.WalkDir(dataDir, func(path string, d os.DirEntry, err error) error {
+	produced := walkTree(t, dataDir)
+	if len(produced) == 0 {
+		t.Fatal("the exercised write paths produced no files at all")
+	}
+
+	diffLayout(t, documented, produced, "the backend")
+}
+
+// walkTree walks dataDir and returns every path it finds, relative to dataDir
+// and rooted at "data/" the way the storage-layout doc's rows are written.
+// Directory entries end in "/".
+func walkTree(t *testing.T, dataDir string) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	err := filepath.WalkDir(dataDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -75,16 +88,26 @@ func TestStorageLayoutDocMatchesDisk(t *testing.T) {
 		if d.IsDir() {
 			entry += "/"
 		}
-		produced[entry] = true
+		out[entry] = true
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("walk %s: %v", dataDir, err)
 	}
-	if len(produced) == 0 {
-		t.Fatal("the exercised write paths produced no files at all")
-	}
+	return out
+}
 
+// diffLayout fails t unless every path in produced matches some pattern in
+// documented, and every pattern in documented matches at least one path in
+// produced — the two-direction check every storage-layout test needs. label
+// names whoever wrote produced (e.g. "the backend", "the ingester"), and each
+// documented key is used exactly as given in the error text, so a caller that
+// wants a component prefix in the message (e.g. "ingester:data/metrics/")
+// passes documented keyed that way while still matching plain "data/..."
+// entries: the key only decides what gets printed, the regexp decides what
+// matches.
+func diffLayout(t *testing.T, documented map[string]*regexp.Regexp, produced map[string]bool, label string) {
+	t.Helper()
 	matched := map[string]bool{}
 	for entry := range produced {
 		var ok bool
@@ -94,12 +117,12 @@ func TestStorageLayoutDocMatchesDisk(t *testing.T) {
 			}
 		}
 		if !ok {
-			t.Errorf("the backend wrote %q, which %s does not document. Add a row for it.", entry, storageLayoutDoc)
+			t.Errorf("%s wrote %q, which %s does not document. Add a row for it.", label, entry, storageLayoutDoc)
 		}
 	}
 	for doc := range documented {
 		if !matched[doc] {
-			t.Errorf("%s documents %q, which this test never produced. Either the path is gone, or the test does not exercise the code that writes it — say which in the row.", storageLayoutDoc, doc)
+			t.Errorf("%s documents %q, which %s never produced. Either the path is gone, or the test does not exercise the code that writes it — say which in the row.", storageLayoutDoc, doc, label)
 		}
 	}
 }
