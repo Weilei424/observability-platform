@@ -6,6 +6,7 @@ The backend serves three API surfaces:
 |---|---|
 | [Metrics](metrics.md) | A project-internal ingest endpoint plus the Prometheus-compatible query API |
 | [Logs](logs.md) | The Loki-compatible push and query API |
+| [Internal](internal.md) | The API the split components use among themselves; never exposed by the gateway |
 | [Limitations](limitations.md) | Exactly which query forms are supported, and what the platform does not do |
 
 Prometheus and Loki compatibility is a deliberate subset, not an attempt at
@@ -32,12 +33,13 @@ Error:
 ```
 
 `warnings` is **always present on success** (as `[]` when empty) and **always
-omitted on error**. Two `errorType` values are in use:
+omitted on error**. Three `errorType` values are in use:
 
 | `errorType` | Status | Meaning |
 |---|---|---|
 | `bad_data` | 400 | The request is malformed, or asks for something outside the supported subset |
 | `execution` | 500 | The query parsed but failed while running |
+| `unavailable` | 503 | A component the query needs could not be reached (split topology only) |
 
 The ingest endpoint and the Loki-compatible endpoints do **not** use this
 envelope; each surface documents its own.
