@@ -180,7 +180,7 @@ if ! EXISTING_CLUSTERS="$(kind get clusters 2>/dev/null)"; then
     exit 2
 fi
 
-if printf '%s\n' "$EXISTING_CLUSTERS" | grep -qxF "$CLUSTER"; then
+if grep -qxF "$CLUSTER" <<<"$EXISTING_CLUSTERS"; then
     if [ "${OBS_KIND_REPLACE_CLUSTER:-0}" = "1" ]; then
         echo "-- OBS_KIND_REPLACE_CLUSTER=1: deleting the existing '$CLUSTER' cluster --"
         # Checked, unlike before: a delete that fails leaves the cluster in
@@ -213,7 +213,39 @@ teardown() {
         echo ""
         echo "-- Events --"
         kubectl get events -n "$NS" --sort-by=.lastTimestamp 2>&1 | tail -25
-        for app in observability-backend observability-grafana observability-prometheus observability-producers-sample-app observability-producers-load-generator; do
+        if [ "$TOPOLOGY" = split ]; then
+            # All five split components share app.kubernetes.io/name=
+            # observability-backend, distinguished only by
+            # app.kubernetes.io/component. A single name-only selector here
+            # would match all five pods at once; `kubectl logs --tail=40` then
+            # concatenates their output with no indication of which pod wrote
+            # which line, and the old `| tail -40` on top of that kept only the
+            # last 40 lines total — a failed split run's dump was effectively
+            # one unattributed pod. Select one component at a time and prefix
+            # each line with its pod name instead of piping through tail.
+            for component in gateway ingester querier store compactor; do
+                echo ""
+                echo "-- Logs: $component --"
+                kubectl logs -n "$NS" \
+                    -l "app.kubernetes.io/name=observability-backend,app.kubernetes.io/component=$component" \
+                    --tail=40 --prefix 2>&1
+                # The ingester and store are the two pods this run restarts;
+                # if the pre-restart container crashed rather than terminating
+                # cleanly, its logs live only under --previous. That flag
+                # errors when there is no previous container to read, which is
+                # the common case here, not a failure worth reporting.
+                if [ "$component" = ingester ] || [ "$component" = store ]; then
+                    kubectl logs -n "$NS" \
+                        -l "app.kubernetes.io/name=observability-backend,app.kubernetes.io/component=$component" \
+                        --tail=40 --prefix --previous 2>/dev/null
+                fi
+            done
+        else
+            echo ""
+            echo "-- Logs: observability-backend --"
+            kubectl logs -n "$NS" -l "app.kubernetes.io/name=observability-backend" --tail=40 2>&1 | tail -40
+        fi
+        for app in observability-grafana observability-prometheus observability-producers-sample-app observability-producers-load-generator; do
             echo ""
             echo "-- Logs: $app --"
             kubectl logs -n "$NS" -l "app.kubernetes.io/name=$app" --tail=40 2>&1 | tail -40
@@ -470,8 +502,11 @@ else
 fi
 
 # Split only: 120 samples seal one chunk, so the ingester's graceful stop below
-# flushes this series to the store — reading it back after the store restarts
-# proves the flush-in path and the store's own persistence by value.
+# flushes this series to the store before it exits. Reading it back after the
+# ingester's own restart proves only that the series survived — the ingester
+# could equally have replayed it from its own WAL. Reading it back after the
+# store's restart is what actually proves the store received and persisted
+# the flushed chunk itself.
 if [ "$TOPOLOGY" = split ]; then
     FLUSH_METRICS=""
     for i in $(seq 0 119); do
@@ -495,12 +530,12 @@ kill "$PF_PID" 2>/dev/null; PF_PID=""
 # that, a delete that never happened would leave every later check satisfied by
 # the original pod.
 restart_pod() {
-    local sts="$1" pod="$1-0" old_uid new_uid
+    local sts="$1" pod="$1-0" old_uid new_uid poll_start
     echo ""
     echo "-- Deleting pod $pod --"
     old_uid=$(kubectl get pod "$pod" -n "$NS" -o jsonpath='{.metadata.uid}' 2>/dev/null)
     [ -n "$old_uid" ] || log_fail "could not read $pod's UID before the restart"
-    if kubectl delete pod "$pod" -n "$NS" --wait=true; then
+    if kubectl delete pod "$pod" -n "$NS" --wait=true --timeout="$ROLLOUT_TIMEOUT"; then
         log_pass "deleted $pod"
     else
         log_fail "deleting $pod failed — nothing below this actually tests a restart"
@@ -510,6 +545,18 @@ restart_pod() {
     else
         log_fail "$sts's pod did not come back"
     fi
+    # `rollout status` can report complete before the replacement pod object
+    # itself exists yet, which would make the `kubectl wait` below fail
+    # immediately with NotFound rather than actually waiting. Poll for a new
+    # object (a UID that differs from old_uid) with its own deadline first;
+    # if it never appears, `kubectl wait` below still runs and fails on its
+    # own terms.
+    poll_start=$SECONDS
+    while [ $((SECONDS - poll_start)) -lt 60 ]; do
+        new_uid=$(kubectl get pod "$pod" -n "$NS" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+        [ -n "$new_uid" ] && [ "$new_uid" != "$old_uid" ] && break
+        sleep 2
+    done
     # `delete --wait` returns once the object is gone, not once its replacement
     # runs, and rollout status can read stale status; wait for Ready explicitly.
     if kubectl wait --for=condition=Ready "pod/$pod" -n "$NS" --timeout="$ROLLOUT_TIMEOUT"; then
@@ -530,8 +577,16 @@ restart_pod() {
 # marker_reads_back <label> <series> — reads <series> through the gateway and
 # requires MARKER_VALUE by value. A retried port-forward, and an explicit
 # empty-body guard, for the reasons the original single-restart check gave.
+#
+# The port-forward lands on the gateway, which never restarted — but in split,
+# the gateway/querier reach the ingester and store through ClusterIP Services
+# whose endpoints and kube-proxy rules update asynchronously, and a component
+# may still hold a keep-alive connection to the pod that just went away. A
+# single query right after the restart can therefore answer with a transient
+# error before that settles, so this polls with a deadline (the same
+# success-flag pattern as prometheus_target_up) instead of asserting once.
 marker_reads_back() {
-    local label="$1" series="$2" body match attempt
+    local label="$1" series="$2" body="" match attempt ok=0 start
     PF_PID=""
     for attempt in 1 2 3; do
         kubectl port-forward -n "$NS" svc/observability-backend 18080:8080 >/dev/null 2>&1 &
@@ -542,17 +597,25 @@ marker_reads_back() {
         fi
         kill "$PF_PID" 2>/dev/null; PF_PID=""
     done
-    body=$(curl -sg --max-time 15 "http://localhost:18080/api/v1/query?query=$series")
-    if [ -z "$body" ]; then
+    start=$SECONDS
+    while [ $((SECONDS - start)) -lt 60 ]; do
+        body=$(curl -sg --max-time 15 "http://localhost:18080/api/v1/query?query=$series")
+        if [ -n "$body" ]; then
+            match=$(printf '%s' "$body" | jq -r --argjson want "$MARKER_VALUE" \
+                '([.. | strings | tonumber? // empty] | index($want)) // "null"' 2>/dev/null)
+            if [ -n "$match" ] && [ "$match" != "null" ]; then
+                ok=1
+                break
+            fi
+        fi
+        sleep 2
+    done
+    if [ "$ok" -eq 1 ]; then
+        log_pass "$label — $series value $MARKER_VALUE read back ($((SECONDS - start))s)"
+    elif [ -z "$body" ]; then
         log_fail "$label — empty response body (connection or port-forward failure)"
     else
-        match=$(printf '%s' "$body" | jq -r --argjson want "$MARKER_VALUE" \
-            '([.. | strings | tonumber? // empty] | index($want)) // "null"' 2>/dev/null)
-        if [ -n "$match" ] && [ "$match" != "null" ]; then
-            log_pass "$label — $series value $MARKER_VALUE read back"
-        else
-            log_fail "$label — $series value $MARKER_VALUE not found; body: $body"
-        fi
+        log_fail "$label — $series value $MARKER_VALUE not found after 60s; body: $body"
     fi
     kill "$PF_PID" 2>/dev/null; PF_PID=""
 }
@@ -580,7 +643,7 @@ wait_for_port "grafana port-forward is ready" 30 "http://localhost:13000/api/hea
 # in-cluster datasource URL resolves and Grafana can reach the backend Service.
 HEALTH=$(curl -s --max-time 15 -u "admin:e2e-only" \
     "http://localhost:13000/api/datasources/uid/obs-prometheus/health")
-if printf '%s' "$HEALTH" | grep -q '"status":"OK"'; then
+if grep -q '"status":"OK"' <<<"$HEALTH"; then
     log_pass "Grafana datasource health passes inside the cluster"
 else
     log_fail "Grafana datasource health failed: $HEALTH"
@@ -598,7 +661,7 @@ DSQ=$(curl -s --max-time 20 -u "admin:e2e-only" -H 'Content-Type: application/js
 # so a non-JSON body cannot pass just by lacking an error key.
 if [ -z "$DSQ" ]; then
     log_fail "Grafana query returned an empty response body (connection or port-forward failure)"
-elif printf '%s' "$DSQ" | grep -q '"error":"'; then
+elif grep -q '"error":"' <<<"$DSQ"; then
     log_fail "Grafana query returned an error: $DSQ"
 else
     COLS=$(numeric_columns "$DSQ")
@@ -620,8 +683,8 @@ echo "-- Platform self-observability --"
 # directly and would still pass even with no such dashboard loaded.
 IDASH=$(curl -s --max-time 15 -u "admin:e2e-only" \
     "http://localhost:13000/api/dashboards/uid/obs-self-v1")
-if printf '%s' "$IDASH" | grep -q '"uid":"obs-self-v1"' \
-        && printf '%s' "$IDASH" | grep -q '"title":"Observability Platform Internals"'; then
+if grep -q '"uid":"obs-self-v1"' <<<"$IDASH" \
+        && grep -q '"title":"Observability Platform Internals"' <<<"$IDASH"; then
     log_pass "internals dashboard provisioned in-cluster (uid obs-self-v1)"
 else
     log_fail "internals dashboard not provisioned as expected: $IDASH"
