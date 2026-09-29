@@ -7,10 +7,10 @@ Every node below names a real symbol, file, or route. A diagram of generic boxes
 cannot be checked against the tree and ages into decoration; one that names
 `FlushBlock` and `streams.index` can be followed into the code.
 
-On-disk detail lives in [storage-layout.md](storage-layout.md). The query forms
-these paths accept are in [../api/limitations.md](../api/limitations.md). The
-split topology — five components, the data each owns, and how a flush stays
-invisible to queries — is in [components.md](components.md).
+On-disk detail lives in [storage-layout.md](storage-layout.md). The split
+topology — five components, the data each owns, and how a flush stays
+invisible to queries — is in [components.md](components.md). The query forms
+these paths accept are in [../api/limitations.md](../api/limitations.md).
 
 ## System context
 
