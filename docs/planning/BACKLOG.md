@@ -796,7 +796,7 @@ its assertions.
 - [x] `kind_smoke.sh` topology switch — a by-value round trip across ingester and store restarts; `smoke-kind-split` in CI
 
 **Docs**
-- [ ] `docs/architecture/components.md` — responsibilities, data ownership, the flush, read, and compaction sequences, the no-gap argument, the failure matrix; Mermaid whose every node names a real symbol, file, or route
+- [x] `docs/architecture/components.md` — responsibilities, data ownership, the flush, read, and compaction sequences, the no-gap argument, the failure matrix; Mermaid whose every node names a real symbol, file, or route
 - [ ] `docs/api/internal.md` — routes, encodings, limits, error codes; route coverage walks every target's router
 - [ ] `docs/runbooks/split-demo.md` — the Compose walk-through with a store-outage drill, then the Helm install
 - [ ] `docs/architecture/storage-layout.md` — ownership per subtree and `genfloor`, checked by a split case of `TestStorageLayoutDocMatchesDisk`
