@@ -1,13 +1,9 @@
 package integration_test
 
-// Split rows name their component: `ingester:data/...` or `store:data/...`,
-// so the all-in-one test's data/ rows and these never match each other.
-
 import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -16,6 +12,8 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/config"
 )
 
+// Split rows name their component: `ingester:data/...` or `store:data/...`,
+// so the all-in-one test's data/ rows and these never match each other.
 var splitLayoutRe = regexp.MustCompile("(?m)^\\|\\s*`(ingester|store):(data/[^`]+)`\\s*\\|")
 
 func TestSplitStorageLayoutDocMatchesDisk(t *testing.T) {
@@ -23,9 +21,13 @@ func TestSplitStorageLayoutDocMatchesDisk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// documented[component] is keyed by "component:path" (not just path) so
+	// diffLayout's error messages name the exact row to fix, e.g.
+	// "ingester:data/metrics/wal/" rather than a bare path that could belong
+	// to either component's table.
 	documented := map[string]map[string]*regexp.Regexp{"ingester": {}, "store": {}}
 	for _, m := range splitLayoutRe.FindAllStringSubmatch(string(doc), -1) {
-		documented[m[1]][m[2]] = layoutPattern(t, m[2])
+		documented[m[1]][m[1]+":"+m[2]] = layoutPattern(t, m[2])
 	}
 	if len(documented["ingester"]) == 0 || len(documented["store"]) == 0 {
 		t.Fatalf("%s documents no ingester: or store: rows", storageLayoutDoc)
@@ -33,49 +35,8 @@ func TestSplitStorageLayoutDocMatchesDisk(t *testing.T) {
 
 	ingDir, storeDir := produceSplitTrees(t)
 	for component, dir := range map[string]string{"ingester": ingDir, "store": storeDir} {
-		produced := walkTree(t, dir)
-		matched := map[string]bool{}
-		for entry := range produced {
-			ok := false
-			for d, re := range documented[component] {
-				if re.MatchString(entry) {
-					ok, matched[d] = true, true
-				}
-			}
-			if !ok {
-				t.Errorf("the %s wrote %q, which %s does not document as %s:%s", component, entry, storageLayoutDoc, component, entry)
-			}
-		}
-		for d := range documented[component] {
-			if !matched[d] {
-				t.Errorf("%s documents %s:%s, which the %s never produced", storageLayoutDoc, component, d, component)
-			}
-		}
+		diffLayout(t, documented[component], walkTree(t, dir), "the "+component)
 	}
-}
-
-func walkTree(t *testing.T, dataDir string) map[string]bool {
-	t.Helper()
-	out := map[string]bool{}
-	err := filepath.WalkDir(dataDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, _ := filepath.Rel(dataDir, path)
-		if rel == "." {
-			return nil
-		}
-		entry := "data/" + filepath.ToSlash(rel)
-		if d.IsDir() {
-			entry += "/"
-		}
-		out[entry] = true
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return out
 }
 
 // produceSplitTrees runs a real store and ingester, writes both signals,
