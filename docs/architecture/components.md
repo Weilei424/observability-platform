@@ -36,10 +36,10 @@ graph LR
   GR["Grafana"] -->|"obs-prometheus · obs-loki"| G
   G -->|"write routes"| I["ingester<br/>metrics.HeadStore · logs.Head"]
   G -->|"read routes"| Q["querier<br/>metrics.Merge · logs.Merge"]
-  Q -->|"1. POST /internal/v1/metrics/select"| I
-  Q -->|"2. POST /internal/v1/metrics/select"| S["store<br/>metrics.BlockStore · logs.ChunkStore"]
+  Q -->|"1. POST /internal/v1/metrics/select<br/>POST /internal/v1/logs/select<br/>GET .../metrics/labels · label-values<br/>GET .../logs/labels · label-values"| I
+  Q -->|"2. POST /internal/v1/metrics/select<br/>POST /internal/v1/logs/select<br/>GET .../metrics/labels · label-values<br/>GET .../logs/labels · label-values"| S["store<br/>metrics.BlockStore · logs.ChunkStore"]
   I -->|"POST /internal/v1/metrics/flush<br/>POST /internal/v1/logs/flush"| S
-  C["compactor<br/>compactor.Compactor · rpc.BlockManager"] -->|"GET /internal/v1/metrics/blocks<br/>POST /internal/v1/metrics/compact"| S
+  C["compactor<br/>compactor.Compactor · rpc.BlockManager"] -->|"GET /internal/v1/metrics/blocks<br/>POST /internal/v1/metrics/compact<br/>POST /internal/v1/metrics/retention"| S
 ```
 
 ## The flush
@@ -71,8 +71,12 @@ A batch also never carries more than `block.MaxChunksPerSeries` chunks for any
 one series, split across batches if a series' backlog is larger: `store`'s
 block reader (`block.OpenReader`) refuses a block whose index declares more
 chunks than that for a series, and it only discovers that after the store has
-written and fsynced it, so the ingester enforces the cap before sending rather
-than let a store outage produce an unrecoverable block on the first retry.
+already written and fsynced it. The store then deletes that rejected block and
+answers with an error (`BlockStore.ingestLocked`'s `OpenReader` branch), so no
+data is lost — the ingester keeps its chunks and retries — but without the cap
+every retry of an over-limit series would fail the same way and that series'
+flush would wedge for good. The ingester enforces the cap before sending so
+that failure mode never happens.
 
 `BlockStore.IngestSeriesChunks` refuses malformed input — zero series, a
 duplicate series ID, a series with no chunks, an empty chunk, or a label set
@@ -80,13 +84,27 @@ that does not fingerprint to its claimed ID — with `ErrInvalidSeriesChunks`,
 which the store's flush-in handler answers as `400`; any other failure is
 `500`.
 
-The logs head flushes the same way, holding its lock from snapshot to reset:
-`LogWAL.Checkpoint` deletes every segment, so it is only correct when nothing
-can be appended mid-flush. Its batches are sized by estimated wire bytes — the
-JSON an `IngestStreams` call would encode, not raw log-line bytes — so a batch
-of highly-escaped lines still lands under the store's body limit. In the
-ingester a failed logs flush does not fail the push that triggered it — the
-entry is already in the WAL — and flushes pause for 30 s.
+The logs head (`Head.flushLocked`) flushes similarly — batched requests to the
+same sink seam — but differs in three ways:
+
+- it holds its lock from snapshot to reset and drops nothing from memory until
+  *every* batch in the flush has been acknowledged, not batch-by-batch like the
+  metrics head: `LogWAL.Checkpoint` deletes every segment, so the checkpoint
+  (and the head reset) is only correct once the whole flush has landed;
+- a failure part-way through therefore leaves the whole head intact, so the
+  next attempt resends batches the store already holds — those duplicates are
+  absorbed by the `(timestamp, line)` dedup a read applies, the same dedup
+  that already covers the crash window between a chunk write and its
+  checkpoint;
+- it has no generation floor: logs entries never need one, since ordering
+  between head and persisted entries is fixed (persisted ahead of head at an
+  equal timestamp) rather than resolved by a write generation.
+
+Its batches are sized by estimated wire bytes — the JSON an `IngestStreams`
+call would encode, not raw log-line bytes — so a batch of highly-escaped lines
+still lands under the store's body limit. In the ingester a failed logs flush
+does not fail the push that triggered it — the entry is already in the WAL —
+and flushes pause for 30 s.
 
 ## Reads, and why a flush is invisible to them
 
@@ -98,12 +116,34 @@ its second, never both at once:
 2. the ingester discards those chunks only after the acknowledgement;
 3. the querier finishes reading the ingester before it starts on the store.
 
+```mermaid
+sequenceDiagram
+  participant GR as Grafana
+  participant Q as querier: metrics.QueryEngine · logs.QueryEngine
+  participant I as ingester: HeadStore.Select · logs.AsSource(Head)
+  participant S as store: BlockStore.Select · logs.AsSource(ChunkStore)
+  GR->>Q: GET·POST /api/v1/query_range · GET /loki/api/v1/query_range
+  Q->>I: 1. POST /internal/v1/metrics/select (or /logs/select)
+  I-->>Q: head series/streams
+  Q->>S: 2. POST /internal/v1/metrics/select (or /logs/select)
+  S-->>Q: block/chunk series/streams
+  Q->>Q: sortAndDedup (metrics) · mergeEntries (logs)
+  Q-->>GR: promVectorData/promMatrixData · resultType streams
+```
+
 A sample missing from the ingester's answer was therefore discarded before that
-read began, so the store had it before its read began. A sample in both answers
-is merged by the same `sortAndDedup` rule `BlockStore` applies between its own
-head and blocks — one merge rule in the codebase, not two. Metric samples merge
-by `(timestamp, highest generation)`; log entries dedup by `(timestamp, line)`
-with persisted entries ahead of head entries at an equal timestamp.
+read began, so the store had it before its read began. Overlap between the two
+answers is resolved per signal, by the same rule the equivalent all-in-one path
+already applies between its own head and persisted data — one rule per signal,
+not two, shared by all-in-one and split:
+
+- metric samples merge by `(timestamp, highest generation)` through
+  `sortAndDedup` — the function `metrics.Merge` calls and `BlockStore` itself
+  uses between its head and its blocks;
+- log entries dedup by `(timestamp, line)`, persisted ahead of head at an equal
+  timestamp, through `mergeEntries` — the function `logs.Merge` calls and the
+  one `logs.Store.StreamEntries` uses between its head and its chunk store in
+  all-in-one.
 
 ## Compaction
 
@@ -112,7 +152,29 @@ the retention clock, and the maintenance metrics. The store owns the mechanism:
 `rpc.BlockManager.CompactOnce` lists the store's blocks, plans locally, and
 posts the chosen groups; the store re-checks that each group's blocks still
 exist and runs `BlockStore.CompactOnce` with every integrity check it has
-always run, under the lock it holds for its readers.
+always run. That runs under `flushMu` end to end — the same lock
+`IngestSeriesChunks` takes, so a flush and a compaction never race on the block
+set — and takes the readers' `bs.mu` only briefly, for the swap that installs
+the merged block and retires its sources; every read against `bs.mu` sees
+either the pre-compaction or the post-compaction set, never a partial one.
+
+```mermaid
+sequenceDiagram
+  participant C as compactor.Compactor
+  participant B as rpc.BlockManager
+  participant S as store: BlockStore.CompactOnce
+  C->>B: CompactOnce(compactor.Plan)
+  B->>S: GET /internal/v1/metrics/blocks
+  S-->>B: block list
+  B->>B: compactor.Plan(blocks)
+  B->>S: POST /internal/v1/metrics/compact {groups}
+  S->>S: re-check each group's blocks still exist
+  S->>S: BlockStore.CompactOnce (flushMu end to end; bs.mu only for the swap)
+  S-->>B: 200 {"compacted": n}
+  C->>B: ApplyRetention(now, retention)
+  B->>S: POST /internal/v1/metrics/retention
+  S-->>B: 200 {"deleted": n}
+```
 
 ## When a component is down
 
