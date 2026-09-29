@@ -33,11 +33,12 @@ Error:
 ```
 
 `warnings` is **always present on success** (as `[]` when empty) and **always
-omitted on error**. Three `errorType` values are in use:
+omitted on error**. Four `errorType` values are in use:
 
 | `errorType` | Status | Meaning |
 |---|---|---|
 | `bad_data` | 400 | The request is malformed, or asks for something outside the supported subset |
+| `canceled` | 499 | The client abandoned the request before it finished |
 | `execution` | 500 | The query parsed but failed while running |
 | `unavailable` | 503 | A component the query needs could not be reached (split topology only) |
 
