@@ -178,6 +178,7 @@ func servedRoutes(t *testing.T) map[string]map[string]bool {
 		if err != nil {
 			t.Fatalf("build %s: %v", target, err)
 		}
+		t.Cleanup(a.Close)
 		router, ok := a.Handler.(interface{ Router() chi.Router })
 		if !ok {
 			t.Fatalf("%s's handler exposes no Router(); the route tests cannot see it", target)
@@ -190,7 +191,6 @@ func servedRoutes(t *testing.T) map[string]map[string]bool {
 			served[path][method] = true
 			return nil
 		})
-		a.Close()
 		if err != nil {
 			t.Fatalf("chi.Walk %s: %v", target, err)
 		}
