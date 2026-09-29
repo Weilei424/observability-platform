@@ -108,11 +108,20 @@ These are properties of the whole system, not of the query languages.
   data already acknowledged to the client — so a store-side bug that keeps
   refusing an otherwise-valid batch retries it forever, once per 30 s backoff,
   while the WAL it cannot checkpoint keeps growing.
-- **A hung maintenance call can delay the compactor's shutdown by up to 2
-  minutes.** `CompactOnce` and `ApplyRetention` run under their own fixed
-  2-minute timeout, on a context independent of the shutdown signal; if one is
-  in flight when the compactor is asked to stop, shutdown waits for it to
-  finish or time out before it can exit.
+- **A hung store can delay the compactor's shutdown by up to about 4
+  minutes.** `RunOnce` always runs a compaction pass and then a retention pass
+  — `applyRetention` runs unconditionally after `compactToStable`, with no
+  check of the shutdown context — and each of `CompactOnce` and
+  `ApplyRetention` opens its own fixed 2-minute timeout on a context
+  independent of the shutdown signal. Against a store that hangs on every
+  request, a maintenance pass in flight when shutdown is requested can cost a
+  compaction call's timeout, then a retention call's timeout: up to about 4
+  minutes before the compactor's process can exit on its own. In practice a
+  SIGKILL usually cuts this short first — the Compose split's compactor
+  service has no `stop_grace_period` override (Compose's 10 s default), and
+  the Kubernetes split chart sets no `terminationGracePeriodSeconds` for the
+  compactor Deployment (Kubernetes' 30 s default) — so this window matters
+  mainly for an orchestrator configured with a longer grace period.
 - **No all-in-one → split migration.** A split deployment starts from empty data
   directories or ones the split topology wrote; moving an all-in-one data
   directory into an ingester and a store is unsupported.
