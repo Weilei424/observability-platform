@@ -57,6 +57,15 @@ private WAL, so a query would see whichever shard it landed on.
 | `config.OBS_RETENTION` | `0s` | Disabled by default, as in Compose. |
 | `startupProbe.periodSeconds` | `5` | |
 | `startupProbe.failureThreshold` | `30` | Startup budget = `periodSeconds * failureThreshold` = 150s, the time WAL replay is allowed to take before the pod is killed. |
+| `topology` | `all-in-one` | `all-in-one` runs one StatefulSet. `split` runs the five components: Deployments for the gateway (which takes the Service name `observability-backend`), querier, and compactor; StatefulSets with their own PVCs for the ingester and store |
+| `split.<component>.replicas` | `1` | Gateway and querier may scale. The ingester, store, and compactor must stay at 1 until Phase 6.2; the chart refuses more |
+| `split.<component>.resources` | see `values.yaml` | Per-component requests and limits |
+| `split.ingester.persistence.size`, `split.store.persistence.size` | `1Gi`, `2Gi` | PVC sizes; `persistence.storageClassName` applies to both |
+
+`OBS_TARGET`, `OBS_INGESTER_URL`, `OBS_STORE_URL`, and `OBS_QUERIER_URL` are
+rendered by the chart from `topology` and are refused under `config` — setting
+one there would emit the key twice and could contradict what the chart itself
+derives.
 
 Every `config.*` key must start with `OBS_` and correspond to a `v.SetDefault` in
 `internal/config/config.go` — Viper silently ignores env vars it has no default for, so a
@@ -161,6 +170,8 @@ general-purpose monitoring stack.
 | `image.pullPolicy` | `IfNotPresent` | |
 | `service.port` | `9090` | Prometheus HTTP port. Must match the port half of the grafana chart's `internals.url`. |
 | `backend.url` | `http://observability-backend:8080` | The scrape target. Same cross-chart claim as the grafana and producers charts' `backend.url` — must resolve to the backend chart's Service; see Cross-chart contract above. The ConfigMap builds the scrape target with `trimPrefix "http://" .Values.backend.url`, so the rendered target is a bare `host:port` — Prometheus rejects a `static_configs` target that still carries a URL scheme. |
+| `topology` | `all-in-one` | Match the backend chart. `split` scrapes every component in `split.targets`, each labelled with its `component` |
+| `split.targets` | the five split Services | Each URL is a claim about a Service the backend chart creates in split; `tests/e2e/helm_split_prometheus_test.go` checks them |
 | `scrapeInterval` | `15s` | Matches the Compose Prometheus's `global.scrape_interval`. |
 | `retention` | `24h` | Passed straight through to `--storage.tsdb.retention.time`. Only matters relative to the emptyDir below — data this Prometheus holds does not survive a pod reschedule regardless of what this says. |
 | `resources.requests.cpu` | `100m` | |
