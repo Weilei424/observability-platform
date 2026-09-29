@@ -17,7 +17,20 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-CLUSTER="${KIND_CLUSTER:-obs-e2e}"
+# OBS_KIND_TOPOLOGY picks the backend chart's topology: all-in-one (default) or
+# split (the five Phase 6.1 components). Grafana, the producers, and every
+# check made through the gateway run unchanged against both.
+TOPOLOGY="${OBS_KIND_TOPOLOGY:-all-in-one}"
+case "$TOPOLOGY" in
+    all-in-one) DEFAULT_CLUSTER=obs-e2e ;;
+    split)      DEFAULT_CLUSTER=obs-e2e-split ;;
+    *)
+        echo "FATAL: OBS_KIND_TOPOLOGY must be all-in-one or split, not '$TOPOLOGY'." >&2
+        exit 2
+        ;;
+esac
+CLUSTER="${KIND_CLUSTER:-$DEFAULT_CLUSTER}"
+TOPOLOGY_SET=(--set "topology=$TOPOLOGY")
 NS="${K8S_NAMESPACE:-obs}"
 KEEP_UP="${OBS_KIND_KEEP_UP:-0}"
 ROLLOUT_TIMEOUT="${OBS_ROLLOUT_TIMEOUT:-300s}"
@@ -300,23 +313,34 @@ log_pass "built and loaded three images"
 # ---- Install ---------------------------------------------------------
 echo ""
 echo "-- helm install backend --"
-if helm install backend "$REPO_ROOT/deployments/helm/backend" -n "$NS" --wait --timeout "$ROLLOUT_TIMEOUT"; then
+if helm install backend "$REPO_ROOT/deployments/helm/backend" -n "$NS" --wait --timeout "$ROLLOUT_TIMEOUT" \
+        "${TOPOLOGY_SET[@]}"; then
     log_pass "helm install deploys the backend"
 else
     log_fail "helm install backend failed"
 fi
 
-if kubectl rollout status statefulset/observability-backend -n "$NS" --timeout="$ROLLOUT_TIMEOUT"; then
-    log_pass "backend StatefulSet rolled out"
+if [ "$TOPOLOGY" = split ]; then
+    ROLLOUTS="statefulset/observability-ingester statefulset/observability-store deployment/observability-backend deployment/observability-querier deployment/observability-compactor"
+    WANT_PVCS=2
 else
-    log_fail "backend StatefulSet did not roll out"
+    ROLLOUTS="statefulset/observability-backend"
+    WANT_PVCS=1
 fi
+for workload in $ROLLOUTS; do
+    if kubectl rollout status "$workload" -n "$NS" --timeout="$ROLLOUT_TIMEOUT"; then
+        log_pass "$workload rolled out"
+    else
+        log_fail "$workload did not roll out"
+    fi
+done
 
-# The PVC is the whole point of using a StatefulSet; assert it bound.
-if [ "$(kubectl get pvc -n "$NS" -o jsonpath='{.items[0].status.phase}' 2>/dev/null)" = "Bound" ]; then
-    log_pass "PersistentVolumeClaim is Bound"
+# The PVCs are the whole point of the StatefulSets; assert every one bound.
+BOUND=$(kubectl get pvc -n "$NS" -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' 2>/dev/null | grep -c '^Bound$')
+if [ "$BOUND" = "$WANT_PVCS" ]; then
+    log_pass "$WANT_PVCS PersistentVolumeClaim(s) Bound"
 else
-    log_fail "PVC did not bind: $(kubectl get pvc -n "$NS" 2>&1 | tail -3)"
+    log_fail "$BOUND of $WANT_PVCS PVCs bound: $(kubectl get pvc -n "$NS" 2>&1 | tail -4)"
 fi
 
 echo ""
@@ -326,7 +350,8 @@ echo "-- helm install prometheus --"
 # datasource references this chart's Service by name, which keeps provisioning
 # valid on Grafana's first start.
 if helm upgrade --install obs-prometheus "$REPO_ROOT/deployments/helm/prometheus" \
-        --namespace "$NS" --create-namespace --wait --timeout "$ROLLOUT_TIMEOUT"; then
+        --namespace "$NS" --create-namespace --wait --timeout "$ROLLOUT_TIMEOUT" \
+        "${TOPOLOGY_SET[@]}"; then
     log_pass "helm install deploys prometheus"
 else
     log_fail "helm install prometheus failed"
@@ -443,99 +468,106 @@ if [ "$STATUS" = "204" ]; then
 else
     log_fail "seeding the marker returned HTTP $STATUS, want 204"
 fi
+
+# Split only: 120 samples seal one chunk, so the ingester's graceful stop below
+# flushes this series to the store — reading it back after the store restarts
+# proves the flush-in path and the store's own persistence by value.
+if [ "$TOPOLOGY" = split ]; then
+    FLUSH_METRICS=""
+    for i in $(seq 0 119); do
+        FLUSH_METRICS="$FLUSH_METRICS{\"name\":\"k8s_e2e_flush_marker\",\"labels\":{\"run\":\"kind\"},\"timestamp_ms\":$(( MARKER_MS - (119 - i) * 1000 )),\"value\":$MARKER_VALUE},"
+    done
+    STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 -X POST "http://localhost:18080/api/v1/ingest/metrics" \
+        -H "Content-Type: application/json" -d "{\"metrics\":[${FLUSH_METRICS%,}]}")
+    if [ "$STATUS" = "204" ]; then
+        log_pass "seeded flush marker (120 samples, HTTP 204)"
+    else
+        log_fail "seeding the flush marker returned HTTP $STATUS, want 204"
+    fi
+fi
 kill "$PF_PID" 2>/dev/null; PF_PID=""
 
 # ---- Restart ---------------------------------------------------------
-echo ""
-echo "-- Deleting the backend pod --"
-# The UID of the pod that holds the marker, read BEFORE the delete.
-#
-# A StatefulSet pod keeps its name across a reschedule, so every check in this
-# section — rollout status, `kubectl wait --for=condition=Ready`, the query
-# itself — is satisfied by the ORIGINAL pod if the delete never happened. And
-# the delete's exit status was unchecked while this script deliberately runs
-# without `set -e`, so an RBAC denial, a typo'd name, or a webhook rejection
-# left the process untouched and the marker was read back out of the very
-# memory the restart was supposed to prove it had left. The UID is the one
-# identifier that must change; comparing it is what makes this a restart test
-# rather than a query test.
-OLD_UID=$(kubectl get pod observability-backend-0 -n "$NS" -o jsonpath='{.metadata.uid}' 2>/dev/null)
-if [ -z "$OLD_UID" ]; then
-    log_fail "could not read the backend pod UID before the restart"
-fi
 
-if kubectl delete pod observability-backend-0 -n "$NS" --wait=true; then
-    log_pass "deleted the backend pod"
-else
-    log_fail "deleting the backend pod failed — nothing below this actually tests a restart"
-fi
+# restart_pod <statefulset> — deletes the StatefulSet's pod and proves a new
+# object replaced it. A StatefulSet pod keeps its name across a reschedule, so
+# only the UID can show that the replacement is a different process; without
+# that, a delete that never happened would leave every later check satisfied by
+# the original pod.
+restart_pod() {
+    local sts="$1" pod="$1-0" old_uid new_uid
+    echo ""
+    echo "-- Deleting pod $pod --"
+    old_uid=$(kubectl get pod "$pod" -n "$NS" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+    [ -n "$old_uid" ] || log_fail "could not read $pod's UID before the restart"
+    if kubectl delete pod "$pod" -n "$NS" --wait=true; then
+        log_pass "deleted $pod"
+    else
+        log_fail "deleting $pod failed — nothing below this actually tests a restart"
+    fi
+    if kubectl rollout status "statefulset/$sts" -n "$NS" --timeout="$ROLLOUT_TIMEOUT"; then
+        log_pass "$sts rescheduled its pod"
+    else
+        log_fail "$sts's pod did not come back"
+    fi
+    # `delete --wait` returns once the object is gone, not once its replacement
+    # runs, and rollout status can read stale status; wait for Ready explicitly.
+    if kubectl wait --for=condition=Ready "pod/$pod" -n "$NS" --timeout="$ROLLOUT_TIMEOUT"; then
+        log_pass "replacement $pod reached Ready"
+    else
+        log_fail "replacement $pod did not reach Ready"
+    fi
+    new_uid=$(kubectl get pod "$pod" -n "$NS" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+    if [ -z "$new_uid" ]; then
+        log_fail "could not read $pod's UID after the restart"
+    elif [ -n "$old_uid" ] && [ "$new_uid" = "$old_uid" ]; then
+        log_fail "$pod was never replaced — UID is still $old_uid"
+    elif [ -n "$old_uid" ]; then
+        log_pass "$pod is a new object ($old_uid -> $new_uid)"
+    fi
+}
 
-if kubectl rollout status statefulset/observability-backend -n "$NS" --timeout="$ROLLOUT_TIMEOUT"; then
-    log_pass "StatefulSet rescheduled the pod"
-else
-    log_fail "pod did not come back"
-fi
-
-# `kubectl delete pod --wait=true` returns as soon as the object is gone, not
-# once the replacement is Running — the controller has not necessarily
-# written status.readyReplicas: 0 yet, so `rollout status` immediately above
-# can read stale status and report "complete" against a pod that is not there
-# yet. Without this explicit wait, the port-forward below starts against no
-# Running pod, exits immediately, and wait_for_port then polls a dead tunnel
-# for its whole timeout — a FALSE failure on this phase's headline claim
-# (data survives a pod restart) even though the restart itself worked.
-if kubectl wait --for=condition=Ready "pod/observability-backend-0" -n "$NS" --timeout="$ROLLOUT_TIMEOUT"; then
-    log_pass "replacement pod reached Ready"
-else
-    log_fail "replacement pod did not reach Ready"
-fi
-
-# Same name, different object: this is the assertion that the marker below is
-# read out of a process that started after the delete.
-NEW_UID=$(kubectl get pod observability-backend-0 -n "$NS" -o jsonpath='{.metadata.uid}' 2>/dev/null)
-if [ -z "$NEW_UID" ]; then
-    log_fail "could not read the backend pod UID after the restart"
-elif [ -z "$OLD_UID" ]; then
-    : # already counted above; nothing to compare against
-elif [ "$NEW_UID" = "$OLD_UID" ]; then
-    log_fail "the backend pod was never replaced — UID is still $OLD_UID, so the persistence check below would read the original process"
-else
-    log_pass "the pod is a new object ($OLD_UID -> $NEW_UID)"
-fi
-
-# Retry the port-forward itself, not just the poll: a port-forward started in
-# the narrow window right after the pod flips Ready can still exit almost
-# immediately (e.g. the API server's tunnel briefly resetting), and one
-# retry is cheap insurance against that same false-failure shape.
-PF_PID=""
-for attempt in 1 2 3; do
-    kubectl port-forward -n "$NS" svc/observability-backend 18080:8080 >/dev/null 2>&1 &
-    PF_PID=$!
-    sleep 1
-    if kill -0 "$PF_PID" 2>/dev/null && wait_for_port "backend port-forward is ready (post-restart, attempt $attempt)" 15 "http://localhost:18080/healthz"; then
-        break
+# marker_reads_back <label> <series> — reads <series> through the gateway and
+# requires MARKER_VALUE by value. A retried port-forward, and an explicit
+# empty-body guard, for the reasons the original single-restart check gave.
+marker_reads_back() {
+    local label="$1" series="$2" body match attempt
+    PF_PID=""
+    for attempt in 1 2 3; do
+        kubectl port-forward -n "$NS" svc/observability-backend 18080:8080 >/dev/null 2>&1 &
+        PF_PID=$!
+        sleep 1
+        if kill -0 "$PF_PID" 2>/dev/null && wait_for_port "backend port-forward is ready ($label, attempt $attempt)" 15 "http://localhost:18080/healthz"; then
+            break
+        fi
+        kill "$PF_PID" 2>/dev/null; PF_PID=""
+    done
+    body=$(curl -sg --max-time 15 "http://localhost:18080/api/v1/query?query=$series")
+    if [ -z "$body" ]; then
+        log_fail "$label — empty response body (connection or port-forward failure)"
+    else
+        match=$(printf '%s' "$body" | jq -r --argjson want "$MARKER_VALUE" \
+            '([.. | strings | tonumber? // empty] | index($want)) // "null"' 2>/dev/null)
+        if [ -n "$match" ] && [ "$match" != "null" ]; then
+            log_pass "$label — $series value $MARKER_VALUE read back"
+        else
+            log_fail "$label — $series value $MARKER_VALUE not found; body: $body"
+        fi
     fi
     kill "$PF_PID" 2>/dev/null; PF_PID=""
-done
+}
 
-BODY=$(curl -sg --max-time 15 "http://localhost:18080/api/v1/query?query=k8s_e2e_marker")
-# `jq -e` treats zero output values the same as a successful non-null/false
-# result on some jq builds — an empty $BODY (a dropped connection or a
-# port-forward that closed) would otherwise print PASS on this phase's
-# headline persistence claim. Guard the empty case explicitly, and read the
-# match back into a variable instead of trusting -e's exit status alone.
-if [ -z "$BODY" ]; then
-    log_fail "data persists across pod restart — empty response body from the query (connection or port-forward failure)"
+if [ "$TOPOLOGY" = split ]; then
+    restart_pod observability-ingester
+    marker_reads_back "data persists across the ingester's restart" k8s_e2e_marker
+    marker_reads_back "the flushed series persists across the ingester's restart" k8s_e2e_flush_marker
+    restart_pod observability-store
+    marker_reads_back "data persists across the store's restart" k8s_e2e_marker
+    marker_reads_back "the flushed series persists across the store's restart" k8s_e2e_flush_marker
 else
-    MATCH=$(printf '%s' "$BODY" | jq -r --argjson want "$MARKER_VALUE" \
-        '([.. | strings | tonumber? // empty] | index($want)) // "null"' 2>/dev/null)
-    if [ -n "$MATCH" ] && [ "$MATCH" != "null" ]; then
-        log_pass "data persists across pod restart — marker value $MARKER_VALUE read back"
-    else
-        log_fail "marker value $MARKER_VALUE not found after restart; body: $BODY"
-    fi
+    restart_pod observability-backend
+    marker_reads_back "data persists across pod restart" k8s_e2e_marker
 fi
-kill "$PF_PID" 2>/dev/null; PF_PID=""
 
 # ---- Grafana queries the backend -------------------------------------
 echo ""
@@ -634,22 +666,27 @@ PF_PID=$!
 wait_for_port "prometheus port-forward is ready" 30 "http://localhost:19090/-/healthy"
 
 prometheus_target_up() {
-    local body
-    body="$(curl -s --max-time 10 "http://localhost:19090/api/v1/query?query=up%7Bjob%3D%22observability-platform-backend%22%7D" 2>/dev/null)"
-    [ "$(printf '%s' "$body" | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null)" = "1" ]
+    local q want body
+    if [ "$TOPOLOGY" = split ]; then
+        q='count(up{service="observability-platform"} == 1)'; want=5
+    else
+        q='up{job="observability-platform-backend"}'; want=1
+    fi
+    body="$(curl -s --max-time 10 -G "http://localhost:19090/api/v1/query" --data-urlencode "query=$q" 2>/dev/null)"
+    [ "$(printf '%s' "$body" | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null)" = "$want" ]
 }
 # Same success-flag rule as the panel loop above.
 target_ok=0
 start=$SECONDS
 while [ $((SECONDS - start)) -lt 90 ]; do
     if prometheus_target_up; then
-        log_pass "in-cluster Prometheus reports the backend scrape target up ($((SECONDS - start))s)"
+        log_pass "in-cluster Prometheus reports every scrape target up ($((SECONDS - start))s)"
         target_ok=1
         break
     fi
     sleep 2
 done
-[ "$target_ok" -eq 1 ] || log_fail "in-cluster Prometheus never reported the backend target up within 90s"
+[ "$target_ok" -eq 1 ] || log_fail "in-cluster Prometheus never reported every scrape target up within 90s"
 kill "$PF_PID" 2>/dev/null; PF_PID=""
 
 echo ""
