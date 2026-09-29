@@ -136,7 +136,9 @@ curl -sG 'http://localhost:8080/loki/api/v1/query_range' \
 |---|---|
 | 200 | `data.resultType` is `streams` for log queries, `matrix` for metric queries |
 | 400 | Missing or unparseable `query`, a form outside the subset, `interval` supplied, a constant expression, malformed times, or `end` < `start` |
+| 499 | The client abandoned the request before it finished |
 | 500 | The query failed while running |
+| 503 | A component the query needs could not be reached (split topology only) |
 
 ---
 
