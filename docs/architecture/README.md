@@ -8,7 +8,9 @@ cannot be checked against the tree and ages into decoration; one that names
 `FlushBlock` and `streams.index` can be followed into the code.
 
 On-disk detail lives in [storage-layout.md](storage-layout.md). The query forms
-these paths accept are in [../api/limitations.md](../api/limitations.md).
+these paths accept are in [../api/limitations.md](../api/limitations.md). The
+split topology — five components, the data each owns, and how a flush stays
+invisible to queries — is in [components.md](components.md).
 
 ## System context
 
@@ -25,7 +27,9 @@ graph LR
 ```
 
 One Go process speaks both the Prometheus subset and the Loki subset, over one
-port, backed by two separate storage subtrees.
+port, backed by two separate storage subtrees. That is the all-in-one topology.
+In the split topology the same routes are served by a gateway in front of four
+other components; see [components.md](components.md).
 
 Grafana has three datasources and two of them are Prometheus-shaped, which is
 deliberate. `obs-prometheus` reaches the backend's own TSDB, holding what the
