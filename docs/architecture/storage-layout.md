@@ -44,6 +44,41 @@ the point: a counter would have to survive restarts to avoid reusing a name that
 just-deleted file still occupies, and a timestamp alone collides when two chunks
 for one stream share a minimum timestamp.
 
+## Split topology
+
+In the split topology the same subtrees are divided between two owners, each on
+its own volume. `TestSplitStorageLayoutDocMatchesDisk` runs a real ingester and
+store, flushes one through the other, and holds these rows to what each
+actually wrote.
+
+| Path | Written by | Contents |
+|---|---|---|
+| `ingester:data/metrics/` | `metrics.OpenHeadStore` | The ingester's metrics head state |
+| `ingester:data/metrics/wal/` | `wal.Open` | Metrics write-ahead log |
+| `ingester:data/metrics/wal/<segment>.wal` | `wal.WAL.Append` | As in all-in-one |
+| `ingester:data/metrics/checkpoint` | `metrics.WALStore.FlushBlock` | As in all-in-one, written once the store has the flushed chunks |
+| `ingester:data/metrics/genfloor` | `metrics.HeadStore.FlushBlock` | The next write generation, published before each flush sends anything |
+| `ingester:data/logs/` | `logs.OpenHead` | The ingester's log head state |
+| `ingester:data/logs/wal/` | `logs.OpenHead` | Logs write-ahead log |
+| `ingester:data/logs/wal/<segment>.wal` | `logwal` | As in all-in-one |
+| `store:data/metrics/` | `metrics.NewBlockStore` | The store's blocks |
+| `store:data/metrics/blocks/` | `metrics.NewBlockStore` | Immutable time blocks |
+| `store:data/metrics/blocks/<block-id>/` | `block.Writer` | One block, written by flush-in or compaction |
+| `store:data/metrics/blocks/<block-id>/meta.json` | `block.Meta.Write` | As in all-in-one |
+| `store:data/metrics/blocks/<block-id>/chunks` | `block.Writer` | As in all-in-one |
+| `store:data/metrics/blocks/<block-id>/index` | `block.Writer` | As in all-in-one |
+| `store:data/metrics/blocks/<block-id>/postings` | `block.Writer` | As in all-in-one |
+| `store:data/metrics/tmp/` | `metrics.NewBlockStore` | As in all-in-one |
+| `store:data/logs/` | `logs.OpenChunkStore` | The store's log chunks |
+| `store:data/logs/chunks/` | `logs.OpenChunkStore` | Compressed log chunks |
+| `store:data/logs/chunks/<stream>-<min-ts>-<rand>.chunk` | `logs.ChunkStore.IngestStreams` | One flushed chunk for one stream |
+| `store:data/logs/index/` | `logs.OpenChunkStore` | Stream index |
+| `store:data/logs/index/streams.index` | `logs.ChunkStore.IngestStreams` | As in all-in-one |
+
+`genfloor` exists only in the split topology. All-in-one derives its floor from
+the generations stored in its own blocks at startup; the ingester has no blocks,
+and asking the store would make its startup depend on the store.
+
 ## File formats
 
 ### Metrics WAL segment
