@@ -83,13 +83,17 @@ jobs:
           OBS_COMPOSE_TOPOLOGY: ${{ matrix.topology }}
 
   helm-k8s-e2e:
-    name: Helm + Kubernetes E2E (kind)
+    name: Helm + Kubernetes E2E (kind, ${{ matrix.topology }})
     runs-on: ubuntu-latest
     # tests/e2e/helm_test.go validates the charts without a cluster; only this
-    # job proves the images start, the PVC binds, the probes pass against a
-    # real server, and data survives rescheduling.
+    # job proves the images start, the PVCs bind, the probes pass against a
+    # real server, and data survives rescheduling — for both topologies.
     needs: build-test-lint
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        topology: [all-in-one, split]
 
     steps:
       - name: Checkout
@@ -106,3 +110,5 @@ jobs:
 
       - name: Kind cluster test
         run: bash tests/e2e/kind_smoke.sh
+        env:
+          OBS_KIND_TOPOLOGY: ${{ matrix.topology }}
