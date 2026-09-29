@@ -791,7 +791,7 @@ its assertions.
 
 **Helm split**
 - [x] Backend chart `topology: all-in-one | split` — the gateway keeps the `observability-backend` Service; the ingester and store are StatefulSets; the ingester, store, and compactor refuse more than one replica
-- [ ] Prometheus chart `topology` switch — scrapes every split component
+- [x] Prometheus chart `topology` switch — scrapes every split component
 - [x] Chart tests — the split render lints; each Service selects only its component; ConfigMaps load and reach their peers; every probe path is a real route; the cross-chart contract holds through the gateway
 - [ ] `kind_smoke.sh` topology switch — a by-value round trip across ingester and store restarts; `smoke-kind-split` in CI
 
