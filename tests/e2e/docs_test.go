@@ -23,9 +23,11 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/masonwheeler/observability-platform/internal/api"
+	"github.com/masonwheeler/observability-platform/internal/app"
 	"github.com/masonwheeler/observability-platform/internal/config"
 	"github.com/masonwheeler/observability-platform/internal/logs"
 	"github.com/masonwheeler/observability-platform/internal/metrics"
@@ -148,29 +150,50 @@ func isCatchAll(methods map[string]bool) bool {
 	return true
 }
 
-// servedRoutes enumerates what a production-wired server actually serves, as
-// path -> set of methods.
+// servedRoutes enumerates what any component actually serves, as path -> set
+// of methods, by walking the router of every target app.Build produces. The
+// public routes come from all-in-one, the gateway, the ingester, and the
+// querier; the internal ones from the ingester and the store. A documented
+// route must exist in some target, and every route of every target must be
+// documented.
 func servedRoutes(t *testing.T) map[string]map[string]bool {
 	t.Helper()
-	dataDir := t.TempDir()
-	walDir := filepath.Join(dataDir, "metrics", "wal")
-	if err := os.MkdirAll(walDir, 0o755); err != nil {
-		t.Fatalf("mkdir walDir: %v", err)
-	}
-	srv, w := newTestServer(t, dataDir, walDir)
-	defer w.Close()
-
 	served := map[string]map[string]bool{}
-	err := chi.Walk(srv.Router(), func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
-		path := strings.TrimSuffix(route, "/")
-		if served[path] == nil {
-			served[path] = map[string]bool{}
+	for _, target := range config.Targets {
+		cfg := &config.Config{
+			Target: target, HTTPAddr: ":0", DataDir: t.TempDir(), LogLevel: "info",
+			WALSegmentMaxBytes: 1 << 20, WALSyncEveryN: 1, LogsFlushThresholdBytes: 1 << 20,
+			MaintenanceInterval: time.Hour, FlushInterval: time.Hour,
+			CompactionBaseRange: 2 * time.Hour, CompactionMultiplier: 4, CompactionLevels: 3,
 		}
-		served[path][method] = true
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("chi.Walk: %v", err)
+		switch target {
+		case config.TargetGateway:
+			cfg.IngesterURL, cfg.QuerierURL = "http://127.0.0.1:1", "http://127.0.0.1:1"
+		case config.TargetIngester, config.TargetCompactor:
+			cfg.StoreURL = "http://127.0.0.1:1"
+		case config.TargetQuerier:
+			cfg.IngesterURL, cfg.StoreURL = "http://127.0.0.1:1", "http://127.0.0.1:1"
+		}
+		a, err := app.Build(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		if err != nil {
+			t.Fatalf("build %s: %v", target, err)
+		}
+		router, ok := a.Handler.(interface{ Router() chi.Router })
+		if !ok {
+			t.Fatalf("%s's handler exposes no Router(); the route tests cannot see it", target)
+		}
+		err = chi.Walk(router.Router(), func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+			path := strings.TrimSuffix(route, "/")
+			if served[path] == nil {
+				served[path] = map[string]bool{}
+			}
+			served[path][method] = true
+			return nil
+		})
+		a.Close()
+		if err != nil {
+			t.Fatalf("chi.Walk %s: %v", target, err)
+		}
 	}
 	if len(served) == 0 {
 		t.Fatal("chi.Walk found no routes; the router changed shape")
@@ -540,11 +563,13 @@ var obsEnvRe = regexp.MustCompile(`OBS_[A-Z0-9_]+`)
 // Each carries its reason, because an unexplained exclusion is how a real typo
 // gets waved through later.
 var nonBackendEnvKeys = map[string]string{
-	"OBS_BACKEND_ADDR":    "the producers' target address, read by the sample app and load generator",
-	"OBS_COMPOSE_PROJECT": "tests/e2e/compose_smoke.sh",
-	"OBS_COMPOSE_KEEP_UP": "tests/e2e/compose_smoke.sh",
-	"OBS_INSTANCE":        "producers chart, set from the downward API (see TestProducersCarryPodInstanceLabel)",
-	"OBS_KIND_KEEP_UP":    "tests/e2e/kind_smoke.sh",
+	"OBS_BACKEND_ADDR":     "the producers' target address, read by the sample app and load generator",
+	"OBS_COMPOSE_PROJECT":  "tests/e2e/compose_smoke.sh",
+	"OBS_COMPOSE_KEEP_UP":  "tests/e2e/compose_smoke.sh",
+	"OBS_COMPOSE_TOPOLOGY": "tests/e2e/compose_smoke.sh, which picks the all-in-one or split stack",
+	"OBS_INSTANCE":         "producers chart, set from the downward API (see TestProducersCarryPodInstanceLabel)",
+	"OBS_KIND_KEEP_UP":     "tests/e2e/kind_smoke.sh",
+	"OBS_KIND_TOPOLOGY":    "tests/e2e/kind_smoke.sh, which picks the backend chart's topology",
 	// OBS_KIND_REPLACE_CLUSTER opts into deleting a pre-existing kind cluster.
 	// The script refuses one by default, so the runbook has to name the escape
 	// hatch for anyone who hits the refusal.
