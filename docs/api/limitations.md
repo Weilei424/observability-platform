@@ -75,14 +75,50 @@ filter.
 
 These are properties of the whole system, not of the query languages.
 
-- **Single node.** There is no ring, no replication, no query fanout, and no
-  multi-tenancy. One process owns all storage. Distributed mode is Phase 6 in
-  [`../planning/IMPLEMENTATION_PLAN.md`](../planning/IMPLEMENTATION_PLAN.md) and
-  is not built.
+- **One instance per component.** The backend runs all-in-one or split into
+  five components ([../architecture/components.md](../architecture/components.md)),
+  but there is one ingester and one store: no ring, no replication, no N-way
+  query fanout, and no multi-tenancy. Those are Phases 6.2–6.5 in
+  [`../planning/IMPLEMENTATION_PLAN.md`](../planning/IMPLEMENTATION_PLAN.md).
 - **No authentication or authorization.** Every endpoint is open to anyone who
   can reach the port; `internal/api/middleware/` contains request logging and
   metrics and nothing else. Exposing this beyond localhost or a trusted cluster
   network requires a proxy that terminates auth in front of it.
+- **The internal API is unauthenticated too.** The split components talk over
+  `/internal/v1` ([internal.md](internal.md)). The gateway never proxies it and
+  the Compose split file publishes only the gateway's port, but anything on the
+  Compose network or inside the cluster can reach it.
+- **No backpressure in the split topology.** While the store is down, the
+  ingester keeps accepting writes into its WALs and heads without bound;
+  `obs_flush_failures_total`, `obs_log_flush_failures_total`, and
+  `obs_wal_bytes` show it.
+- **A slow or hanging store stalls a logs flush per batch, not once.** The logs
+  flush holds the head lock across every batch it sends, so a store that
+  accepts connections but never answers can cost up to the 10 s flush timeout
+  on *each* batch of one flush, not a single 10 s cap for the whole thing — a
+  large head can be split into several batches. The 30 s backoff only limits
+  how often a new threshold flush is attempted after a failure; it does not
+  bound one already in flight.
+- **There is no server-side query timeout.** A querier request runs under the
+  inbound HTTP request's own context, and nothing wraps it with a deadline. A
+  hung ingester or store therefore holds that request open until the caller
+  (Grafana, or curl) disconnects — it never resolves to a `503` on its own.
+- **A store that permanently rejects a batch wedges the head.** A tolerant
+  flush never discards a batch the store failed to accept — that would lose
+  data already acknowledged to the client — so a store-side bug that keeps
+  refusing an otherwise-valid batch retries it forever, once per 30 s backoff,
+  while the WAL it cannot checkpoint keeps growing.
+- **A hung maintenance call can delay the compactor's shutdown by up to 2
+  minutes.** `CompactOnce` and `ApplyRetention` run under their own fixed
+  2-minute timeout, on a context independent of the shutdown signal; if one is
+  in flight when the compactor is asked to stop, shutdown waits for it to
+  finish or time out before it can exit.
+- **No all-in-one → split migration.** A split deployment starts from empty data
+  directories or ones the split topology wrote; moving an all-in-one data
+  directory into an ingester and a store is unsupported.
+- **Split-mode reads move data.** Every in-range sample and log entry of every
+  matching series or stream crosses the network to the querier before it
+  filters and caps.
 - **No Prometheus `remote_write`.** Ingestion is this project's own JSON API;
   see [metrics.md](metrics.md). A Prometheus server cannot forward to this
   backend without a translator.
