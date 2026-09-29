@@ -27,6 +27,16 @@ make lint
 make run         # run the backend directly, no Docker
 ```
 
+## Two topologies
+
+The backend runs as one process — the demo above — or split into five
+components: a gateway, an ingester, a querier, a store, and a compactor, each
+owning its own data. `make local-up-split` starts that version with the same
+Grafana, dashboards, and URLs; [docs/runbooks/split-demo.md](docs/runbooks/split-demo.md)
+walks through it, including what happens when a component goes down, and
+[docs/architecture/components.md](docs/architecture/components.md) explains
+the design.
+
 ## What you'll see
 
 Four dashboards are provisioned into Grafana at startup:
