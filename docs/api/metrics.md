@@ -89,7 +89,9 @@ curl -sG 'http://localhost:8080/api/v1/query' \
 |---|---|---|
 | 200 | — | `data.resultType` is `vector`, or `scalar` for a numeric expression such as `1+1` |
 | 400 | `bad_data` | `query` missing, unparseable, or outside the supported subset; malformed `time` |
+| 499 | `canceled` | The client abandoned the request before it finished |
 | 500 | `execution` | The query failed while running |
+| 503 | `unavailable` | A component the query needs could not be reached (split topology only) |
 
 ---
 
@@ -126,7 +128,9 @@ curl -sG 'http://localhost:8080/api/v1/query_range' \
 |---|---|---|
 | 200 | — | `data.resultType` is `matrix` |
 | 400 | `bad_data` | Missing or malformed `query`, `start`, `end`, or `step`; `step` <= 0; `end` < `start` |
+| 499 | `canceled` | The client abandoned the request before it finished |
 | 500 | `execution` | The query failed while running |
+| 503 | `unavailable` | A component the query needs could not be reached (split topology only) |
 
 ---
 
@@ -210,4 +214,6 @@ curl -sG 'http://localhost:8080/api/v1/series' \
 |---|---|---|
 | 200 | — | `data` is an array of label-set objects |
 | 400 | `bad_data` | No `match[]` given, or a selector is unparseable |
+| 499 | `canceled` | The client abandoned the request before it finished |
 | 500 | `execution` | The lookup failed |
+| 503 | `unavailable` | A component the query needs could not be reached (split topology only) |
