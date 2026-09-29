@@ -66,19 +66,23 @@ Writes still land — the ingester does not need the store to accept a push:
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8080/api/v1/ingest/metrics \
   -H 'Content-Type: application/json' \
-  -d '{"metrics":[{"name":"http_requests_total","labels":{"run":"split-drill"},"timestamp_ms":0,"value":1}]}'
+  -d "{\"metrics\":[{\"name\":\"http_requests_total\",\"labels\":{\"run\":\"split-drill\"},\"timestamp_ms\":$(date +%s%3N),\"value\":1}]}"
 ```
 
-answers `204`. The producers keep going, and the ingester's WAL grows on **WAL
-Size** while **Maintenance Failures** counts the flushes it cannot deliver.
-**Component Health** shows `store` at 0.
+answers `204`. A current timestamp matters here: a `0` (1970) sample would still
+prove the write landed, but it would also sit in `http_requests_total` looking
+like a broken data point on every panel that reads that series afterward. The
+producers keep going, and the ingester's WAL grows on **WAL Size** while
+**Maintenance Failures** counts the flushes it cannot deliver. **Component
+Health** shows `store` at 0.
 
 ```bash
 docker compose -f deployments/docker/docker-compose.split.yml start store
 curl -s -w '\n%{http_code}\n' -G 'http://localhost:8080/api/v1/query' --data-urlencode 'query=http_requests_total'
 ```
 
-Reads recover within a scrape or two of `start store`, and the ingester's next
+Reads recover as soon as the store answers healthy again — the querier calls
+it directly per request, not on a scrape interval — and the ingester's next
 flush drains what it held.
 
 ## Test it
@@ -97,11 +101,13 @@ above.
 The backend chart's `topology: split` deploys the same five components; the
 gateway takes the Service name `observability-backend`, so the grafana and
 producers charts install unchanged. Follow
-[kubernetes-demo.md](kubernetes-demo.md), with two differences:
+[kubernetes-demo.md](kubernetes-demo.md), replacing its "1. Backend" and
+"2. Prometheus" install commands with these two (same release names, `backend`
+and `prometheus`, plus `--set topology=split`):
 
 ```bash
 helm install backend deployments/helm/backend -n obs --set topology=split --wait
-helm upgrade --install obs-prometheus deployments/helm/prometheus -n obs --set topology=split --wait
+helm install prometheus deployments/helm/prometheus -n obs --set topology=split --wait
 ```
 
 and wait for five workloads instead of one (`helm install` prints the rollout
@@ -112,7 +118,7 @@ like `make smoke-kind` it needs a cgroup v2 host.
 
 ```bash
 make local-down-split    # stop, KEEP the ingester and store volumes
-make local-reset-split   # stop and DELETE them
+make local-reset-split   # stop and DELETE the ingester, store, Grafana, and Prometheus volumes
 ```
 
 ## Troubleshooting
@@ -122,4 +128,4 @@ make local-reset-split   # stop and DELETE them
 | Queries answer `503 unavailable` | the ingester or store is down | `docker compose -f deployments/docker/docker-compose.split.yml ps`, then start the one that is not running |
 | Writes answer `503` at the gateway | the ingester is down | start it; writes need only the ingester |
 | A component exits at startup naming a peer URL | its environment names a peer it does not use, or lacks one it needs | compare it with the Responsibilities table in [../architecture/components.md](../architecture/components.md) |
-| Panels are empty but nothing is down | the split stack and `make local-up` both want port 8080 | run one demo at a time: `make local-down` first |
+| `make local-up-split` fails, or Grafana/Prometheus/the gateway won't bind their ports | the all-in-one demo (`make local-up`) is already running and holds 3000/8080/9090 | run one demo at a time: `make local-down` first |
