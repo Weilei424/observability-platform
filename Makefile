@@ -1,4 +1,4 @@
-.PHONY: build test lint run local-up local-down local-logs local-reset local-up-split local-down-split local-logs-split local-reset-split smoke smoke-logs smoke-compose smoke-compose-split smoke-kind bench bench-go bench-k6 help
+.PHONY: build test lint run local-up local-down local-logs local-reset local-up-split local-down-split local-logs-split local-reset-split smoke smoke-logs smoke-compose smoke-compose-split smoke-kind smoke-kind-split bench bench-go bench-k6 help
 
 ## build: Compile the backend binary
 build:
@@ -78,6 +78,10 @@ smoke-compose-split:
 ## smoke-kind: Deploy all four Helm charts into a kind cluster and test the restart/persistence path (needs kind, kubectl, helm, docker)
 smoke-kind:
 	bash tests/e2e/kind_smoke.sh
+
+## smoke-kind-split: Deploy the split topology into a kind cluster and test restarts of the ingester and store (needs kind, kubectl, helm, docker; cgroup v2)
+smoke-kind-split:
+	OBS_KIND_TOPOLOGY=split bash tests/e2e/kind_smoke.sh
 
 ## bench-go: Run Go micro-benchmarks (storage/query engine, in-process)
 bench-go:
