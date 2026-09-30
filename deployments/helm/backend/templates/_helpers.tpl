@@ -1,5 +1,17 @@
+{{/*
+backend.name: the all-in-one StatefulSet and the split gateway, and the Service
+the grafana, producers, and prometheus charts point at. It is never truncated —
+a silently shortened name would leave those charts pointing at nothing — so a
+name over 52 characters fails the render: a StatefulSet's pods carry a
+controller-revision-hash label of its name plus 11 characters, and a label
+value is at most 63.
+*/}}
 {{- define "backend.name" -}}
-{{- default .Chart.Name .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
+{{- $name := default .Chart.Name .Values.fullnameOverride -}}
+{{- if gt (len $name) 52 -}}
+{{- fail (printf "fullnameOverride %q is %d characters; at most 52 are allowed (a StatefulSet name limit), and it is never truncated because other charts point at it" $name (len $name)) -}}
+{{- end -}}
+{{- $name | trimSuffix "-" -}}
 {{- end -}}
 
 {{- define "backend.labels" -}}
@@ -17,7 +29,11 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{/*
 backend.componentName: a split component's resource name. The gateway takes the
 chart's own name — the Service the grafana, producers, and prometheus charts
-point at — and every other component shares its prefix.
+point at — and every other component shares its prefix, truncated to 43
+characters so the longest names still fit: "<prefix>-ingester" is at most the 52
+a StatefulSet allows, and "<prefix>-ingester-headless" at most the 63 a Service
+allows. Each component's suffix is distinct, so truncating the prefix never
+makes two names collide.
 */}}
 {{- define "backend.componentName" -}}
 {{- $root := index . 0 -}}
@@ -25,7 +41,7 @@ point at — and every other component shares its prefix.
 {{- if eq $component "gateway" -}}
 {{- include "backend.name" $root -}}
 {{- else -}}
-{{- printf "%s-%s" (trimSuffix "-backend" (include "backend.name" $root)) $component | trunc 63 | trimSuffix "-" -}}
+{{- printf "%s-%s" (trimSuffix "-backend" (include "backend.name" $root) | trunc 43 | trimSuffix "-") $component -}}
 {{- end -}}
 {{- end -}}
 
