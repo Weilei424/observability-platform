@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -111,10 +112,22 @@ func labelName(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return name, true
 }
 
+// statusClientClosedRequest is the de-facto (nginx) status for a caller that
+// cancelled its own request; nobody is left to read it.
+const statusClientClosedRequest = 499
+
 // internalError logs a failure under the rpc component and answers 500 with
-// its cause, which the calling client reports as ErrUnavailable.
+// its cause, which the calling client reports as ErrUnavailable. A failure
+// caused by the caller cancelling its own request is not a server fault: it is
+// logged at Debug and answered 499.
 func internalError(w http.ResponseWriter, r *http.Request, msg string, err error) {
-	observability.Component(observability.FromContext(r.Context()), "rpc").Error(msg, "err", err)
+	log := observability.Component(observability.FromContext(r.Context()), "rpc")
+	if errors.Is(err, context.Canceled) || r.Context().Err() != nil {
+		log.Debug(msg+" (caller cancelled)", "err", err)
+		writeError(w, statusClientClosedRequest, err.Error())
+		return
+	}
+	log.Error(msg, "err", err)
 	writeError(w, http.StatusInternalServerError, err.Error())
 }
 
