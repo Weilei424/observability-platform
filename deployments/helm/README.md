@@ -42,7 +42,7 @@ private WAL, so a query would see whichever shard it landed on.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `fullnameOverride` | `observability-backend` | Pinned Service/StatefulSet name. The other two charts' `backend.url` depends on this exact value. At most 52 characters (a StatefulSet name limit); it is never truncated, so a longer value fails the render. In split mode the other components are named `<prefix>-<component>`, the prefix being this value without a trailing `-backend`, truncated to 43 characters. |
+| `fullnameOverride` | `observability-backend` | Pinned Service/StatefulSet name. The other two charts' `backend.url` depends on this exact value. At most 52 characters (a StatefulSet name limit); it is never truncated, so a longer value fails the render. In split mode the other components are named `<prefix>-<component>`, the prefix being this value without a trailing `-backend`, truncated to 43 characters; a value that would give a component the gateway's own name (43 characters, then `-store`) fails the split render. |
 | `image.repository` | `observability-platform/backend` | Image name; built by the `backend` target in `deployments/docker/Dockerfile`. |
 | `image.tag` | `dev` | Image tag. |
 | `image.pullPolicy` | `IfNotPresent` | So a `kind load docker-image`ed image is used as-is with no registry. |
