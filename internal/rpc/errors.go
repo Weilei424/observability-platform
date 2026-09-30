@@ -23,6 +23,14 @@ const (
 	// of chunk bytes or log lines per request, which leaves ample margin even
 	// after base64 and JSON.
 	FlushBodyLimit = 64 << 20
+
+	// MaxSelectorBytes is the longest query, match[] selector, or label name
+	// the public API accepts, in every topology. A select request carries one
+	// selector, and JSON writes a byte as at most six ("\u0001"), so any
+	// accepted selector fits in selectBodyLimit (and a label name, at most three
+	// bytes per byte percent-encoded, fits in a request URL): split mode never
+	// refuses what all-in-one would answer.
+	MaxSelectorBytes = selectBodyLimit / 8
 )
 
 type errorBody struct {
