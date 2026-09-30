@@ -801,14 +801,14 @@ its assertions.
 - [x] `docs/runbooks/split-demo.md` — the Compose walk-through with a store-outage drill, then the Helm install
 - [x] `docs/architecture/storage-layout.md` — ownership per subtree and `genfloor`, checked by a split case of `TestStorageLayoutDocMatchesDisk`
 - [x] `docs/api/limitations.md` — one instance per component, no ingester backpressure, the held logs-flush lock, no all-in-one → split migration, best-effort final flushes, an unauthenticated internal API
-- [ ] README topology section, `deployments/helm/README.md`, and `ARCHITECTURE_NOTES.md` (component responsibilities, the phase's decisions, the component name set, the new metrics)
+- [x] README topology section, `deployments/helm/README.md`, and `ARCHITECTURE_NOTES.md` (component responsibilities, the phase's decisions, the component name set, the new metrics)
 
 **Verification**
-- [ ] Verify: all existing single-node tests pass in `all-in-one` mode, with their assertions unchanged
-- [ ] Verify: each component mode starts independently — healthy and ready with every peer unreachable
-- [ ] Verify: ingest → flush → ingester restart → query through the gateway returns every seeded sample and log line by value — in process, under Compose (locally and in CI), and on kind (CI)
-- [ ] Verify: a store outage fails reads with `503` while writes keep succeeding, and reads recover when it returns — under Compose
-- [ ] Verify: the all-in-one smoke tests stay green — `make smoke`, `make smoke-compose`, and `smoke-kind`
+- [x] Verify: all existing single-node tests pass in `all-in-one` mode, with their assertions unchanged — `go test ./... -count=1 -race` green at `de9d351` on 2026-09-29; every edit to a pre-existing test was reviewed as call-shape only
+- [x] Verify: each component mode starts independently — healthy and ready with every peer unreachable — `internal/app/targets_test.go` (every target alone, peers on a closed port; stateless targets never create their data dir)
+- [ ] Verify: ingest → flush → ingester restart → query through the gateway returns every seeded sample and log line by value — in process, under Compose (locally and in CI), and on kind (CI). **Local parts done:** in process via `TestSplitClusterEndToEnd` (all 241 samples through a gateway `query_range` after restart, compaction, and a store outage); under Compose via `make smoke-compose-split`, 91/0 at `de9d351` on 2026-09-29. **Still open:** the CI runs of the Compose and kind split matrix entries, which need a push (kind cannot run on this cgroup v1 host)
+- [x] Verify: a store outage fails reads with `503` while writes keep succeeding, and reads recover when it returns — under Compose: `make smoke-compose-split` 91/0 at `de9d351` on 2026-09-29, covering metrics and Loki reads (503), writes (204), and recovery by value
+- [ ] Verify: the all-in-one smoke tests stay green — `make smoke`, `make smoke-compose`, and `smoke-kind`. **Local parts done** at `d220245` on 2026-09-29: `make smoke` 13/13 and 33/33 against a fresh all-in-one backend; `make smoke-compose` 71/0. **Still open:** `smoke-kind`, which closes in CI after a push
 
 **Hand-off to 6.2:** write generations are per-ingester counters. Once the ring can
 move a series between ingesters, two ingesters' generations for the same series are
