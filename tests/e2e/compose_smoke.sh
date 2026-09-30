@@ -928,9 +928,15 @@ if [ "$TOPOLOGY" = split ]; then
     fi
     BODY=$(promquery 'compose_e2e_marker')
     check_contains "Grafana surfaces the outage rather than an empty panel" "$BODY" "unavailable"
+    # Stamped 10 s in the past, i.e. at least one 5 s Grafana step back: Grafana
+    # aligns the range end down to a multiple of the step and the engine answers
+    # each tick with the latest sample at or before it, so a sample stamped "now"
+    # can sit after the last aligned tick and read back empty when the read
+    # follows within a step (CI: the store recovers instantly).
+    OUTAGE_MS=$(( ($(date +%s) - 10) * 1000 ))
     OUTAGE_STATUS=$(curl -s "${CURL_TIMEOUTS[@]}" -o /dev/null -w "%{http_code}" -X POST "$BACKEND/api/v1/ingest/metrics" \
         -H "Content-Type: application/json" \
-        -d "{\"metrics\":[{\"name\":\"compose_e2e_outage\",\"labels\":{\"run_id\":\"$RUN_ID\"},\"timestamp_ms\":$(( $(date +%s) * 1000 )),\"value\":1}]}")
+        -d "{\"metrics\":[{\"name\":\"compose_e2e_outage\",\"labels\":{\"run_id\":\"$RUN_ID\"},\"timestamp_ms\":$OUTAGE_MS,\"value\":1}]}")
     if [ "$OUTAGE_STATUS" = "204" ]; then
         log_pass "writes land while the store is down (HTTP 204)"
     else
@@ -976,19 +982,23 @@ if [ "$TOPOLOGY" = split ]; then
     # the write made *during* the outage (buffered in the ingester's head
     # while the store was down) must both still read back by value now that
     # the store is back.
-    BODY=$(promquery 'compose_e2e_flush_marker')
-    if printf '%s' "$BODY" | jq -e --argjson want "$MARKER_VALUE" \
-            '[.. | arrays | select(length > 0) | select(all(.[]; type == "number")) | .[]] | index($want)' >/dev/null 2>&1; then
-        log_pass "flush marker still readable by value once the store recovers"
+    # Polled with a deadline rather than read once: a single read straight
+    # after recovery can race the querier's view of the store. BODY keeps the
+    # last response for the FAIL message (wait_for runs in this shell).
+    value_reads_back() { # <metric> <number that must appear in the result>
+        BODY=$(promquery "$1")
+        printf '%s' "$BODY" | jq -e --argjson want "$2" \
+            '[.. | arrays | select(length > 0) | select(all(.[]; type == "number")) | .[]] | index($want)' >/dev/null 2>&1
+    }
+    BODY=""
+    if wait_for "flush marker still readable by value once the store recovers" "$READY_TIMEOUT" value_reads_back compose_e2e_flush_marker "$MARKER_VALUE"; then :
     else
-        log_fail "flush marker value $MARKER_VALUE absent once the store recovered; body: $BODY"
+        echo "    flush marker value $MARKER_VALUE absent once the store recovered; last body: $BODY"
     fi
-    BODY=$(promquery 'compose_e2e_outage')
-    if printf '%s' "$BODY" | jq -e \
-            '[.. | arrays | select(length > 0) | select(all(.[]; type == "number")) | .[]] | index(1)' >/dev/null 2>&1; then
-        log_pass "the outage-time write reads back by value once the store recovers"
+    BODY=""
+    if wait_for "the outage-time write reads back by value once the store recovers" "$READY_TIMEOUT" value_reads_back compose_e2e_outage 1; then :
     else
-        log_fail "the outage-time write's value is absent once the store recovered; body: $BODY"
+        echo "    the outage-time write's value is absent once the store recovered; last body: $BODY"
     fi
 fi
 
