@@ -171,6 +171,12 @@ func (s *Server) handleQueryRange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if endMs > math.MaxInt64-stepMs {
+		// The engine's tick loop (t += step) would overflow and never end.
+		writePromError(w, http.StatusBadRequest, "bad_data", "invalid parameter 'end': too large for the given step (end + step overflows)")
+		return
+	}
+
 	expr, err := metrics.ParseExpr(queryStr)
 	if err != nil {
 		writePromError(w, http.StatusBadRequest, "bad_data", "invalid query: "+err.Error())
