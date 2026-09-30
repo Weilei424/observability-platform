@@ -124,19 +124,38 @@ func TestParseLogQL_EscapedStrings(t *testing.T) {
 	}
 }
 
-// TestParseLogQL_InvalidUTF8Rejected: stored labels and lines are valid UTF-8,
-// so a string literal that is not — raw, or produced by an escape such as
-// \xff — could never match, and a matcher value would reach split mode's JSON
-// transport as U+FFFD instead. Either way it is a bad query.
+// TestParseLogQL_InvalidUTF8Rejected: a literal whose source bytes are not
+// valid UTF-8 is refused anywhere, as Loki's lexer does. A label matcher is
+// also refused when an escape such as \xff decodes to invalid UTF-8: stored
+// labels are valid UTF-8, and split mode's JSON transport would carry the value
+// as U+FFFD instead.
 func TestParseLogQL_InvalidUTF8Rejected(t *testing.T) {
 	for _, q := range []string{
 		`{service="\xff"}`,
 		`{service="` + "\xff" + `"}`,
 		"{service=`\xff`}",
-		`{app="x"} |= "\xff"`,
+		`{app="x"} |= "` + "\xff" + `"`,
+		"{app=\"x\"} |~ `\xff`",
 	} {
 		if sel, err := ParseLogQL(q); err == nil {
 			t.Errorf("ParseLogQL(%q) = %+v, want an error", q, sel)
+		}
+	}
+}
+
+// TestParseLogQL_LineFilterEscapeKeepsByte: a line filter runs in the querier
+// and never crosses the transport, so a substring filter whose escape decodes
+// to invalid UTF-8 keeps the byte, as it did before the matcher check. (A
+// regexp filter such as |~ "\xff" was and is refused by regexp.Compile.)
+func TestParseLogQL_LineFilterEscapeKeepsByte(t *testing.T) {
+	for _, q := range []string{`{app="x"} |= "\xff"`, `{app="x"} != "\xff"`} {
+		sel, err := ParseLogQL(q)
+		if err != nil {
+			t.Errorf("ParseLogQL(%q): %v", q, err)
+			continue
+		}
+		if len(sel.LineFilters) != 1 || sel.LineFilters[0].Value != "\xff" {
+			t.Errorf("ParseLogQL(%q) filters = %+v, want one with the byte 0xff", q, sel.LineFilters)
 		}
 	}
 }
