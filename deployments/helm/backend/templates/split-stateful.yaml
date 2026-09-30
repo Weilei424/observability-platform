@@ -29,7 +29,7 @@ spec:
       # The default 30s grace period is too short: the ingester's graceful
       # shutdown can take about 40s against a slow store (a 30s metrics flush
       # plus a 10s logs flush), and Kubernetes would SIGKILL it mid-flush. The
-      # Compose split already gives it 45s (stop_grace_period); this adds
+      # Compose split already gives it 60s (stop_grace_period); this adds
       # headroom on top.
       terminationGracePeriodSeconds: 60
       {{- include "backend.podSecurityContext" $root | nindent 6 }}
