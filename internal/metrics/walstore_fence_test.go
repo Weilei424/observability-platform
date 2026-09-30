@@ -44,6 +44,15 @@ func TestWALStore_FlushBlock_FenceCoversChunksSealedDuringFlush(t *testing.T) {
 	if _, err := store.FlushBlock(); err != nil {
 		t.Fatalf("FlushBlock: %v", err)
 	}
+	// WAL segments are 1-based and every record has its own (1-byte limit), so
+	// sample i sits in segment i+1. The oldest sample the flush did not persist
+	// is 120, in segment 121; replay starts strictly after the checkpoint, so the
+	// checkpoint must be exactly 120, the segment of persisted sample 119. Lower
+	// means a stale chunk segment is pinning the fence; higher means the second
+	// chunk's segments were released.
+	if got := metrics.ReadCheckpoint(dir); got != 120 {
+		t.Fatalf("checkpoint = %d, want 120 (the segment before sample 120's segment 121)", got)
+	}
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close WAL: %v", err)
 	}
