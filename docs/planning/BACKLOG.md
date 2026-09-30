@@ -746,7 +746,7 @@ talk over an internal HTTP API. A query answered through the gateway returns wha
 its assertions.
 
 **Pre-flight**
-- [ ] Close the Phase 5.4 fresh-clone gate — the open Verify line above is that phase's acceptance gate, and phases are worked in order
+- [x] Close the Phase 5.4 fresh-clone gate — the open Verify line above is that phase's acceptance gate, and phases are worked in order
 
 **Bulk reads** — one read per selector per query, so a remote source costs one round trip, not one per step
 - [x] `metrics.Source` — `Select(ctx, SelectParams)` with anchors, series-only, and any-time membership; `SelectLabelNames` / `SelectLabelValues`; highest-generation dedup
