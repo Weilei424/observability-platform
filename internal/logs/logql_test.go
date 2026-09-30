@@ -124,6 +124,23 @@ func TestParseLogQL_EscapedStrings(t *testing.T) {
 	}
 }
 
+// TestParseLogQL_InvalidUTF8Rejected: stored labels and lines are valid UTF-8,
+// so a string literal that is not — raw, or produced by an escape such as
+// \xff — could never match, and a matcher value would reach split mode's JSON
+// transport as U+FFFD instead. Either way it is a bad query.
+func TestParseLogQL_InvalidUTF8Rejected(t *testing.T) {
+	for _, q := range []string{
+		`{service="\xff"}`,
+		`{service="` + "\xff" + `"}`,
+		"{service=`\xff`}",
+		`{app="x"} |= "\xff"`,
+	} {
+		if sel, err := ParseLogQL(q); err == nil {
+			t.Errorf("ParseLogQL(%q) = %+v, want an error", q, sel)
+		}
+	}
+}
+
 // TestParseLogQL_EscapedLineFilterOperands covers the JSON-search case: finding
 // a quoted key in a log line requires escaped quotes in the operand.
 func TestParseLogQL_EscapedLineFilterOperands(t *testing.T) {
