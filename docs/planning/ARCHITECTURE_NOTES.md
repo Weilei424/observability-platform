@@ -74,8 +74,10 @@ A weak distributed demo is worse than a strong single-node TSDB/log backend. Dis
 | Logs store | Compressed log chunks, chunk reads, stream metadata |
 | Logs index | Label pair → stream IDs, stream ID → chunk references, time range filtering |
 | Logs query engine | Loki-style selector parsing, time-range query, text filter scanning |
-| Compactor | Block merging, index rebuild, retention cleanup |
-| Gateway | Future distributed request routing and query fanout |
+| Compactor | Compaction planning, cadence, and retention policy; in split, the store executes |
+| Gateway | The public entry point in the split topology: proxies write routes to the ingester and read routes to the querier (6.1); ring-based write routing arrives in 6.2 |
+| Querier | The public read routes over the ingester and store, merged ingester-first |
+| Store | Persisted blocks and log chunks; flush-in; executes the compactor's plans |
 | Grafana | Visualization only; not a source of truth |
 
 ---
@@ -302,6 +304,10 @@ with, whatever labels it carried. The sample app's values are an independent sim
 they are not derived from the log lines it pushes, and no panel or runbook claims the two
 signals correlate.
 
+`deployments/docker/docker-compose.split.yml` runs the split topology (6.1) with the gateway
+aliased as `backend`, so every datasource, producer, and URL that names the backend reaches
+it unchanged. Its ingester and store get a 45 s `stop_grace_period`.
+
 Three provisioned dashboards: `obs-metrics-v1` (load generator), `obs-logs-v1` (sample
 app logs), `obs-sample-app-v1` (sample app metrics). Phase 5.3 adds a fourth for backend
 internals.
@@ -315,7 +321,7 @@ not, because its datasources are `access: proxy` and resolved on first query. Ph
 Kubernetes probes use `httpGet` instead of this exec command — see "Kubernetes topology"
 below for why the two environments correctly differ here.
 
-### Kubernetes topology (introduced in 5.2; `prometheus` chart added in 5.3)
+### Kubernetes topology (introduced in 5.2; `prometheus` chart added in 5.3; split in 6.1)
 
 Four separate Helm charts under `deployments/helm/` — `backend`, `prometheus`,
 `grafana`, `producers` — rather than one umbrella chart, because they scale and fail
@@ -383,6 +389,13 @@ as a temporary gap. Each replica would own a private PVC and a private WAL; with
 than one, a query would see whichever shard happened to receive it, with no merge across
 replicas. That ceiling is real and is recorded here rather than hidden — resolving it is
 exactly what Phase 6's ring-based sharding and query fanout are for.
+
+**Split topology (6.1).** The backend chart's `topology: split` renders StatefulSets for the
+ingester and store (one PVC each) and Deployments for the gateway, querier, and compactor.
+The gateway inherits `observability-backend`, so the cross-chart contract holds unchanged.
+The single-replica ceiling now applies per component to the ingester, store, and compactor,
+and the chart refuses more than one until 6.2. The ingester and store set
+`terminationGracePeriodSeconds: 60` so a graceful stop can finish an in-flight flush.
 
 ### LogQL metric queries (introduced in 4.6)
 
@@ -457,6 +470,62 @@ exactly what Phase 6's ring-based sharding and query fanout are for.
   caps its response at `limit`; the metric path has no equivalent — upstream's
   `max_query_series` (default 500) is not implemented. Only the query's own time
   bounds and `step` constrain the response size today.
+
+### Component split (introduced in 6.1)
+
+`OBS_TARGET` selects one of `all-in-one` (the default, unchanged), `gateway`, `ingester`,
+`querier`, `store`, or `compactor` from the same binary. The reference for what each
+serves, owns, and calls is `docs/architecture/components.md`, and the internal wire
+format is `docs/api/internal.md`; this section records only the decisions that shaped
+them.
+
+- **One owner per data directory.** The ingester owns `metrics/wal`, `metrics/checkpoint`,
+  `metrics/genfloor`, and `logs/wal`; the store owns `metrics/blocks`, `metrics/tmp`,
+  `logs/chunks`, and `logs/index`. No volume is shared, so no process reasons about another
+  mutating a directory under it. all-in-one owns everything and writes no `genfloor`.
+- **HTTP + JSON internal API** under `/internal/v1`, with string-encoded sample values
+  and no new dependency. It is unauthenticated, like the public API, and reachable in
+  Kubernetes only through ClusterIP Services. The gateway never proxies it.
+- **The gateway is a route-level proxy.** It forwards write routes to the ingester and
+  read routes to the querier without parsing bodies. Write parsing moves into the gateway
+  in 6.2, when the ring needs a series or stream key to route on.
+- **Policy versus mechanism for compaction.** The compactor owns the plan, the cadence, the
+  retention clock, and the maintenance metrics; the store owns execution and re-checks each
+  group before running it, under the same lock a flush takes.
+- **Bulk `Select` reads, merged ingester-first.** The querier reads the ingester to
+  completion, then the store. A flush is invisible to that order: the store registers a
+  block before it acknowledges the flush, the ingester discards chunks only after the
+  acknowledgement, and the querier finishes the ingester before it starts on the store, so
+  a sample absent from the ingester's answer was already in the store. Overlap resolves by
+  one rule per signal, shared with all-in-one: `sortAndDedup` for metrics (timestamp, then
+  highest generation) and `mergeEntries` for logs (timestamp and line, persisted ahead of
+  head).
+- **The persisted generation floor.** Last-write-wins between two samples at one timestamp
+  is decided by write generation, and the blocks that would seed the ingester's counter
+  live in the store. The ingester writes `metrics/genfloor` before sending anything, so no
+  block it ships can outrank a write it accepts after a restart.
+- **The per-chunk WAL fence.** Each in-memory chunk records the WAL segment current when it
+  was allocated, and the checkpoint boundary is the minimum over every chunk still in
+  memory, sealed or not. One value per series was not enough: a chunk sealed during a flush
+  stays in memory, and the head chunk allocated after it would move the fence past its
+  segments and let the checkpoint delete WAL still needed for replay. Because a failed
+  batch skips the checkpoint, the fence keeps a later one correct.
+- **Flush batching.** Log flush batches are sized by encoded bytes, so escaped lines still
+  land under the store's body limit; metrics batches are additionally capped by
+  `block.MaxChunksPerSeries` per series, so a large backlog cannot produce a block the
+  reader refuses. Flush failures log at ERROR.
+- **Reads fail closed.** A query never answers from one source while the other is down. A
+  peer outage or a deadline answers `503`; a caller that cancels answers `499`, which is
+  not a server error.
+- **Readiness is local only.** A process reports its own data directory, never its peers',
+  so one outage does not mark its dependents unready.
+- **Strict peer URLs.** A target refuses to start if a peer URL it needs
+  (`OBS_INGESTER_URL`, `OBS_STORE_URL`, `OBS_QUERIER_URL`) is missing or one it does not use
+  is set.
+
+**Hand-off to 6.2.** Generations are per-ingester counters. Once the ring can move a series
+between ingesters, last-write-wins across them needs a rule before membership changes are
+allowed.
 
 ---
 
@@ -574,8 +643,12 @@ The backend exposes the following metrics at `/metrics`, scraped by a separate P
 - `obs_compaction_failures_total` — failed compactions
 - `obs_compaction_duration_seconds` — compaction duration histogram
 - `obs_retention_deleted_blocks_total` — blocks deleted by retention
-- `obs_flushes_total` — successful metrics head flushes, incremented only by the compactor
-- `obs_flush_failures_total` — failed metrics head flushes; log-store flushes are not instrumented
+- `obs_flushes_total` — successful metrics head flushes, incremented by whichever maintenance loop flushes: the compactor loop in all-in-one, the ingester's flush loop in split
+- `obs_flush_failures_total` — failed metrics head flushes
+- `obs_log_flushes_total` — successful log-store flushes
+- `obs_log_flush_failures_total` — failed log-store flushes
+
+In split, `obs_active_series` counts the ingester's head series and `obs_log_streams_total` the store's persisted streams.
 
 **Errors:**
 - `obs_collector_errors_total{collector}` — scrape-time collector failures
@@ -598,7 +671,7 @@ HTTP request metrics (`obs_http_requests_total`, `obs_http_request_duration_seco
 
 #### Component Name Set
 
-Request-scoped and startup loggers carry a fixed `component` name. The set actually emitted is: `api`, `compactor`, `logs`, `logs_push`, `logs_query`, `logwal`, `main`, `metrics_ingest`, `wal`. Each component name appears at most once per log line. Nothing enforces this set in code — `observability.Component()` accepts any string — so it is a call-site convention, not a constraint the logging helpers check.
+Request-scoped and startup loggers carry a fixed `component` name. The set actually emitted is: `api`, `compactor`, `flush`, `gateway`, `logs`, `logs_push`, `logs_query`, `logwal`, `main`, `metrics_ingest`, `rpc`, `wal`. Each component name appears at most once per log line. Nothing enforces this set in code — `observability.Component()` accepts any string — so it is a call-site convention, not a constraint the logging helpers check. Every line also carries `target`, the process's `OBS_TARGET`; it is a field, not a component.
 
 `main` covers `cmd/server/main.go`'s own generic startup/lifecycle lines (data directory creation, binding the listener, starting and shutting down the HTTP server) that are not specific to any one storage subsystem. Its startup lines that ARE specific to a subsystem reuse that subsystem's existing component name instead: WAL checkpoint/replay/open/close logs carry `wal`, and logs-store open/ready/close logs carry `logs` — the same names those subsystems already use for their own runtime log lines. `cmd/server/main.go`'s `log` value itself is `api.Deps.Logger` and stays component-free per that field's doc comment; every startup line goes through a separate, derived logger instead.
 
