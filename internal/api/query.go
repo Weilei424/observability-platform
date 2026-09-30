@@ -6,18 +6,24 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+	"unicode/utf8"
 
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/rpc"
 )
 
-// checkSelectorLen refuses a query, match[] selector, or label name longer than
-// rpc.MaxSelectorBytes. Split mode carries each one to its peers in a
-// size-limited internal request, so every topology refuses the same inputs
-// here, with a 400, rather than split mode alone failing them further in.
-func checkSelectorLen(name, s string) error {
+// checkSelector refuses a query, match[] selector, or label name that is
+// longer than rpc.MaxSelectorBytes or is not valid UTF-8. Split mode carries
+// each one to its peers in a size-limited JSON request, where an invalid byte
+// would arrive as U+FFFD and match a different value than all-in-one compares;
+// stored labels are valid UTF-8, so such a selector can never match anyway.
+// Every topology refuses the same inputs here, with a 400.
+func checkSelector(name, s string) error {
 	if len(s) > rpc.MaxSelectorBytes {
 		return fmt.Errorf("invalid parameter '%s': longer than %d bytes", name, rpc.MaxSelectorBytes)
+	}
+	if !utf8.ValidString(s) {
+		return fmt.Errorf("invalid parameter '%s': not valid UTF-8", name)
 	}
 	return nil
 }
@@ -96,7 +102,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		writePromError(w, http.StatusBadRequest, "bad_data", "missing required parameter 'query'")
 		return
 	}
-	if err := checkSelectorLen("query", queryStr); err != nil {
+	if err := checkSelector("query", queryStr); err != nil {
 		writePromError(w, http.StatusBadRequest, "bad_data", err.Error())
 		return
 	}
@@ -159,7 +165,7 @@ func (s *Server) handleQueryRange(w http.ResponseWriter, r *http.Request) {
 		writePromError(w, http.StatusBadRequest, "bad_data", "missing required parameter 'query'")
 		return
 	}
-	if err := checkSelectorLen("query", queryStr); err != nil {
+	if err := checkSelector("query", queryStr); err != nil {
 		writePromError(w, http.StatusBadRequest, "bad_data", err.Error())
 		return
 	}
