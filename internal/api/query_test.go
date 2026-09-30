@@ -695,3 +695,17 @@ func TestQuery_ScalarArithmetic_ReturnsScalarResultType(t *testing.T) {
 	}
 	_ = result
 }
+
+func TestQuery_RangeQuery_EndNearMaxInt64_Returns400(t *testing.T) {
+	srv, _ := newQueryTestServer(t)
+
+	// end + step overflows int64, which would make the engine's tick loop endless.
+	rr := getQuery(t, srv, "/api/v1/query_range?query=cpu_usage&start=9223372036854775&end=9223372036854775&step=1")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body: %s", rr.Code, rr.Body.String())
+	}
+	body := decodePromResponse(t, rr)
+	if body["errorType"] != "bad_data" {
+		t.Errorf("errorType = %v, want bad_data", body["errorType"])
+	}
+}
