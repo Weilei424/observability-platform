@@ -37,7 +37,7 @@ Errors are `{"error": "..."}`:
 | Status | Meaning |
 |---|---|
 | `400` | A malformed or invalid request |
-| `413` | A flush body over 64 MiB |
+| `413` | A flush body over 64 MiB, or any other body over 1 MiB. The public API caps a selector at 128 KiB, which JSON escaping cannot grow past 768 KiB, so a query never meets this limit |
 | `500` | The component failed while serving the request |
 
 A caller treats a refused connection, a timeout, or any `5xx` as the component
