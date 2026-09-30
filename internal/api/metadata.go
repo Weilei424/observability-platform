@@ -52,6 +52,9 @@ func parseMatchSelectors(matchStrings []string) ([]metrics.Selector, error) {
 	}
 	selectors := make([]metrics.Selector, 0, len(matchStrings))
 	for _, ms := range matchStrings {
+		if err := checkSelectorLen("match[]", ms); err != nil {
+			return nil, err
+		}
 		sel, err := metrics.ParseSelector(ms)
 		if err != nil {
 			return nil, fmt.Errorf("invalid match[] selector: %s", err.Error())
@@ -84,6 +87,10 @@ func (s *Server) handleLabelValues(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := chi.URLParam(r, "name")
+	if err := checkSelectorLen("name", name); err != nil {
+		writePromError(w, http.StatusBadRequest, "bad_data", err.Error())
+		return
+	}
 	filter, ok := s.metadataFilter(w, r)
 	if !ok {
 		return
