@@ -96,3 +96,39 @@ func TestLokiSelectorLimit(t *testing.T) {
 		t.Errorf("Loki label name over the cap: status %d, want 400", rr.Code)
 	}
 }
+
+// Stored label values are valid UTF-8, and split mode's JSON transport would
+// replace an invalid byte with U+FFFD, so every topology refuses invalid UTF-8
+// in a selector with 400 rather than let the two compare different values.
+func TestSelectorInvalidUTF8(t *testing.T) {
+	srv, _ := newQueryTestServer(t)
+	bad := `up{job="` + "\xff" + `"}`
+	for _, tc := range []struct {
+		path, param string
+		extra       url.Values
+	}{
+		{"/api/v1/query", "query", url.Values{"time": {"100"}}},
+		{"/api/v1/query_range", "query", url.Values{"start": {"0"}, "end": {"100"}, "step": {"10"}}},
+		{"/api/v1/series", "match[]", nil},
+		{"/api/v1/labels", "match[]", nil},
+	} {
+		form := url.Values{tc.param: {bad}}
+		for k, v := range tc.extra {
+			form[k] = v
+		}
+		if rr := postForm(t, srv, tc.path, form); rr.Code != http.StatusBadRequest {
+			t.Errorf("%s with invalid UTF-8: status %d, want 400; body %.200s", tc.path, rr.Code, rr.Body.String())
+		}
+	}
+	if rr := getQuery(t, srv, "/api/v1/label/%FF/values"); rr.Code != http.StatusBadRequest {
+		t.Errorf("label name with invalid UTF-8: status %d, want 400", rr.Code)
+	}
+
+	lokiSrv := newLokiServer(t)
+	for _, q := range []string{`{job="` + "\xff" + `"}`, "{job=`\xff`}", `{job="\xff"}`} {
+		rr := getQuery(t, lokiSrv, "/loki/api/v1/query_range?"+url.Values{"query": {q}, "start": {"0"}, "end": {"100"}}.Encode())
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("Loki query %q: status %d, want 400; body %.200s", q, rr.Code, rr.Body.String())
+		}
+	}
+}
