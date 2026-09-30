@@ -130,14 +130,14 @@ var errUnsupportedMetricQuery = errors.New("parse error: unsupported LogQL featu
 // line-filter operand — e.g. |= "\"event\"" for JSON lines — without the
 // literal terminating early.
 //
-// A literal that is not valid UTF-8 — a raw byte, or one an escape such as
-// \xff produces — is an error: stored labels and lines are valid UTF-8, so it
-// could never match, and split mode's JSON transport would carry it as U+FFFD.
-// The source bytes are checked too, since strconv.Unquote would itself quietly
-// turn a raw invalid byte into U+FFFD.
+// A literal whose source bytes are not valid UTF-8 is an error, as in Loki's
+// lexer; strconv.Unquote would otherwise quietly turn a raw invalid byte into
+// U+FFFD. The decoded value may still be invalid UTF-8 through an escape such
+// as \xff: a line filter keeps that byte (Go's regexp reads it as U+FFFD), and
+// parseStreamSelector refuses it in a label matcher.
 func scanString(s string) (value string, n int, err error) {
 	value, n, err = scanStringLiteral(s)
-	if err == nil && (!utf8.ValidString(s[:n]) || !utf8.ValidString(value)) {
+	if err == nil && !utf8.ValidString(s[:n]) {
 		return "", 0, fmt.Errorf("string literal %s is not valid UTF-8", s[:n])
 	}
 	return value, n, err
@@ -219,6 +219,12 @@ func parseStreamSelector(s string) ([]index.Pair, int, error) {
 		value, n, err := scanString(s[i:])
 		if err != nil {
 			return nil, 0, fmt.Errorf("parse error: label %q: %w", name, err)
+		}
+		// Stored label values are valid UTF-8, so a value an escape decodes to
+		// invalid UTF-8 could never match; and split mode's JSON transport
+		// would carry it to the ingester and the store as U+FFFD, which could.
+		if !utf8.ValidString(value) {
+			return nil, 0, fmt.Errorf("parse error: label %q: value %s is not valid UTF-8", name, s[i:i+n])
 		}
 		matchers = append(matchers, index.Pair{Name: name, Value: value})
 
