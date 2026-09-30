@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/masonwheeler/observability-platform/internal/storage/index"
 )
@@ -128,7 +129,21 @@ var errUnsupportedMetricQuery = errors.New("parse error: unsupported LogQL featu
 // Escape-aware scanning is what lets a '"' appear inside a label value or a
 // line-filter operand — e.g. |= "\"event\"" for JSON lines — without the
 // literal terminating early.
+//
+// A literal that is not valid UTF-8 — a raw byte, or one an escape such as
+// \xff produces — is an error: stored labels and lines are valid UTF-8, so it
+// could never match, and split mode's JSON transport would carry it as U+FFFD.
+// The source bytes are checked too, since strconv.Unquote would itself quietly
+// turn a raw invalid byte into U+FFFD.
 func scanString(s string) (value string, n int, err error) {
+	value, n, err = scanStringLiteral(s)
+	if err == nil && (!utf8.ValidString(s[:n]) || !utf8.ValidString(value)) {
+		return "", 0, fmt.Errorf("string literal %s is not valid UTF-8", s[:n])
+	}
+	return value, n, err
+}
+
+func scanStringLiteral(s string) (value string, n int, err error) {
 	if s == "" {
 		return "", 0, fmt.Errorf("expected a quoted string")
 	}
