@@ -84,11 +84,13 @@ These are properties of the whole system, not of the query languages.
   128 KiB.** A `query`, each `match[]`, or a `{name}` in a label-values path
   longer than 131072 bytes or not valid UTF-8 is refused with `400`
   (`bad_data` on the Prometheus routes), in every topology; so is a LogQL
-  string literal whose escapes (`"\xff"`) decode to invalid UTF-8. Split mode
-  carries each selector to the ingester and the store inside a size-limited
-  JSON request, where an invalid byte would arrive as U+FFFD, and all-in-one
-  refuses the same inputs so the two answer alike. Stored labels and lines are
-  valid UTF-8, so no refused selector could have matched anything.
+  label matcher whose escapes (`{job="\xff"}`) decode to invalid UTF-8. Split
+  mode carries each label matcher to the ingester and the store inside a
+  size-limited JSON request, where an invalid byte would arrive as U+FFFD, and
+  all-in-one refuses the same inputs so the two answer alike. Stored labels are
+  valid UTF-8, so no refused matcher could have matched anything. Line filters
+  run in the querier and never cross that request, so a substring filter such
+  as `|= "\xff"` keeps its byte.
 - **No authentication or authorization.** Every endpoint is open to anyone who
   can reach the port; `internal/api/middleware/` contains request logging and
   metrics and nothing else. Exposing this beyond localhost or a trusted cluster
