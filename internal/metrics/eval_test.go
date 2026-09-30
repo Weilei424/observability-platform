@@ -1,6 +1,7 @@
 package metrics_test
 
 import (
+	"math"
 	"testing"
 
 	"github.com/masonwheeler/observability-platform/internal/metrics"
@@ -517,5 +518,54 @@ func TestEvalInstant_SumBy_NulByteInValue_NoGroupCollision(t *testing.T) {
 	}
 	if len(result) != 2 {
 		t.Fatalf("len = %d, want 2 distinct groups; NUL in label value caused key collision", len(result))
+	}
+}
+
+// A rate window reaching below math.MinInt64 must clamp, not wrap into the far
+// future: the API accepts MinInt64 timestamps.
+func TestEvalInstant_Rate_WindowAtMinInt64Boundary(t *testing.T) {
+	engine, store := newEngineWithSamples(t)
+
+	labels := mustNewLabels(t, map[string]string{"__name__": "requests_total"})
+	_ = store.Append(labels, math.MinInt64, 0.0)
+	_ = store.Append(labels, math.MinInt64+30000, 30.0)
+
+	expr := metrics.RateExpr{
+		Selector: metrics.Selector{MetricName: "requests_total"},
+		WindowMs: 60000,
+	}
+	result, err := engine.EvalInstant(expr, math.MinInt64+30000)
+	if err != nil {
+		t.Fatalf("EvalInstant: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("len = %d, want 1", len(result))
+	}
+	if result[0].Value != 0.5 {
+		t.Errorf("rate = %v, want 0.5", result[0].Value)
+	}
+}
+
+func TestEvalRange_Rate_WindowAtMinInt64Boundary(t *testing.T) {
+	engine, store := newEngineWithSamples(t)
+
+	labels := mustNewLabels(t, map[string]string{"__name__": "requests_total"})
+	_ = store.Append(labels, math.MinInt64, 0.0)
+	_ = store.Append(labels, math.MinInt64+30000, 30.0)
+
+	expr := metrics.RateExpr{
+		Selector: metrics.Selector{MetricName: "requests_total"},
+		WindowMs: 60000,
+	}
+	start := int64(math.MinInt64 + 30000)
+	result, err := engine.EvalRange(expr, start, start, 30000)
+	if err != nil {
+		t.Fatalf("EvalRange: %v", err)
+	}
+	if len(result) != 1 || len(result[0].Points) != 1 {
+		t.Fatalf("result = %+v, want one series with one point", result)
+	}
+	if v := result[0].Points[0].Value; v != 0.5 {
+		t.Errorf("rate = %v, want 0.5", v)
 	}
 }
