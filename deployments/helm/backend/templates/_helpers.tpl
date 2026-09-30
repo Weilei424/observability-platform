@@ -32,8 +32,11 @@ chart's own name — the Service the grafana, producers, and prometheus charts
 point at — and every other component shares its prefix, truncated to 43
 characters so the longest names still fit: "<prefix>-ingester" is at most the 52
 a StatefulSet allows, and "<prefix>-ingester-headless" at most the 63 a Service
-allows. Each component's suffix is distinct, so truncating the prefix never
-makes two names collide.
+allows. Each component's suffix is distinct, so no two components collide; but
+the gateway keeps fullnameOverride whole, so an override that is itself a
+truncated prefix plus a component's suffix (43 characters, then "-store") would
+give that component the gateway's name. That render fails rather than emit two
+Services and two ConfigMaps of one name.
 */}}
 {{- define "backend.componentName" -}}
 {{- $root := index . 0 -}}
@@ -41,7 +44,12 @@ makes two names collide.
 {{- if eq $component "gateway" -}}
 {{- include "backend.name" $root -}}
 {{- else -}}
-{{- printf "%s-%s" (trimSuffix "-backend" (include "backend.name" $root) | trunc 43 | trimSuffix "-") $component -}}
+{{- $gateway := include "backend.name" $root -}}
+{{- $name := printf "%s-%s" (trimSuffix "-backend" $gateway | trunc 43 | trimSuffix "-") $component -}}
+{{- if eq $name $gateway -}}
+{{- fail (printf "fullnameOverride %q collides with the %s component's name in split mode; choose a name that does not end in \"-%s\" after 43 characters" $gateway $component $component) -}}
+{{- end -}}
+{{- $name -}}
 {{- end -}}
 {{- end -}}
 
