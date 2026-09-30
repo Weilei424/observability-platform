@@ -57,7 +57,9 @@ type k8sObject struct {
 		// without error, and is only interpreted as a flat string map where the
 		// caller has already checked Kind == "Service".
 		Selector map[string]any `yaml:"selector"`
-		Template struct {
+		// ServiceName is a StatefulSet's governing (headless) Service.
+		ServiceName string `yaml:"serviceName"`
+		Template    struct {
 			Metadata struct {
 				Labels      map[string]string `yaml:"labels"`
 				Annotations map[string]string `yaml:"annotations"`
