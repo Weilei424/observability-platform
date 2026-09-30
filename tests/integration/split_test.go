@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -45,16 +46,7 @@ func (p *process) start() {
 	if err != nil {
 		p.t.Fatalf("build %s: %v", p.cfg.Target, err)
 	}
-	var ln net.Listener
-	for range 50 { // the port was just released by stop(); give the OS a moment
-		if ln, err = net.Listen("tcp", p.cfg.HTTPAddr); err == nil {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if err != nil {
-		p.t.Fatalf("listen %s: %v", p.cfg.HTTPAddr, err)
-	}
+	ln := heldPortAt(p.t, p.cfg.HTTPAddr).serve()
 	ctx, cancel := context.WithCancel(context.Background())
 	p.app, p.cancel, p.done = a, cancel, make(chan struct{})
 	p.srv = &http.Server{Handler: a.Handler}
@@ -82,15 +74,107 @@ func (p *process) stop() {
 	p.app.Close()
 }
 
+// freeAddr reserves a loopback port for the rest of the test and returns its
+// address. The listener stays open the whole time — closing it and binding
+// again later would let any other socket on the machine take the port in
+// between — and each start of a process serves on it through heldPort.
 func freeAddr(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
-	return ln.Addr().String()
+	h := &heldPort{ln: ln}
+	addr := ln.Addr().String()
+	heldPorts.Store(addr, h)
+	go h.acceptLoop()
+	t.Cleanup(func() {
+		heldPorts.Delete(addr)
+		_ = ln.Close()
+	})
+	return addr
 }
+
+// heldPorts maps each address freeAddr reserved to its heldPort.
+var heldPorts sync.Map
+
+func heldPortAt(t *testing.T, addr string) *heldPort {
+	t.Helper()
+	h, ok := heldPorts.Load(addr)
+	if !ok {
+		t.Fatalf("no port reserved at %s: use freeAddr", addr)
+	}
+	return h.(*heldPort)
+}
+
+// heldPort is a listener that outlives the servers using it. One goroutine
+// accepts every connection and hands it to the server currently serving; while
+// none is (its process is stopped), it closes the connection at once, which a
+// peer's client sees as a transport error — an outage — just as it would a
+// refused connection.
+type heldPort struct {
+	ln  net.Listener
+	mu  sync.Mutex
+	cur *handoff
+}
+
+func (h *heldPort) acceptLoop() {
+	for {
+		conn, err := h.ln.Accept()
+		if err != nil {
+			return
+		}
+		h.mu.Lock()
+		cur := h.cur
+		h.mu.Unlock()
+		if cur == nil || !cur.deliver(conn) {
+			_ = conn.Close()
+		}
+	}
+}
+
+// serve returns a listener for one server's lifetime; the server's Shutdown
+// closes it, which stops only the handoff, never the held port.
+func (h *heldPort) serve() net.Listener {
+	l := &handoff{addr: h.ln.Addr(), conns: make(chan net.Conn), done: make(chan struct{})}
+	h.mu.Lock()
+	h.cur = l
+	h.mu.Unlock()
+	return l
+}
+
+// handoff is the net.Listener one http.Server serves on.
+type handoff struct {
+	addr  net.Addr
+	conns chan net.Conn
+	done  chan struct{}
+	once  sync.Once
+}
+
+func (l *handoff) deliver(c net.Conn) bool {
+	select {
+	case l.conns <- c:
+		return true
+	case <-l.done:
+		return false
+	}
+}
+
+func (l *handoff) Accept() (net.Conn, error) {
+	select {
+	case c := <-l.conns:
+		return c, nil
+	case <-l.done:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *handoff) Close() error {
+	l.once.Do(func() { close(l.done) })
+	return nil
+}
+
+func (l *handoff) Addr() net.Addr { return l.addr }
 
 type cluster struct {
 	gateway, ingester, querier, store, compactor    *process
