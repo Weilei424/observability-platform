@@ -41,11 +41,11 @@ services:
   ingester:
     restart: unless-stopped
     # Docker's default stop_grace_period is 10s: SIGTERM, then SIGKILL if the
-    # container hasn't exited by then. The ingester's graceful stop flushes its
-    # metrics head to the store (global-constraints.md: 30s flush-request
-    # timeout), so against a slow or loaded store the default grace period can
-    # SIGKILL it mid-flush. 45s covers the flush timeout with margin.
-    stop_grace_period: 45s
+    # container hasn't exited by then. The ingester's worst-case graceful stop is
+    # about 50s: a 10s HTTP drain, a 30s metrics flush batch, then a 10s logs
+    # flush. Against a slow or loaded store the default grace period can
+    # SIGKILL it mid-flush; 60s covers that with margin.
+    stop_grace_period: 60s
     build:
       context: ../../
       dockerfile: deployments/docker/Dockerfile
@@ -90,7 +90,7 @@ services:
     # Matches the ingester's stop_grace_period: a store stop mid-flush (an
     # ingester still delivering its 30s-timeout flush request) should finish
     # that request rather than be SIGKILLed by Docker's 10s default.
-    stop_grace_period: 45s
+    stop_grace_period: 60s
     build:
       context: ../../
       dockerfile: deployments/docker/Dockerfile
