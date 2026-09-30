@@ -80,6 +80,12 @@ These are properties of the whole system, not of the query languages.
   but there is one ingester and one store: no ring, no replication, no N-way
   query fanout, and no multi-tenancy. Those are Phases 6.2–6.5 in
   [`../planning/IMPLEMENTATION_PLAN.md`](../planning/IMPLEMENTATION_PLAN.md).
+- **Queries, selectors, and label names are capped at 128 KiB.** A `query`,
+  each `match[]`, or a `{name}` in a label-values path longer than 131072
+  bytes is refused with `400` (`bad_data` on the Prometheus routes), in every
+  topology. Split mode carries each one to the ingester and the store inside a
+  size-limited internal request, and all-in-one refuses the same inputs so the
+  two answer alike.
 - **No authentication or authorization.** Every endpoint is open to anyone who
   can reach the port; `internal/api/middleware/` contains request logging and
   metrics and nothing else. Exposing this beyond localhost or a trusted cluster
