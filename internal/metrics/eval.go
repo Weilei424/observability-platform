@@ -77,7 +77,7 @@ func scalarPoints(v float64, startMs, endMs, stepMs int64) []SamplePoint {
 }
 
 func (e *QueryEngine) rateInstant(ctx context.Context, x RateExpr, tMs int64) ([]InstantSample, error) {
-	series, err := e.src.Select(ctx, SelectParams{Selector: x.Selector, MinT: tMs - x.WindowMs, MaxT: tMs})
+	series, err := e.src.Select(ctx, SelectParams{Selector: x.Selector, MinT: saturatingSub(tMs, x.WindowMs), MaxT: tMs})
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +114,7 @@ func (e *QueryEngine) rateRange(ctx context.Context, x RateExpr, startMs, endMs,
 			for hi < len(sd.Samples) && sd.Samples[hi].TimestampMs <= t {
 				hi++
 			}
-			for lo < hi && sd.Samples[lo].TimestampMs < t-x.WindowMs {
+			for lo < hi && sd.Samples[lo].TimestampMs < saturatingSub(t, x.WindowMs) {
 				lo++
 			}
 			if hi-lo < 2 {
