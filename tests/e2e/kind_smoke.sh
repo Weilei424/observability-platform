@@ -505,8 +505,9 @@ fi
 # flushes this series to the store before it exits. Reading it back after the
 # ingester's own restart proves only that the series survived — the ingester
 # could equally have replayed it from its own WAL. Reading it back after the
-# store's restart is what actually proves the store received and persisted
-# the flushed chunk itself.
+# store's restart proves only that the marker survived a store restart: the
+# read merges the ingester's head, which may hold the marker or have replayed
+# it from its WAL, so it does not prove the store persisted the chunk.
 if [ "$TOPOLOGY" = split ]; then
     FLUSH_METRICS=""
     for i in $(seq 0 119); do
