@@ -8,7 +8,19 @@ import (
 	"time"
 
 	"github.com/masonwheeler/observability-platform/internal/metrics"
+	"github.com/masonwheeler/observability-platform/internal/rpc"
 )
+
+// checkSelectorLen refuses a query, match[] selector, or label name longer than
+// rpc.MaxSelectorBytes. Split mode carries each one to its peers in a
+// size-limited internal request, so every topology refuses the same inputs
+// here, with a 400, rather than split mode alone failing them further in.
+func checkSelectorLen(name, s string) error {
+	if len(s) > rpc.MaxSelectorBytes {
+		return fmt.Errorf("invalid parameter '%s': longer than %d bytes", name, rpc.MaxSelectorBytes)
+	}
+	return nil
+}
 
 // secondsToMillis converts float seconds to whole milliseconds. The int64
 // conversion is undefined for a float outside int64's range, so callers must
@@ -84,6 +96,10 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		writePromError(w, http.StatusBadRequest, "bad_data", "missing required parameter 'query'")
 		return
 	}
+	if err := checkSelectorLen("query", queryStr); err != nil {
+		writePromError(w, http.StatusBadRequest, "bad_data", err.Error())
+		return
+	}
 
 	var tMs int64
 	if raw := q.Get("time"); raw == "" {
@@ -141,6 +157,10 @@ func (s *Server) handleQueryRange(w http.ResponseWriter, r *http.Request) {
 	queryStr := q.Get("query")
 	if queryStr == "" {
 		writePromError(w, http.StatusBadRequest, "bad_data", "missing required parameter 'query'")
+		return
+	}
+	if err := checkSelectorLen("query", queryStr); err != nil {
+		writePromError(w, http.StatusBadRequest, "bad_data", err.Error())
 		return
 	}
 
