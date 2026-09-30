@@ -795,6 +795,7 @@ its assertions.
 - [x] Prometheus chart `topology` switch — scrapes every split component
 - [x] Chart tests — the split render lints; each Service selects only its component; ConfigMaps load and reach their peers; every probe path is a real route; the cross-chart contract holds through the gateway
 - [x] `kind_smoke.sh` topology switch — a by-value round trip across ingester and store restarts; `smoke-kind-split` in CI
+- [x] Long-name safety — `fullnameOverride` is capped at 52 characters (a longer one fails the render rather than silently renaming the Service other charts point at), and split component names truncate their prefix to 43 so `-ingester-headless` still fits a 63-character Service; `TestLongFullnameOverrideRendersValidDistinctNames` renders both topologies with long names under `helm lint --strict` (added after a Codex review found a 46-character override produced an invalid split Service and a 63-character one collapsed all five component names)
 
 **Docs**
 - [x] `docs/architecture/components.md` — responsibilities, data ownership, the flush, read, and compaction sequences, the no-gap argument, the failure matrix; Mermaid whose every node names a real symbol, file, or route
