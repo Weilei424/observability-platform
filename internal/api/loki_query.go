@@ -187,6 +187,10 @@ func (s *Server) parseLokiQueryParams(w http.ResponseWriter, r *http.Request) (q
 		writeLokiError(w, http.StatusBadRequest, "missing required parameter 'query'")
 		return "", 0, 0, false
 	}
+	if err := checkSelectorLen("query", queryStr); err != nil {
+		writeLokiError(w, http.StatusBadRequest, err.Error())
+		return "", 0, 0, false
+	}
 	limit, err := parseLokiLimit(q.Get("limit"))
 	if err != nil {
 		writeLokiError(w, http.StatusBadRequest, err.Error())
@@ -471,6 +475,10 @@ func (s *Server) handleLokiLabelValues(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := chi.URLParam(r, "name")
+	if err := checkSelectorLen("name", name); err != nil {
+		writeLokiError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	values, err := s.logQuery.LabelValues(r.Context(), name)
 	if err != nil {
 		writeLokiEvalError(w, r, "loki label values failed", err)
