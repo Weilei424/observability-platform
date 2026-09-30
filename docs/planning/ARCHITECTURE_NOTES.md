@@ -306,7 +306,7 @@ signals correlate.
 
 `deployments/docker/docker-compose.split.yml` runs the split topology (6.1) with the gateway
 aliased as `backend`, so every datasource, producer, and URL that names the backend reaches
-it unchanged. Its ingester and store get a 45 s `stop_grace_period`.
+it unchanged. Its ingester and store get a 60 s `stop_grace_period` (the ingester's worst-case graceful stop is about 50 s: 10 s HTTP drain, 30 s metrics flush batch, 10 s logs flush).
 
 Three provisioned dashboards: `obs-metrics-v1` (load generator), `obs-logs-v1` (sample
 app logs), `obs-sample-app-v1` (sample app metrics). Phase 5.3 adds a fourth for backend
@@ -478,6 +478,12 @@ and the chart refuses more than one until 6.2. The ingester and store set
 serves, owns, and calls is `docs/architecture/components.md`, and the internal wire
 format is `docs/api/internal.md`; this section records only the decisions that shaped
 them.
+
+Deliberate change to all-in-one's output: the compactor's "flush failed" and
+"final flush failed" lines (`internal/compactor/compactor.go`) went from WARN to
+ERROR in every target, all-in-one included, not just the split components. A
+failed block flush is an operator-visible fault, and the split topology needed
+it at ERROR; the level is not made target-dependent.
 
 - **One owner per data directory.** The ingester owns `metrics/wal`, `metrics/checkpoint`,
   `metrics/genfloor`, and `logs/wal`; the store owns `metrics/blocks`, `metrics/tmp`,
