@@ -125,6 +125,10 @@ These are properties of the whole system, not of the query languages.
 - **No all-in-one → split migration.** A split deployment starts from empty data
   directories or ones the split topology wrote; moving an all-in-one data
   directory into an ingester and a store is unsupported.
+- **Ingester volume loss resets the generation floor.** The ingester persists
+  its generation floor on its own volume. If that volume is lost while the store
+  survives, the floor restarts at 1, and later overwrites at already-flushed
+  timestamps lose to the older samples the store still holds.
 - **Split-mode reads move data.** Every in-range sample and log entry of every
   matching series or stream crosses the network to the querier before it
   filters and caps.
