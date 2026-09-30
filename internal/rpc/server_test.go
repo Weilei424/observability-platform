@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -100,6 +101,20 @@ func TestMetricsSelectRouteReportsASourceFailureAs500(t *testing.T) {
 	resp, body := post(t, srv.URL+"/internal/v1/metrics/select", `{"matchers":[],"min_ms":0,"max_ms":1}`)
 	if resp.StatusCode != http.StatusInternalServerError || !strings.Contains(body, "disk on fire") {
 		t.Fatalf("status %d body %s, want 500 carrying the cause", resp.StatusCode, body)
+	}
+}
+
+type cancelledMetrics struct{ metrics.Source }
+
+func (cancelledMetrics) Select(context.Context, metrics.SelectParams) ([]metrics.SeriesData, error) {
+	return nil, fmt.Errorf("select: %w", context.Canceled)
+}
+
+func TestMetricsSelectRouteReportsACallerCancelAs499(t *testing.T) {
+	srv := readsServer(t, cancelledMetrics{metrics.NewMemoryStore()}, emptyLogs{})
+	resp, _ := post(t, srv.URL+"/internal/v1/metrics/select", `{"matchers":[],"min_ms":0,"max_ms":1}`)
+	if resp.StatusCode != 499 {
+		t.Fatalf("status = %d, want 499", resp.StatusCode)
 	}
 }
 
