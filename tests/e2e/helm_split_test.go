@@ -2,6 +2,7 @@ package e2e_test
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os/exec"
 	"regexp"
@@ -73,8 +74,8 @@ func TestSplitTopologyRendersTheFiveComponents(t *testing.T) {
 	if got := names(objs, "Service"); !slices.Equal(got, wantSvcs) {
 		t.Errorf("Services = %v, want %v", got, wantSvcs)
 	}
-	if out, err := exec.Command("helm", "lint", backendChart, "--set", "topology=split").CombinedOutput(); err != nil {
-		t.Errorf("helm lint --set topology=split failed: %v\n%s", err, out)
+	if out, err := exec.Command("helm", "lint", "--strict", backendChart, "--set", "topology=split").CombinedOutput(); err != nil {
+		t.Errorf("helm lint --strict --set topology=split failed: %v\n%s", err, out)
 	}
 }
 
@@ -390,6 +391,89 @@ func TestSplitRejectsTemplateOwnedConfigKeys(t *testing.T) {
 		}
 		if !strings.Contains(string(out), "the chart decides each component's target and peer URLs") {
 			t.Errorf("--set-string %s failed without Task 12's message: %s", key, out)
+		}
+	}
+}
+
+// Kubernetes name limits the chart must respect: a Service name is a DNS-1035
+// label of at most 63 characters, and a StatefulSet name at most 52, because
+// its pods carry a controller-revision-hash label of the name plus an
+// 11-character suffix, and a label value is at most 63.
+var dns1035 = regexp.MustCompile(`^[a-z]([-a-z0-9]*[a-z0-9])?$`)
+
+const (
+	maxServiceName     = 63
+	maxStatefulSetName = 52
+)
+
+// A long fullnameOverride must still render valid, distinct names in both
+// topologies, and every name one object uses to reach another — a
+// StatefulSet's serviceName, a peer URL — must name a Service that exists.
+func TestLongFullnameOverrideRendersValidDistinctNames(t *testing.T) {
+	for _, name := range []string{
+		strings.Repeat("a", 52),              // the longest accepted
+		strings.Repeat("a", 44) + "-backend", // the same, with the "-backend" split names drop
+		strings.Repeat("a", 46),              // Codex's case: an over-long ingester headless Service
+	} {
+		for _, topology := range []string{"all-in-one", "split"} {
+			t.Run(fmt.Sprintf("%s/%d", topology, len(name)), func(t *testing.T) {
+				objs := render(t, backendChart, "topology="+topology, "fullnameOverride="+name)
+				seen := map[string]bool{}
+				services := map[string]bool{}
+				for _, o := range objs {
+					key := o.Kind + "/" + o.Metadata.Name
+					if seen[key] {
+						t.Errorf("two objects named %s", key)
+					}
+					seen[key] = true
+					if o.Kind == "Service" {
+						services[o.Metadata.Name] = true
+						if len(o.Metadata.Name) > maxServiceName || !dns1035.MatchString(o.Metadata.Name) {
+							t.Errorf("Service %q (%d chars) is not a DNS-1035 label of at most %d", o.Metadata.Name, len(o.Metadata.Name), maxServiceName)
+						}
+					}
+					if o.Kind == "StatefulSet" && len(o.Metadata.Name) > maxStatefulSetName {
+						t.Errorf("StatefulSet %q is %d chars, want at most %d", o.Metadata.Name, len(o.Metadata.Name), maxStatefulSetName)
+					}
+				}
+				if !services[name] {
+					t.Errorf("no Service named %q: the name other charts point at must be fullnameOverride exactly", name)
+				}
+				for _, o := range objs {
+					if o.Kind == "StatefulSet" && !services[o.Spec.ServiceName] {
+						t.Errorf("StatefulSet %s: serviceName %q is not a rendered Service", o.Metadata.Name, o.Spec.ServiceName)
+					}
+					if o.Kind != "ConfigMap" {
+						continue
+					}
+					for _, k := range []string{"OBS_INGESTER_URL", "OBS_STORE_URL", "OBS_QUERIER_URL"} {
+						if v := o.Data[k]; v != "" {
+							host := strings.Split(strings.TrimPrefix(v, "http://"), ":")[0]
+							if !services[host] {
+								t.Errorf("ConfigMap %s: %s = %q names no rendered Service", o.Metadata.Name, k, v)
+							}
+						}
+					}
+				}
+				if out, err := exec.Command("helm", "lint", "--strict", backendChart,
+					"--set", "topology="+topology, "--set", "fullnameOverride="+name).CombinedOutput(); err != nil {
+					t.Errorf("helm lint --strict: %v\n%s", err, out)
+				}
+			})
+		}
+	}
+}
+
+// fullnameOverride names the Service other charts point at, so it is never
+// truncated: one too long for the StatefulSet limit fails the render instead.
+func TestOverlongFullnameOverrideFailsTheRender(t *testing.T) {
+	helmAvailable(t)
+	for _, topology := range []string{"all-in-one", "split"} {
+		out, err := exec.Command("helm", "template", "obs", backendChart, "--set", "topology="+topology,
+			"--set", "fullnameOverride="+strings.Repeat("a", maxStatefulSetName+1)).CombinedOutput()
+		if err == nil || !strings.Contains(string(out), "fullnameOverride") {
+			t.Errorf("%s: a %d-char fullnameOverride rendered (err %v), want a failure naming fullnameOverride\n%.300s",
+				topology, maxStatefulSetName+1, err, out)
 		}
 	}
 }
