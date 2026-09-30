@@ -210,7 +210,7 @@ gateway through the querier to the ingester and store.
 
 - Compose: [../runbooks/split-demo.md](../runbooks/split-demo.md), from
   `deployments/docker/docker-compose.split.yml`. The ingester and store get a
-  45 s `stop_grace_period` there, long enough for a graceful stop to finish an
+  60 s `stop_grace_period` there, long enough for a graceful stop to finish an
   in-flight flush instead of being killed mid-write.
 - Kubernetes: the backend chart's `topology: split`; see
   [../../deployments/helm/README.md](../../deployments/helm/README.md). The
