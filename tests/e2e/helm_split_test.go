@@ -481,23 +481,35 @@ func TestOverlongFullnameOverrideFailsTheRender(t *testing.T) {
 
 // A split component's name truncates the shared prefix, so an override made of
 // that truncated prefix plus a component's own suffix would name the component
-// exactly what the gateway is named. Split mode refuses that render; all-in-one
-// has no component names and renders it.
+// exactly what the gateway is named. Two prefix lengths reach it: 43 characters
+// survive trunc 43 whole, and 42 do once trimSuffix drops the hyphen trunc 43
+// kept. Split mode refuses that render; all-in-one has no component names and
+// renders it.
 func TestFullnameOverrideCollidingWithAComponentFailsSplit(t *testing.T) {
 	helmAvailable(t)
 	for _, component := range []string{"ingester", "querier", "store", "compactor"} {
-		name := strings.Repeat("a", 43) + "-" + component
-		if len(name) > maxStatefulSetName {
-			continue // "-compactor": already refused by the length cap
+		for _, prefix := range []int{42, 43} {
+			name := strings.Repeat("a", prefix) + "-" + component
+			if len(name) > maxStatefulSetName {
+				continue // 43 + "-compactor": refused by the length cap instead
+			}
+			checkCollisionRefused(t, name, component)
 		}
-		out, err := exec.Command("helm", "template", "obs", backendChart, "--set", "topology=split",
-			"--set", "fullnameOverride="+name).CombinedOutput()
-		if err == nil || !strings.Contains(string(out), "collides") {
-			t.Errorf("split, fullnameOverride %q: rendered (err %v), want a failure saying it collides\n%.300s", name, err, out)
-		}
-		if _, err := exec.Command("helm", "template", "obs", backendChart, "--set", "topology=all-in-one",
-			"--set", "fullnameOverride="+name).CombinedOutput(); err != nil {
-			t.Errorf("all-in-one, fullnameOverride %q: %v, want it to render", name, err)
-		}
+	}
+}
+
+// checkCollisionRefused requires split mode to refuse fullnameOverride name for
+// colliding with component, and all-in-one to render it.
+func checkCollisionRefused(t *testing.T, name, component string) {
+	t.Helper()
+	out, err := exec.Command("helm", "template", "obs", backendChart, "--set", "topology=split",
+		"--set", "fullnameOverride="+name).CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "collides with the "+component+" component") {
+		t.Errorf("split, fullnameOverride %q: rendered (err %v), want a failure saying it collides with the %s component\n%.300s",
+			name, err, component, out)
+	}
+	if _, err := exec.Command("helm", "template", "obs", backendChart, "--set", "topology=all-in-one",
+		"--set", "fullnameOverride="+name).CombinedOutput(); err != nil {
+		t.Errorf("all-in-one, fullnameOverride %q: %v, want it to render", name, err)
 	}
 }
