@@ -47,7 +47,7 @@ Services and two ConfigMaps of one name.
 {{- $gateway := include "backend.name" $root -}}
 {{- $name := printf "%s-%s" (trimSuffix "-backend" $gateway | trunc 43 | trimSuffix "-") $component -}}
 {{- if eq $name $gateway -}}
-{{- fail (printf "fullnameOverride %q collides with the %s component's name in split mode; choose a name that does not end in \"-%s\" after 43 characters" $gateway $component $component) -}}
+{{- fail (printf "fullnameOverride %q collides with the %s component's name in split mode: its prefix, cut to 43 characters, plus \"-%s\" spells the override itself; choose another name" $gateway $component $component) -}}
 {{- end -}}
 {{- $name -}}
 {{- end -}}
