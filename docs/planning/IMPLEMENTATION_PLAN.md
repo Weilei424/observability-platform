@@ -552,18 +552,23 @@ closes the gap. It is a query-engine feature, so it was deliberately kept out of
 
 ### Phase 6.2 — Ring-Based Sharding
 
-**Goal:** Route writes to ingesters using a deterministic ring.
+**Goal:** Route writes to ingesters using a deterministic ring, with reads still complete across all of them.
 
 **Scope:**
-- Implement consistent hashing or ring assignment for series/stream IDs.
-- Add ingester membership configuration.
-- Route metrics/log writes based on series/stream fingerprint.
-- Add tests for stable placement and membership changes.
+- A token ring (128 tokens per member) over series and stream fingerprints.
+- Static ingester membership: a comma-separated `OBS_INGESTER_URL` on the gateway and querier; a change takes a restart.
+- The gateway validates writes with all-in-one's code and routes each series or stream to its owner over internal push routes.
+- The querier reads every ingester, then the store, merged with the existing rules.
+- Hybrid clock write generations (`max(previous + 1, now in µs)`), recorded in the WAL, so last-write-wins holds when a series moves between ingesters.
+- Three ingesters in the Compose and Helm split topologies.
 
 **DoD:**
 - Same series/stream routes to the same ingester while ring membership is stable.
-- Adding/removing an ingester only remaps part of the keyspace.
-- Tests cover ring edge cases.
+- Adding/removing an ingester only remaps part of the keyspace, and every read stays complete.
+- An overwrite of a moved series wins, also after its old owner replays.
+- Tests cover ring edge cases, routing outcomes, and a one-ingester outage.
+
+**Why the scope grew:** with writes on several ingesters, a querier reading one of them answers wrong, so reading every ingester (sequentially) moved here from 6.4; and 6.1 left per-ingester generations that a membership change would make incomparable.
 
 ### Phase 6.3 — Replication and Failure Handling
 
@@ -586,7 +591,7 @@ closes the gap. It is a query-engine feature, so it was deliberately kept out of
 **Goal:** Query data across multiple ingesters/stores.
 
 **Scope:**
-- Gateway/querier fans out query requests.
+- Gateway/querier fans out query requests in parallel (6.2 reads every ingester sequentially), pruning ingesters a selector cannot touch.
 - Merge metrics query results by series/time.
 - Merge log query results by timestamp.
 - Deduplicate replicated data.
