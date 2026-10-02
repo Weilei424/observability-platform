@@ -815,7 +815,8 @@ its assertions.
 **Hand-off to 6.2:** write generations are per-ingester counters. Once the ring can
 move a series between ingesters, two ingesters' generations for the same series are
 not comparable, so 6.2's design must choose a last-write-wins rule across ingesters
-before it allows membership changes.
+before it allows membership changes. *(6.2's design: hybrid clock generations recorded
+in the WAL — see Phase 6.2.)*
 
 **Deferred from 6.1** — unscheduled
 - [ ] Ingester backpressure and head limits — while the store is down the head and WALs grow without bound; the flush-failure counters and `obs_wal_bytes` make that visible, nothing limits it
@@ -826,13 +827,44 @@ before it allows membership changes.
 - [ ] Mixed-version rolling upgrades — `/internal/v1` carries no cross-version promise
 
 ### Phase 6.2 — Ring-Based Sharding
-- [ ] Implement ring assignment for series IDs
-- [ ] Implement ring assignment for stream IDs
-- [ ] Add ingester membership configuration
-- [ ] Route metric writes through ring
-- [ ] Route log writes through ring
-- [ ] Unit tests: stable placement
-- [ ] Unit tests: membership change remaps partial keyspace
+
+Design: `docs/superpowers/specs/2026-10-01-phase-6.2-ring-sharding-design.md`
+Plan: `docs/superpowers/plans/2026-10-01-phase-6.2-ring-sharding.md`
+
+More than one ingester makes a one-ingester read incomplete, so this phase also reads
+every ingester (6.4 keeps parallel fanout, pruning, and replica dedup), and resolves
+6.1's hand-off: last-write-wins across ingesters.
+
+**Ring**
+- [ ] `internal/ring` — 128 tokens per member, splitmix64-mixed keys, ties to the member sorting first; golden placement, balance (±25%), add/remove moving only the changed member's share, single member, edge keys
+- [ ] Series route by series fingerprint; streams by stream fingerprint, so a stream stays on one ingester
+
+**Generations**
+- [ ] Hybrid clock generations — `max(previous + 1, now in Unix µs)` in every target; injectable clock; step-back and floor tests
+- [ ] WAL record type 2 carrying the generation; replay restores it exactly; type-1 records still replay
+- [ ] Chunk bytes-per-sample cost of µs generations measured and recorded
+
+**Reads and configuration**
+- [ ] `MergeHeads` — every ingester read to completion, then the store; fails closed
+- [ ] `OBS_INGESTER_URL` takes a comma-separated list on the gateway and querier; duplicates, empty elements, and a comma in `OBS_STORE_URL`/`OBS_QUERIER_URL` refused
+
+**Writes**
+- [ ] Ingester push routes `POST /internal/v1/metrics/push` and `/logs/push`
+- [ ] Ring router — groups by owner, sends concurrently, worst outcome wins (`500` > `503` > `499`)
+- [ ] Gateway validates writes with all-in-one's handler code and routes them; the write proxy is removed
+- [ ] `obs_ring_members`, `obs_gateway_ingester_requests_total{ingester, outcome}`; the gateway owns the ingest rejection counters; startup `ring` hash on gateway and querier
+
+**Deployment**
+- [ ] Compose split runs three ingesters; scrape config and dashboard per ingester
+- [ ] Helm `split.ingester.replicas` (default 3) renders the ring list from pod DNS; the prometheus chart scrapes each ingester pod
+
+**Verification**
+- [ ] Verify: the same series or stream routes to the same ingester while membership is stable — `internal/ring` golden and order-independence tests
+- [ ] Verify: adding or removing an ingester remaps only part of the keyspace — ring unit tests, and the in-process 3 → 4 change with every read still complete
+- [ ] Verify: an overwrite of a moved series wins, also after its old owner replays its WAL
+- [ ] Verify: one ingester down — writes it owns `503`, other writes `204`, reads `503`; a retry after recovery reads back once
+- [ ] Verify: `make smoke-compose-split` with three ingesters, and the all-in-one smoke tests still green
+- [ ] Verify: kind split with three ingesters — closes in CI after a push
 
 ### Phase 6.3 — Replication and Failure Handling
 - [ ] Add configurable replication factor
