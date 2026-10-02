@@ -42,7 +42,7 @@ func New(members []string) (*Ring, error) {
 			return nil, errors.New("ring: empty member ID")
 		}
 		if i > 0 && sorted[i-1] == m {
-			return nil, fmt.Errorf("ring: duplicate member %q", m)
+			return nil, fmt.Errorf("ring: duplicate member at sorted position %d", i)
 		}
 	}
 	type token struct {
