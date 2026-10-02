@@ -149,11 +149,11 @@ func TestTokenTieGoesToTheMemberSortingFirst(t *testing.T) {
 }
 
 func TestNewRefusesBadLists(t *testing.T) {
-	for _, m := range [][]string{nil, {}, {""}, {"http://a:1", "http://a:1"}} {
+	for _, m := range [][]string{nil, {}, {""}, {"http://a:1", "http://a:1"}, {"http://u:secret@a:1", "http://u:secret@a:1"}} {
 		if _, err := New(m); err == nil {
 			t.Errorf("New(%q) succeeded, want an error", m)
-		} else if strings.Contains(err.Error(), "@") {
-			t.Errorf("error echoes a URL with credentials: %v", err)
+		} else if strings.Contains(err.Error(), "secret") {
+			t.Errorf("error echoes credentials: %v", err)
 		}
 	}
 }
