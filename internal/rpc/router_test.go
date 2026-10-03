@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/masonwheeler/observability-platform/internal/logs"
@@ -176,5 +177,16 @@ func TestRouterCanceledContext(t *testing.T) {
 func TestMemberLabel(t *testing.T) {
 	if got := MemberLabel("http://ingester-0.ingester-headless:8080"); got != "ingester-0.ingester-headless:8080" {
 		t.Errorf("MemberLabel = %q", got)
+	}
+}
+
+func TestRouterExpiredDeadlineIsUnavailable(t *testing.T) {
+	ings := startIngesters(t, 3, nil)
+	rt, _ := newTestRouter(t, ings, nil)
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	err := rt.PushSamples(ctx, samplesFor(t, 30))
+	if !errors.Is(err, ErrUnavailable) || !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want ErrUnavailable wrapping DeadlineExceeded", err)
 	}
 }
