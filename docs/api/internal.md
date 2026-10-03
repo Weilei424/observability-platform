@@ -10,8 +10,9 @@ component's own port. This is not a public API:
 - It carries no cross-version promise. A split deployment runs one binary
   version, and a protocol break becomes `/internal/v2`.
 
-The ingester serves the six read routes over its in-memory heads; the store
-serves them over its blocks and log chunks, plus five routes of its own. The
+The ingester serves the six read routes over its in-memory heads, plus the two
+push routes; the store serves the six over its blocks and log chunks, plus five
+routes of its own. The
 querier, ingester, and compactor call them through `internal/rpc`'s clients.
 
 ## Encoding
@@ -145,20 +146,41 @@ rather than silently replaced.
 
 ## Push — ingester only
 
-The gateway validates a write, then sends each ingester the part the ring
-assigns it. The ingester validates again; a malformed body answers `400`.
+The gateway validates a write itself, then sends each ingester the part the
+ring assigns it ([../architecture/components.md](../architecture/components.md)).
+The gateway is the only caller. The bodies are in the internal codec: strict
+decoding, label values as written, sample values as strings.
 
 ```http
 POST /internal/v1/metrics/push
 ```
 
-`{"series":[{"labels":{"__name__":"http_requests_total"},"samples":[[1758600000000,"1"]]}]}`
+`{"series":[{"labels":{"__name__":"http_requests_total"},"samples":[[1758600000000,"1"]]}]}` —
+each sample is `[timestamp_ms, "value"]`; the ingester assigns generations.
 
 ```http
 POST /internal/v1/logs/push
 ```
 
-`{"streams":[{"labels":{"service":"api"},"entries":[[1758600000000000000,"line"]]}]}`
+`{"streams":[{"labels":{"service":"api"},"entries":[[1758600000000000000,"line"]]}]}` —
+each entry is `[timestamp_ns, "line"]`.
+
+Both answer `204` with no body once every sample or entry is in the WAL and the
+head. The body is capped at 64 MiB, the flush cap: the public bodies are 1 MiB
+(metrics) and 4 MiB (logs) and re-encoding can only grow one by a small factor,
+so the cap never stops a valid push. A body over it is `413`.
+
+| Status | Meaning |
+|---|---|
+| `204` | accepted |
+| `400` | a malformed body, or labels the ingester refuses on its second validation |
+| `500` | the append failed |
+
+The ingester counts what it ingests, and counts only an append failure as a
+rejection (reason `append`); the gateway already counted any validation
+rejection. It does not check that it owns the keys. A `4xx` is a protocol bug and the
+gateway answers `500` for it; a transport error, a deadline, or a `5xx` is the
+ingester being unavailable and the gateway answers `503`.
 
 ## Block maintenance — store only, driven by the compactor
 
