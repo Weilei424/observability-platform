@@ -58,7 +58,8 @@ private WAL, so a query would see whichever shard it landed on.
 | `startupProbe.periodSeconds` | `5` | |
 | `startupProbe.failureThreshold` | `30` | Startup budget = `periodSeconds * failureThreshold` = 150s, the time WAL replay is allowed to take before the pod is killed. |
 | `topology` | `all-in-one` | `all-in-one` runs one StatefulSet. `split` runs the five components: Deployments for the gateway (which takes the Service name `observability-backend`), querier, and compactor; StatefulSets with their own PVCs for the ingester and store |
-| `split.<component>.replicas` | `1` | Gateway and querier may scale. The ingester, store, and compactor must stay at 1 until Phase 6.2; the chart refuses more |
+| `split.<component>.replicas` | `1` | Gateway and querier may scale. The store and compactor must stay at 1 (the store until Phase 6.4); the chart refuses more |
+| `split.ingester.replicas` | `3` | Ingester pods in the ring; at least 1, and the chart refuses less. The gateway and querier ConfigMaps render the same comma-separated `OBS_INGESTER_URL`, one `http://<ingester>-<i>.<ingester>-headless:<port>` per pod, so the two lists always match. A change rolls the gateway and querier through the ConfigMap checksum annotation on their Deployments. The prometheus chart's `split.targets.ingester` must list the same pods |
 | `split.<component>.resources` | see `values.yaml` | Per-component requests and limits |
 | `split.ingester.persistence.size`, `split.store.persistence.size` | `1Gi`, `2Gi` | PVC sizes; `persistence.storageClassName` applies to both |
 
@@ -68,6 +69,13 @@ peer can take about 50s (a 10s HTTP drain, a 30s metrics flush batch, and a 10s 
 Kubernetes would otherwise SIGKILL the pod mid-flush before it finishes. The
 Compose split gives the same two services a 60s `stop_grace_period` for the
 same reason; the chart's 60s adds headroom on top.
+
+The gateway exports `obs_ring_members` and
+`obs_gateway_ingester_requests_total{ingester,outcome}`, and the querier
+exports `obs_ring_members`; the gateway and querier also log `ring ready` with
+`members=N ring=<hash>` at startup, and equal hashes mean the same member set.
+Membership changes are in
+[../../docs/runbooks/split-demo.md](../../docs/runbooks/split-demo.md).
 
 `OBS_TARGET`, `OBS_INGESTER_URL`, `OBS_STORE_URL`, and `OBS_QUERIER_URL` are
 rendered by the chart from `topology` and are refused under `config` — setting
@@ -178,7 +186,7 @@ general-purpose monitoring stack.
 | `service.port` | `9090` | Prometheus HTTP port. Must match the port half of the grafana chart's `internals.url`. |
 | `backend.url` | `http://observability-backend:8080` | The scrape target. Same cross-chart claim as the grafana and producers charts' `backend.url` — must resolve to the backend chart's Service; see Cross-chart contract above. The ConfigMap builds the scrape target with `trimPrefix "http://" .Values.backend.url`, so the rendered target is a bare `host:port` — Prometheus rejects a `static_configs` target that still carries a URL scheme. |
 | `topology` | `all-in-one` | Match the backend chart. `split` scrapes every component in `split.targets`, each labelled with its `component` |
-| `split.targets` | the five split Services | Each URL is a claim about a Service the backend chart creates in split; `tests/e2e/helm_split_prometheus_test.go` checks them |
+| `split.targets` | the five split Services | Each URL is a claim about a Service the backend chart creates in split; `tests/e2e/helm_split_prometheus_test.go` checks them. `split.targets.ingester` is a **list**, one URL per ingester pod (`http://observability-ingester-<i>.observability-ingester-headless:8080`), and must match the backend chart's `split.ingester.replicas`; every URL of a component that lists several becomes its own scrape target |
 | `scrapeInterval` | `15s` | Matches the Compose Prometheus's `global.scrape_interval`. |
 | `retention` | `24h` | Passed straight through to `--storage.tsdb.retention.time`. Only matters relative to the emptyDir below — data this Prometheus holds does not survive a pod reschedule regardless of what this says. |
 | `resources.requests.cpu` | `100m` | |
