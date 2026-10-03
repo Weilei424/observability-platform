@@ -132,8 +132,10 @@ Membership is static; a change takes a restart of the gateway and the querier.
   then restart the gateway and querier without it. Anything a failed final
   flush left behind stays in that ingester's WAL and is not read until it
   rejoins ([../api/limitations.md](../api/limitations.md)).
-- The gateway's and querier's lists must match; Compose and Helm render both
-  from one source. A gateway writing to a member the querier does not read
+- The gateway's and querier's lists must match. Helm renders both from one
+  helper (`backend.ingesterURLs`); in Compose the two literal lists are edited
+  by hand and must be kept identical, and the `ring` hash in the two `ring
+  ready` startup lines confirms it. A gateway writing to a member the querier does not read
   hides those writes.
 
 ### Generations
