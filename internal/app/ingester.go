@@ -45,7 +45,7 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 	walDir := filepath.Join(cfg.DataDir, "metrics", "wal")
 	checkpoint := metrics.ReadCheckpoint(cfg.DataDir)
 	walLog.Info("WAL checkpoint", slog.Int("after_segment", checkpoint))
-	restored, err := replayMetricsWAL(walLog, walDir, checkpoint, head.Append)
+	restored, err := replayMetricsWAL(walLog, walDir, checkpoint, head.AppendGen)
 	if err != nil {
 		walLog.Error("WAL replay failed", slog.String("error", err.Error()))
 		return nil, err
