@@ -229,7 +229,8 @@ teardown() {
                 kubectl logs -n "$NS" \
                     -l "app.kubernetes.io/name=observability-backend,app.kubernetes.io/component=$component" \
                     --tail=40 --prefix 2>&1
-                # The ingester and store are the two pods this run restarts;
+                # The selector matches all three ingester pods; --prefix names
+                # each. The ingester and store are the components this run restarts;
                 # if the pre-restart container crashed rather than terminating
                 # cleanly, its logs live only under --previous. That flag
                 # errors when there is no previous container to read, which is
@@ -732,7 +733,7 @@ wait_for_port "prometheus port-forward is ready" 30 "http://localhost:19090/-/he
 prometheus_target_up() {
     local q want body
     if [ "$TOPOLOGY" = split ]; then
-        q='count(up{service="observability-platform"} == 1)'; want=5
+        q='count(up{service="observability-platform"} == 1)'; want=7
     else
         q='up{job="observability-platform-backend"}'; want=1
     fi
@@ -751,6 +752,36 @@ while [ $((SECONDS - start)) -lt 90 ]; do
     sleep 2
 done
 [ "$target_ok" -eq 1 ] || log_fail "in-cluster Prometheus never reported every scrape target up within 90s"
+
+# Split only: the ring spreads the producers' writes over all three ingesters.
+# The backend image is distroless (no shell or wget), so read each pod's
+# obs_samples_ingested_total through this same Prometheus, which scrapes every
+# pod by its DNS name (the instance label). Polled because the first scrape
+# after a write can lag by one interval. Mirrors compose_smoke.sh's check.
+if [ "$TOPOLOGY" = split ]; then
+    ingester_ingested() { # <pod> -> sample count on stdout, nonzero exit if none yet
+        local n
+        n="$(curl -s --max-time 10 -G "http://localhost:19090/api/v1/query" \
+            --data-urlencode "query=sum(obs_samples_ingested_total{instance=\"$1.observability-ingester-headless:8080\"})" 2>/dev/null \
+            | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null)"
+        echo "${n:-0}"
+        awk -v c="${n:-0}" 'BEGIN { exit !(c > 0) }'
+    }
+    for i in 0 1 2; do
+        pod="observability-ingester-$i"
+        COUNT=0
+        spread_start=$SECONDS
+        while [ $((SECONDS - spread_start)) -lt 45 ]; do
+            COUNT="$(ingester_ingested "$pod")" && break
+            sleep 3
+        done
+        if awk -v c="${COUNT:-0}" 'BEGIN { exit !(c > 0) }'; then
+            log_pass "$pod ingested ${COUNT} samples through the ring"
+        else
+            log_fail "$pod ingested no samples; the ring is not routing to it"
+        fi
+    done
+fi
 kill "$PF_PID" 2>/dev/null; PF_PID=""
 
 echo ""
