@@ -16,7 +16,18 @@ const (
 	prometheusSplitPath = "../../observability/prometheus/prometheus.split.yml"
 )
 
+// splitComponents are the component roles; composeServicesOf maps a role to
+// the Compose services that run it.
 var splitComponents = []string{"gateway", "ingester", "querier", "store", "compactor"}
+
+var composeIngesters = []string{"ingester-1", "ingester-2", "ingester-3"}
+
+func composeServicesOf(role string) []string {
+	if role == "ingester" {
+		return composeIngesters
+	}
+	return []string{role}
+}
 
 type composeSplitService struct {
 	Environment map[string]string `yaml:"environment"`
@@ -85,9 +96,11 @@ func TestComposeSplitGatewayAnswersAsBackend(t *testing.T) {
 func TestComposeSplitComponentsDoNotDependOnEachOther(t *testing.T) {
 	svcs := loadComposeSplit(t)
 	for _, c := range splitComponents {
-		for dep := range svcs[c].DependsOn {
-			if slices.Contains(splitComponents, dep) {
-				t.Errorf("%s depends_on %s; components must start in any order", c, dep)
+		for _, svc := range composeServicesOf(c) {
+			for dep := range svcs[svc].DependsOn {
+				if slices.Contains(splitComponents, dep) || slices.Contains(composeIngesters, dep) {
+					t.Errorf("%s depends_on %s; components must start in any order", svc, dep)
+				}
 			}
 		}
 	}
@@ -98,25 +111,27 @@ func TestComposeSplitComponentsDoNotDependOnEachOther(t *testing.T) {
 func TestComposeSplitComponentEnvironmentsLoad(t *testing.T) {
 	svcs := loadComposeSplit(t)
 	for _, c := range splitComponents {
-		t.Run(c, func(t *testing.T) {
-			env := svcs[c].Environment
-			if env["OBS_TARGET"] != c {
-				t.Fatalf("OBS_TARGET = %q, want %q", env["OBS_TARGET"], c)
-			}
-			// Viper treats an empty variable as unset, so "" restores a default —
-			// except OBS_DATA_DIR, which config reads with LookupEnv and refuses
-			// when empty. The stateless components do not set it; give it the default.
-			for _, k := range []string{"OBS_TARGET", "OBS_INGESTER_URL", "OBS_STORE_URL", "OBS_QUERIER_URL", "OBS_LOG_LEVEL", "OBS_LOGS_FLUSH_THRESHOLD_BYTES"} {
-				t.Setenv(k, "")
-			}
-			t.Setenv("OBS_DATA_DIR", "data")
-			for k, v := range env {
-				t.Setenv(k, v)
-			}
-			if _, err := config.Load(); err != nil {
-				t.Fatalf("config.Load with %s's environment: %v", c, err)
-			}
-		})
+		for _, svc := range composeServicesOf(c) {
+			t.Run(svc, func(t *testing.T) {
+				env := svcs[svc].Environment
+				if env["OBS_TARGET"] != c {
+					t.Fatalf("OBS_TARGET = %q, want %q", env["OBS_TARGET"], c)
+				}
+				// Viper treats an empty variable as unset, so "" restores a default —
+				// except OBS_DATA_DIR, which config reads with LookupEnv and refuses
+				// when empty. The stateless components do not set it; give it the default.
+				for _, k := range []string{"OBS_TARGET", "OBS_INGESTER_URL", "OBS_STORE_URL", "OBS_QUERIER_URL", "OBS_LOG_LEVEL", "OBS_LOGS_FLUSH_THRESHOLD_BYTES"} {
+					t.Setenv(k, "")
+				}
+				t.Setenv("OBS_DATA_DIR", "data")
+				for k, v := range env {
+					t.Setenv(k, v)
+				}
+				if _, err := config.Load(); err != nil {
+					t.Fatalf("config.Load with %s's environment: %v", svc, err)
+				}
+			})
+		}
 	}
 }
 
@@ -145,16 +160,34 @@ func TestPrometheusSplitScrapesEveryComponent(t *testing.T) {
 				if _, ok := svcs[host]; !ok {
 					t.Errorf("scrape target %s is not a service in %s", target, composeSplitPath)
 				}
-				if st.Labels["component"] != host || st.Labels["service"] != "observability-platform" {
-					t.Errorf("target %s labels = %v, want component=%s service=observability-platform", target, st.Labels, host)
+				role := host
+				if slices.Contains(composeIngesters, host) {
+					role = "ingester"
+				}
+				if st.Labels["component"] != role || st.Labels["service"] != "observability-platform" {
+					t.Errorf("target %s labels = %v, want component=%s service=observability-platform", target, st.Labels, role)
 				}
 				seen[host] = true
 			}
 		}
 	}
 	for _, c := range splitComponents {
-		if !seen[c] {
-			t.Errorf("%s does not scrape %s", prometheusSplitPath, c)
+		for _, svc := range composeServicesOf(c) {
+			if !seen[svc] {
+				t.Errorf("%s does not scrape %s", prometheusSplitPath, svc)
+			}
+		}
+	}
+}
+
+// The gateway and querier must route and read over the same members, and the
+// list must name exactly the Compose ingesters.
+func TestComposeSplitRingListsMatch(t *testing.T) {
+	svcs := loadComposeSplit(t)
+	want := "http://ingester-1:8080,http://ingester-2:8080,http://ingester-3:8080"
+	for _, c := range []string{"gateway", "querier"} {
+		if got := svcs[c].Environment["OBS_INGESTER_URL"]; got != want {
+			t.Errorf("%s OBS_INGESTER_URL = %q, want %q", c, got, want)
 		}
 	}
 }
