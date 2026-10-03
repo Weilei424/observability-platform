@@ -156,6 +156,59 @@ type wireChunkSeries struct {
 	Chunks [][]byte          `json:"chunks"`
 }
 
+// wirePushSample is [timestamp_ms, "value"]: a sample the ingester has not yet
+// given a generation. The value is a string for the reason wireSample's is.
+type wirePushSample struct {
+	T int64
+	V float64
+}
+
+func (s wirePushSample) MarshalJSON() ([]byte, error) {
+	b := make([]byte, 0, 40)
+	b = append(b, '[')
+	b = strconv.AppendInt(b, s.T, 10)
+	b = append(b, ',', '"')
+	b = strconv.AppendFloat(b, s.V, 'g', -1, 64)
+	return append(b, '"', ']'), nil
+}
+
+func (s *wirePushSample) UnmarshalJSON(data []byte) error {
+	var raw []json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("rpc: push sample: %w", err)
+	}
+	if len(raw) != 2 {
+		return fmt.Errorf("rpc: push sample must be [timestamp, value], got %d elements", len(raw))
+	}
+	if err := json.Unmarshal(raw[0], &s.T); err != nil {
+		return fmt.Errorf("rpc: push sample timestamp: %w", err)
+	}
+	var v string
+	if err := json.Unmarshal(raw[1], &v); err != nil {
+		return fmt.Errorf("rpc: push sample value: %w", err)
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return fmt.Errorf("rpc: push sample value %q: %w", v, err)
+	}
+	s.V = f
+	return nil
+}
+
+type wirePushSeries struct {
+	Labels  map[string]string `json:"labels"`
+	Samples []wirePushSample  `json:"samples"`
+}
+
+type metricsPushRequest struct {
+	Series []wirePushSeries `json:"series"`
+}
+
+// logsPushRequest reuses wireStream: [timestamp_ns, "line"] entries per stream.
+type logsPushRequest struct {
+	Streams []wireStream `json:"streams"`
+}
+
 type wireBlockInfo struct {
 	ID        string `json:"id"`
 	Level     int    `json:"level"`
