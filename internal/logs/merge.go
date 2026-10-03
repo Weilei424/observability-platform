@@ -8,7 +8,7 @@ import (
 )
 
 // Merge returns a Source that reads first to completion, then second, and
-// merges per stream. The querier uses Merge(ingester, store), for the reason
+// merges per stream. The querier uses Merge(MergeHeads(ingesters...), store), for the reason
 // metrics.Merge gives: the store makes flushed chunks readable before it
 // acknowledges, and the ingester drops entries only afterwards, so reading the
 // ingester first cannot miss an entry in flight.
@@ -88,4 +88,19 @@ func unionStrings(a, b []string) []string {
 		set[s] = struct{}{}
 	}
 	return sortedKeys(set)
+}
+
+// MergeHeads folds every ingester into one Source that reads them in order,
+// each to completion before the next. Between two heads, mergeEntries puts the
+// later head's entries ahead at an equal timestamp, and across ingesters no
+// order is defined; (ts, line) duplicates collapse. Any head failing fails the
+// read.
+func MergeHeads(heads ...Source) Source {
+	if len(heads) == 0 {
+		panic("logs: MergeHeads needs at least one head")
+	}
+	if len(heads) == 1 {
+		return heads[0]
+	}
+	return Merge(heads[0], MergeHeads(heads[1:]...))
 }
