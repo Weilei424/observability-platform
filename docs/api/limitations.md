@@ -88,8 +88,9 @@ These are properties of the whole system, not of the query languages.
 - **A gateway and querier list mismatch hides writes.** If the gateway routes
   to an ingester the querier does not read, those writes are never returned.
   Both log `ring ready` with `ring=<hash>` of the sorted member list at
-  startup: compare the two hashes. Compose and Helm render both lists from one
-  source.
+  startup: compare the two hashes. Helm renders both lists from one
+  helper; in Compose the two lists are edited by hand and must be kept
+  identical.
 - **Ingesters are read one after another.** The querier reads every ingester in
   turn, then the store, so read latency grows with the number of ingesters.
   Parallel fanout is Phase 6.4.
