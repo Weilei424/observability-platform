@@ -22,7 +22,20 @@ func buildGateway(cfg *config.Config, log *slog.Logger) (*App, error) {
 		mainLog.Error("failed to build ingester ring", slog.String("error", err.Error()))
 		return nil, err
 	}
-	router, err := rpc.NewRouter(members, nil)
+	// The gateway validates writes, so it owns the ingest counters' rejections;
+	// the ingesters count what lands.
+	reg, inst := observability.NewRegistry(observability.RegistryOptions{
+		Omit: observability.AllGroups &^ observability.IngestGroup, Logger: log,
+	})
+	rm := observability.NewRingMetrics()
+	labels := make([]string, 0, len(members.Members()))
+	for _, m := range members.Members() {
+		labels = append(labels, rpc.MemberLabel(m))
+	}
+	rm.Register(reg, labels, true)
+	router, err := rpc.NewRouter(members, func(member, outcome string) {
+		rm.IngesterRequests.WithLabelValues(member, outcome).Inc()
+	})
 	if err != nil {
 		err = fmt.Errorf("app: write router: %w", err)
 		mainLog.Error("failed to build write router", slog.String("error", err.Error()))
@@ -34,15 +47,22 @@ func buildGateway(cfg *config.Config, log *slog.Logger) (*App, error) {
 		mainLog.Error("failed to parse querier URL", slog.String("error", err.Error()))
 		return nil, err
 	}
-	reg, inst := observability.NewRegistry(observability.RegistryOptions{Omit: observability.AllGroups, Logger: log})
+	logRing(mainLog, members)
 	srv := api.New(api.Deps{
 		Config:    cfg,
 		Logger:    log,
 		Registry:  reg,
 		HTTP:      inst.HTTP,
+		Ingest:    inst.Ingest,
 		Ready:     alwaysReady,
 		Upstreams: &api.Upstreams{Querier: querier},
 		Writes:    router,
 	})
 	return &App{Target: config.TargetGateway, Handler: srv, log: log}, nil
+}
+
+// logRing logs the ring's size and member-set hash. The gateway and querier
+// log the same hash exactly when they route and read over the same set.
+func logRing(mainLog *slog.Logger, r *ring.Ring) {
+	mainLog.Info("ring ready", slog.Int("members", len(r.Members())), slog.String("ring", r.Hash()))
 }
