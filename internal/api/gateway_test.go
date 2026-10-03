@@ -3,7 +3,6 @@ package api_test
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -66,15 +65,15 @@ func recordingUpstream(t *testing.T) (*httptest.Server, func() []seenRequest) {
 	return srv, func() []seenRequest { mu.Lock(); defer mu.Unlock(); return append([]seenRequest(nil), seen...) }
 }
 
-func gateway(t *testing.T, ingester, querier string, logTo io.Writer) *api.Server {
+func gateway(t *testing.T, querier string, logTo io.Writer) *api.Server {
 	t.Helper()
-	iu, _ := url.Parse(ingester)
 	qu, _ := url.Parse(querier)
 	return api.New(api.Deps{
 		Config:    &config.Config{DataDir: t.TempDir()},
 		Logger:    slog.New(slog.NewJSONHandler(logTo, nil)),
 		Ready:     func() error { return nil },
-		Upstreams: &api.Upstreams{Ingester: iu, Querier: qu},
+		Upstreams: &api.Upstreams{Querier: qu},
+		Writes:    &fakeRouter{},
 	})
 }
 
@@ -93,51 +92,33 @@ func TestGatewayServesExactlyTheAllInOneRouteTable(t *testing.T) {
 	store := metrics.NewMemoryStore()
 	aio := api.New(api.Deps{Config: &config.Config{DataDir: t.TempDir()}, Logger: quiet(),
 		Ingester: store, Engine: metrics.NewQueryEngine(store), LogIngester: logs.NewMemoryStore()})
-	gw := gateway(t, "http://127.0.0.1:1", "http://127.0.0.1:1", io.Discard)
+	gw := gateway(t, "http://127.0.0.1:1", io.Discard)
 	if a, g := routeTable(t, aio.Router()), routeTable(t, gw.Router()); !slices.Equal(a, g) {
 		t.Fatalf("route tables differ:\n all-in-one %v\n gateway    %v", a, g)
 	}
 }
 
 func TestGatewayRoutesByFamilyWithOneRequestID(t *testing.T) {
-	ing, ingSeen := recordingUpstream(t)
 	qry, qrySeen := recordingUpstream(t)
 	var logs bytes.Buffer
-	gw := gateway(t, ing.URL, qry.URL, &logs)
+	gw := gateway(t, qry.URL, &logs)
 
-	rec := httptest.NewRecorder()
-	gw.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/ingest/metrics", strings.NewReader(`{"metrics":[]}`)))
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("proxied ingest = %d", rec.Code)
-	}
 	gw.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/v1/query?query=up&time=1", nil))
 	gw.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/loki/api/v1/labels", nil))
 
-	i := ingSeen()
-	if len(i) != 1 || i[0].path != "/api/v1/ingest/metrics" || i[0].body != `{"metrics":[]}` {
-		t.Fatalf("ingester saw %+v", i)
-	}
 	q := qrySeen()
 	if len(q) != 2 || q[0].path != "/api/v1/query" || q[0].rawQuery != "query=up&time=1" || q[1].path != "/loki/api/v1/labels" {
 		t.Fatalf("querier saw %+v", q)
 	}
-	if i[0].requestID == "" || !strings.Contains(logs.String(), `"request_id":"`+i[0].requestID+`"`) {
-		t.Fatalf("upstream request ID %q is not the gateway's own; gateway log:\n%s", i[0].requestID, logs.String())
+	if q[0].requestID == "" || !strings.Contains(logs.String(), `"request_id":"`+q[0].requestID+`"`) {
+		t.Fatalf("upstream request ID %q is not the gateway's own; gateway log:\n%s", q[0].requestID, logs.String())
 	}
 }
 
 func TestGatewayAnswersAnOutageInEachFamilysShape(t *testing.T) {
-	gw := gateway(t, "http://127.0.0.1:1", "http://127.0.0.1:1", io.Discard)
+	gw := gateway(t, "http://127.0.0.1:1", io.Discard)
 
 	rec := httptest.NewRecorder()
-	gw.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/ingest/metrics", strings.NewReader(`{}`)))
-	var write map[string]string
-	_ = json.Unmarshal(rec.Body.Bytes(), &write)
-	if rec.Code != http.StatusServiceUnavailable || write["error"] != "ingester unavailable" {
-		t.Errorf("write outage = %d %s", rec.Code, rec.Body.String())
-	}
-
-	rec = httptest.NewRecorder()
 	gw.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/query?query=up", nil))
 	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), `"errorType":"unavailable"`) {
 		t.Errorf("Prometheus outage = %d %s", rec.Code, rec.Body.String())
@@ -152,7 +133,7 @@ func TestGatewayAnswersAnOutageInEachFamilysShape(t *testing.T) {
 
 func TestGatewayPassesUpstreamAnswersThrough(t *testing.T) {
 	qry, _ := recordingUpstream(t)
-	gw := gateway(t, "http://127.0.0.1:1", qry.URL, io.Discard)
+	gw := gateway(t, qry.URL, io.Discard)
 	rec := httptest.NewRecorder()
 	gw.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/query?query=fail400", nil))
 	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "upstream says no") {
@@ -161,13 +142,12 @@ func TestGatewayPassesUpstreamAnswersThrough(t *testing.T) {
 }
 
 func TestGatewayNeverProxiesInternalRoutes(t *testing.T) {
-	ing, ingSeen := recordingUpstream(t)
 	qry, qrySeen := recordingUpstream(t)
-	gw := gateway(t, ing.URL, qry.URL, io.Discard)
+	gw := gateway(t, qry.URL, io.Discard)
 	rec := httptest.NewRecorder()
 	gw.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/internal/v1/metrics/labels", nil))
-	if rec.Code != http.StatusNotFound || len(ingSeen())+len(qrySeen()) != 0 {
-		t.Fatalf("/internal via the gateway = %d, upstream requests %d; want 404 and none", rec.Code, len(ingSeen())+len(qrySeen()))
+	if rec.Code != http.StatusNotFound || len(qrySeen()) != 0 {
+		t.Fatalf("/internal via the gateway = %d, upstream requests %d; want 404 and none", rec.Code, len(qrySeen()))
 	}
 }
 
@@ -177,11 +157,11 @@ func TestGatewayNeverProxiesInternalRoutes(t *testing.T) {
 // panics at construction instead of silently building a gateway that proxies
 // only some routes (a RoutesRead or RoutesWrite Deps) or none at all
 // (RoutesNone), or that would nil-dereference inside SetURL on its first
-// proxied request (a nil Ingester or Querier URL).
+// proxied request (a nil Querier URL).
 func TestNewPanicsWhenGatewayMisconfigured(t *testing.T) {
 	u := func() *url.URL { u, _ := url.Parse("http://127.0.0.1:1"); return u }
 	base := func() api.Deps {
-		return api.Deps{Config: &config.Config{DataDir: t.TempDir()}, Logger: quiet()}
+		return api.Deps{Config: &config.Config{DataDir: t.TempDir()}, Logger: quiet(), Writes: &fakeRouter{}}
 	}
 
 	cases := []struct {
@@ -191,29 +171,24 @@ func TestNewPanicsWhenGatewayMisconfigured(t *testing.T) {
 		{"RoutesWrite", func() api.Deps {
 			d := base()
 			d.Routes = api.RoutesWrite
-			d.Upstreams = &api.Upstreams{Ingester: u(), Querier: u()}
+			d.Upstreams = &api.Upstreams{Querier: u()}
 			return d
 		}()},
 		{"RoutesRead", func() api.Deps {
 			d := base()
 			d.Routes = api.RoutesRead
-			d.Upstreams = &api.Upstreams{Ingester: u(), Querier: u()}
+			d.Upstreams = &api.Upstreams{Querier: u()}
 			return d
 		}()},
 		{"RoutesNone", func() api.Deps {
 			d := base()
 			d.Routes = api.RoutesNone
-			d.Upstreams = &api.Upstreams{Ingester: u(), Querier: u()}
-			return d
-		}()},
-		{"nil Ingester", func() api.Deps {
-			d := base()
 			d.Upstreams = &api.Upstreams{Querier: u()}
 			return d
 		}()},
 		{"nil Querier", func() api.Deps {
 			d := base()
-			d.Upstreams = &api.Upstreams{Ingester: u()}
+			d.Upstreams = &api.Upstreams{}
 			return d
 		}()},
 	}
@@ -245,7 +220,7 @@ func TestGatewayClientCancelDuringUpstreamCallIs499(t *testing.T) {
 	defer qry.Close()
 
 	var logBuf syncBuffer
-	gw := gateway(t, "http://127.0.0.1:1", qry.URL, &logBuf)
+	gw := gateway(t, qry.URL, &logBuf)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/query?query=up", nil).WithContext(ctx)
@@ -315,7 +290,7 @@ func TestGatewayMidStreamClientCancelIsNotRecordedAsServerError(t *testing.T) {
 	defer qry.Close()
 
 	var logBuf syncBuffer
-	gw := gateway(t, "http://127.0.0.1:1", qry.URL, &logBuf)
+	gw := gateway(t, qry.URL, &logBuf)
 	gwSrv := httptest.NewServer(gw)
 	defer gwSrv.Close()
 
@@ -361,7 +336,7 @@ func TestGatewayMidStreamClientCancelIsNotRecordedAsServerError(t *testing.T) {
 // peer-outage logging convention, not Warn.
 func TestGatewayLogsAnUnavailableUpstreamAtError(t *testing.T) {
 	var logBuf syncBuffer
-	gw := gateway(t, "http://127.0.0.1:1", "http://127.0.0.1:1", &logBuf)
+	gw := gateway(t, "http://127.0.0.1:1", &logBuf)
 	gw.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/v1/query?query=up", nil))
 	if !strings.Contains(logBuf.String(), `"level":"ERROR"`) || !strings.Contains(logBuf.String(), "upstream unavailable") {
 		t.Fatalf("unreachable upstream was not logged at ERROR under component gateway: %s", logBuf.String())
@@ -376,7 +351,7 @@ func TestGatewayLogsAnUnavailableUpstreamAtError(t *testing.T) {
 // unchanged rather than "fixing" them into something the client didn't send.
 func TestGatewayForwardsRawQueryByteForByte(t *testing.T) {
 	qry, qrySeen := recordingUpstream(t)
-	gw := gateway(t, "http://127.0.0.1:1", qry.URL, io.Discard)
+	gw := gateway(t, qry.URL, io.Discard)
 
 	const rawQuery = "query=up&time=1;"
 	rec := httptest.NewRecorder()
@@ -393,11 +368,10 @@ func TestGatewayForwardsRawQueryByteForByte(t *testing.T) {
 // (rather than a hand-picked sample) so a route added to all-in-one and
 // picked up here automatically cannot silently go unrouted or answer the
 // wrong outage shape. For every method+pattern it asserts both that the
-// request reaches the correct upstream (writes to the ingester, reads to the
-// querier, and only that one) and that the family's own 503 shape is used
+// request reaches the correct upstream (reads to the querier) and that the family's own 503 shape is used
 // when that upstream is unreachable.
 func TestGatewayRoutesEveryRouteAndAnswers503PerFamily(t *testing.T) {
-	probe := gateway(t, "http://127.0.0.1:1", "http://127.0.0.1:1", io.Discard)
+	probe := gateway(t, "http://127.0.0.1:1", io.Discard)
 
 	type route struct{ method, path string }
 	var routes []route
@@ -408,19 +382,18 @@ func TestGatewayRoutesEveryRouteAndAnswers503PerFamily(t *testing.T) {
 		case strings.HasPrefix(pattern, "/internal"):
 			return nil
 		}
-		routes = append(routes, route{method, strings.TrimSuffix(pattern, "/")})
+		trimmed := strings.TrimSuffix(pattern, "/")
+		if trimmed == "/api/v1/ingest/metrics" || trimmed == "/loki/api/v1/push" {
+			return nil // writes are validated and routed locally; see gateway_write_test.go
+		}
+		routes = append(routes, route{method, trimmed})
 		return nil
 	})
 	if len(routes) == 0 {
 		t.Fatal("chi.Walk found no data routes to test")
 	}
 
-	isWrite := func(path string) bool {
-		return path == "/api/v1/ingest/metrics" || path == "/loki/api/v1/push"
-	}
-	isLokiRead := func(path string) bool {
-		return strings.HasPrefix(path, "/loki/") && !isWrite(path)
-	}
+	isLokiRead := func(path string) bool { return strings.HasPrefix(path, "/loki/") }
 
 	for _, rt := range routes {
 		rt := rt
@@ -428,33 +401,21 @@ func TestGatewayRoutesEveryRouteAndAnswers503PerFamily(t *testing.T) {
 			path := strings.ReplaceAll(rt.path, "{name}", "job")
 
 			// The request reaches the right upstream, and only that one.
-			ing, ingSeen := recordingUpstream(t)
 			qry, qrySeen := recordingUpstream(t)
-			up := gateway(t, ing.URL, qry.URL, io.Discard)
+			up := gateway(t, qry.URL, io.Discard)
 			up.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(rt.method, path, strings.NewReader(`{}`)))
-			if isWrite(path) {
-				if len(ingSeen()) != 1 || len(qrySeen()) != 0 {
-					t.Fatalf("%s %s: ingester saw %d request(s), querier saw %d; want 1 and 0", rt.method, path, len(ingSeen()), len(qrySeen()))
-				}
-			} else {
-				if len(qrySeen()) != 1 || len(ingSeen()) != 0 {
-					t.Fatalf("%s %s: querier saw %d request(s), ingester saw %d; want 1 and 0", rt.method, path, len(qrySeen()), len(ingSeen()))
-				}
+			if len(qrySeen()) != 1 {
+				t.Fatalf("%s %s: querier saw %d request(s); want 1", rt.method, path, len(qrySeen()))
 			}
 
 			// An unreachable upstream answers 503 in that family's own shape.
-			down := gateway(t, "http://127.0.0.1:1", "http://127.0.0.1:1", io.Discard)
+			down := gateway(t, "http://127.0.0.1:1", io.Discard)
 			rec := httptest.NewRecorder()
 			down.ServeHTTP(rec, httptest.NewRequest(rt.method, path, strings.NewReader(`{}`)))
 			if rec.Code != http.StatusServiceUnavailable {
 				t.Fatalf("%s %s outage = %d, want 503", rt.method, path, rec.Code)
 			}
 			switch {
-			case isWrite(path):
-				var body map[string]string
-				if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body["error"] != "ingester unavailable" {
-					t.Fatalf("%s %s outage body = %q, want the ingester-unavailable shape", rt.method, path, rec.Body.String())
-				}
 			case isLokiRead(path):
 				if rec.Body.String() != "querier unavailable" {
 					t.Fatalf("%s %s outage body = %q, want the plain-text querier-unavailable shape", rt.method, path, rec.Body.String())
@@ -483,7 +444,7 @@ func TestGatewayPassesThroughTheQueriersOwnOutageBody(t *testing.T) {
 	}))
 	defer qry.Close()
 
-	gw := gateway(t, "http://127.0.0.1:1", qry.URL, io.Discard)
+	gw := gateway(t, qry.URL, io.Discard)
 	rec := httptest.NewRecorder()
 	gw.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/query?query=up", nil))
 	if rec.Code != http.StatusServiceUnavailable || rec.Body.String() != body {
