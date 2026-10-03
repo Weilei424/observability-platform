@@ -11,11 +11,12 @@ import (
 
 // replayMetricsWAL replays walDir after checkpoint through appendFn, warning
 // about and skipping records that no longer validate. It returns the number of
-// samples restored. All-in-one replays into its BlockStore and the ingester
+// samples restored.
+// Each record's write generation is restored exactly, not reassigned. All-in-one replays into its BlockStore and the ingester
 // into its HeadStore; both then set the head fence to checkpoint+1.
-func replayMetricsWAL(walLog *slog.Logger, walDir string, checkpoint int, appendFn func(metrics.Labels, int64, float64) error) (int, error) {
+func replayMetricsWAL(walLog *slog.Logger, walDir string, checkpoint int, appendFn func(metrics.Labels, int64, float64, int64) error) (int, error) {
 	var restored int
-	err := wal.ReplayFrom(walDir, checkpoint, func(pairs []wal.LabelPair, tsMs int64, value float64) {
+	err := wal.ReplayFromGen(walDir, checkpoint, func(pairs []wal.LabelPair, tsMs int64, value float64, gen int64) {
 		lm := make(map[string]string, len(pairs))
 		for _, p := range pairs {
 			lm[p.Name] = p.Value
@@ -25,7 +26,7 @@ func replayMetricsWAL(walLog *slog.Logger, walDir string, checkpoint int, append
 			walLog.Warn("WAL replay: skipping record with invalid labels", slog.String("error", err.Error()))
 			return
 		}
-		if err := appendFn(labels, tsMs, value); err != nil {
+		if err := appendFn(labels, tsMs, value, gen); err != nil {
 			walLog.Warn("WAL replay: failed to append sample", slog.String("error", err.Error()))
 			return
 		}
