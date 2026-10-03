@@ -1,15 +1,35 @@
-# The split topology: the five components as separate containers, with Grafana,
+# The split topology: the five components as separate containers (three
+# ingesters behind a ring), with Grafana,
 # Prometheus, and both producers exactly as in docker-compose.yml. The gateway
 # answers as `backend` on the Compose network, so every datasource, producer, and
 # runbook URL that names the backend reaches it unchanged — Grafana cannot tell
 # the difference, which tests/e2e/compose_smoke.sh checks.
 #
-# Every durable directory has one owner: the ingester keeps the WALs, the store
+# Every durable directory has one owner: each ingester keeps its own WALs, the store
 # keeps blocks and log chunks. No volume is shared between components.
 #
 # The components have no depends_on between one another, on purpose: each must
 # start with its peers down (tests/e2e/compose_split_test.go pins that).
 name: observability-platform-split
+
+x-ingester: &ingester
+  restart: unless-stopped
+  # Docker's default stop_grace_period is 10s: SIGTERM, then SIGKILL if the
+  # container hasn't exited by then. The ingester's worst-case graceful stop is
+  # about 50s: a 10s HTTP drain, a 30s metrics flush batch, then a 10s logs
+  # flush. Against a slow or loaded store the default grace period can
+  # SIGKILL it mid-flush; 60s covers that with margin.
+  stop_grace_period: 60s
+  build:
+    context: ../../
+    dockerfile: deployments/docker/Dockerfile
+    target: backend
+  healthcheck:
+    test: ["CMD", "/server", "-healthcheck"]
+    interval: 5s
+    timeout: 3s
+    retries: 12
+    start_period: 5s
 
 services:
   gateway:
@@ -21,7 +41,8 @@ services:
     environment:
       OBS_TARGET: gateway
       OBS_LOG_LEVEL: info
-      OBS_INGESTER_URL: http://ingester:8080
+      # The ring's members. Both lists must match: the gateway writes where the querier reads (spec §7).
+      OBS_INGESTER_URL: http://ingester-1:8080,http://ingester-2:8080,http://ingester-3:8080
       OBS_QUERIER_URL: http://querier:8080
     # Loopback only, as in docker-compose.yml. The gateway is the only component
     # published at all: the internal API on every other one stays on the
@@ -38,19 +59,9 @@ services:
       retries: 12
       start_period: 5s
 
-  ingester:
-    restart: unless-stopped
-    # Docker's default stop_grace_period is 10s: SIGTERM, then SIGKILL if the
-    # container hasn't exited by then. The ingester's worst-case graceful stop is
-    # about 50s: a 10s HTTP drain, a 30s metrics flush batch, then a 10s logs
-    # flush. Against a slow or loaded store the default grace period can
-    # SIGKILL it mid-flush; 60s covers that with margin.
-    stop_grace_period: 60s
-    build:
-      context: ../../
-      dockerfile: deployments/docker/Dockerfile
-      target: backend
-    environment:
+  ingester-1:
+    <<: *ingester
+    environment: &ingester-env
       OBS_TARGET: ingester
       OBS_DATA_DIR: /data
       OBS_LOG_LEVEL: info
@@ -59,13 +70,19 @@ services:
       # would never flush, and the store's chunk path would never run.
       OBS_LOGS_FLUSH_THRESHOLD_BYTES: "16384"
     volumes:
-      - obs-ingester-data:/data
-    healthcheck:
-      test: ["CMD", "/server", "-healthcheck"]
-      interval: 5s
-      timeout: 3s
-      retries: 12
-      start_period: 5s
+      - obs-ingester-1-data:/data
+
+  ingester-2:
+    <<: *ingester
+    environment: *ingester-env
+    volumes:
+      - obs-ingester-2-data:/data
+
+  ingester-3:
+    <<: *ingester
+    environment: *ingester-env
+    volumes:
+      - obs-ingester-3-data:/data
 
   querier:
     restart: unless-stopped
@@ -76,7 +93,8 @@ services:
     environment:
       OBS_TARGET: querier
       OBS_LOG_LEVEL: info
-      OBS_INGESTER_URL: http://ingester:8080
+      # The ring's members. Both lists must match: the gateway writes where the querier reads (spec §7).
+      OBS_INGESTER_URL: http://ingester-1:8080,http://ingester-2:8080,http://ingester-3:8080
       OBS_STORE_URL: http://store:8080
     healthcheck:
       test: ["CMD", "/server", "-healthcheck"]
@@ -159,7 +177,7 @@ services:
       - ../../observability/grafana/datasources:/etc/grafana/provisioning/datasources
       - ../../observability/grafana/dashboards:/etc/grafana/provisioning/dashboards
 
-  # The producers wait for the gateway and the ingester: a write needs both.
+  # The producers wait for the gateway and every ingester: a write needs the gateway and every ingester it may route to.
   load-generator:
     build:
       context: ../../
@@ -170,7 +188,11 @@ services:
     depends_on:
       gateway:
         condition: service_healthy
-      ingester:
+      ingester-1:
+        condition: service_healthy
+      ingester-2:
+        condition: service_healthy
+      ingester-3:
         condition: service_healthy
     restart: on-failure
 
@@ -184,12 +206,18 @@ services:
     depends_on:
       gateway:
         condition: service_healthy
-      ingester:
+      ingester-1:
+        condition: service_healthy
+      ingester-2:
+        condition: service_healthy
+      ingester-3:
         condition: service_healthy
     restart: on-failure
 
 volumes:
-  obs-ingester-data:
+  obs-ingester-1-data:
+  obs-ingester-2-data:
+  obs-ingester-3-data:
   obs-store-data:
   obs-grafana-data:
   obs-prometheus-data:
