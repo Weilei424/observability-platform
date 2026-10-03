@@ -97,7 +97,8 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	// The push routes answer 204 with no body, which is success.
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		// Cap what an error answer buffers: it is always small (an
 		// {"error": ...} object, or a maintenance route's partial count), so a
 		// misbehaving peer can't make the client hold an unbounded body in
@@ -121,6 +122,9 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		return fmt.Errorf("rpc: %s %s answered %d: %s", c.peer, path, resp.StatusCode, errorMessage(raw))
 	}
 
+	if resp.StatusCode == http.StatusNoContent {
+		return nil
+	}
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
 		if cerr := c.ctxErr(ctx, path); cerr != nil {
