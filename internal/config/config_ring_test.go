@@ -40,6 +40,7 @@ func TestIngesterURLListRefusals(t *testing.T) {
 		{"http://a:1,http://a:1/", "duplicate"},
 		{"http://a:1,ftp://b:1", "http or https"},
 		{"http://a:1,http://user:secret@b:1", "credentials"},
+		{"http://a:1,ftp://u:secret@b:1", "credentials"},
 	} {
 		c := topo(TargetQuerier, tc.list, "http://store:8080", "")
 		err := c.validateTopology()
