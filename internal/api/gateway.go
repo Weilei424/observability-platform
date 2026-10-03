@@ -12,26 +12,26 @@ import (
 )
 
 // Upstreams makes a Server a gateway: it serves exactly the public route table
-// all-in-one serves, proxying each write route to the ingester and each read
-// route to the querier. Nothing under /internal is in that table, so the
-// gateway can never be used to reach a component's internal API.
+// all-in-one serves, proxying each read route to the querier; write routes are
+// served locally and routed through Deps.Writes. Nothing under /internal is in
+// that table, so the gateway can never be used to reach a component's internal
+// API.
 //
-// Both URLs are required, and Routes on the same Deps must be RoutesAll (the
+// The Querier URL is required, and Routes on the same Deps must be RoutesAll (the
 // zero value) -- New panics otherwise, rather than silently building a
 // gateway that proxies only some of the public routes or that dereferences a
 // nil target on the first request.
 type Upstreams struct {
-	Ingester *url.URL
-	Querier  *url.URL
+	Querier *url.URL
 	// Transport carries proxied requests; nil means one with a 5 s dial timeout.
 	Transport http.RoundTripper
 }
 
-// gatewayProxies are the three proxies a gateway routes through: one per
-// upstream and per error shape, because an unreachable upstream must answer in
-// the shape its route family's clients parse.
+// gatewayProxies are the two proxies a gateway routes reads through: one per
+// error shape, because an unreachable querier must answer in the shape its
+// route family's clients parse.
 type gatewayProxies struct {
-	write, promRead, lokiRead http.Handler
+	promRead, lokiRead http.Handler
 }
 
 func newGatewayProxies(u *Upstreams) *gatewayProxies {
@@ -44,9 +44,6 @@ func newGatewayProxies(u *Upstreams) *gatewayProxies {
 		}
 	}
 	return &gatewayProxies{
-		write: abortOnClientGone(newUpstreamProxy("ingester", u.Ingester, transport, func(w http.ResponseWriter) {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "ingester unavailable"})
-		})),
 		promRead: abortOnClientGone(newUpstreamProxy("querier", u.Querier, transport, func(w http.ResponseWriter) {
 			writePromError(w, http.StatusServiceUnavailable, "unavailable", "querier unavailable")
 		})),
