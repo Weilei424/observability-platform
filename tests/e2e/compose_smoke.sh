@@ -159,10 +159,12 @@ EXPECTED_SERVICES="backend grafana load-generator prometheus sample-app"
 # What differs by topology: the running set, which container holds log chunks,
 # which one a restart proves durability through, and whose logs a failure dumps.
 if [ "$TOPOLOGY" = split ]; then
-    EXPECTED_SERVICES="compactor gateway grafana ingester load-generator prometheus querier sample-app store"
+    EXPECTED_SERVICES="compactor gateway grafana ingester-1 ingester-2 ingester-3 load-generator prometheus querier sample-app store"
     CHUNKS_SERVICE=store
-    RESTART_SERVICE=ingester
-    FAILURE_LOG_SERVICES="gateway ingester querier store grafana sample-app"
+    # The flush marker's series is owned by whichever ingester the ring picks, so
+    # the restart covers all three: each one's graceful stop flushes its own head.
+    RESTART_SERVICE="ingester-1 ingester-2 ingester-3"
+    FAILURE_LOG_SERVICES="gateway ingester-1 ingester-2 ingester-3 querier store grafana sample-app"
 else
     CHUNKS_SERVICE=backend
     RESTART_SERVICE=backend
@@ -752,11 +754,11 @@ echo ""
 echo "-- Platform self-observability --"
 
 # scrape_ok is true once Prometheus reports every expected target up: the one
-# backend in all-in-one, all five components in split.
+# backend in all-in-one, all seven component instances in split.
 scrape_ok() {
     local q want body
     if [ "$TOPOLOGY" = split ]; then
-        q='count(up{service="observability-platform"} == 1)'; want=5
+        q='count(up{service="observability-platform"} == 1)'; want=7
     else
         q='up{job="observability-platform-backend"}'; want=1
     fi
@@ -769,6 +771,34 @@ scrape_ok() {
 # sufficient: a scrape that connects and returns zero series still reports up,
 # which is why the panel queries below exist.
 wait_for "Prometheus reports every scrape target up" 90 scrape_ok
+
+# Spec 10.1: the ring spreads the producers' writes over all three ingesters.
+# The ingester image is distroless (no shell or wget), so read each one's
+# counter through the self-observability Prometheus that scrapes it. Polled
+# because the first scrape after a write can lag by one interval.
+if [ "$TOPOLOGY" = split ]; then
+    ingester_ingested() { # <service> -> sample count on stdout, nonzero exit if none yet
+        local n
+        n="$(curl -s "${CURL_TIMEOUTS[@]}" -G "$PROMETHEUS/api/v1/query" \
+            --data-urlencode "query=obs_samples_ingested_total{instance=\"$1:8080\"}" 2>/dev/null \
+            | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null)"
+        echo "${n:-0}"
+        awk -v c="${n:-0}" 'BEGIN { exit !(c > 0) }'
+    }
+    for svc in ingester-1 ingester-2 ingester-3; do
+        COUNT=0
+        spread_start=$SECONDS
+        while [ $((SECONDS - spread_start)) -lt 45 ]; do
+            COUNT="$(ingester_ingested "$svc")" && break
+            sleep 3
+        done
+        if awk -v c="${COUNT:-0}" 'BEGIN { exit !(c > 0) }'; then
+            log_pass "$svc ingested ${COUNT} samples through the ring"
+        else
+            log_fail "$svc ingested no samples; the ring is not routing to it"
+        fi
+    done
+fi
 
 # The real assertion: samples actually reached Prometheus and Grafana can read
 # them back through the internals datasource, which is exactly what a dashboard
@@ -814,7 +844,7 @@ fi
 # is readable, which is the phase's durability claim.
 echo ""
 echo "-- Restarting the $RESTART_SERVICE --"
-if dc restart "$RESTART_SERVICE" >/dev/null 2>&1; then
+if dc restart $RESTART_SERVICE >/dev/null 2>&1; then
     log_pass "$RESTART_SERVICE container restarted"
 else
     log_fail "$RESTART_SERVICE container restart failed"
@@ -824,7 +854,9 @@ fi
 # answers without touching the ingester, so they pass while it is still
 # replaying its WAL. Wait for the restarted container's own health first.
 service_healthy() { [ "$(dcq ps --format '{{.Health}}' "$1" 2>/dev/null)" = "healthy" ]; }
-wait_for "$RESTART_SERVICE is healthy again" "$READY_TIMEOUT" service_healthy "$RESTART_SERVICE"
+for svc in $RESTART_SERVICE; do
+    wait_for "$svc is healthy again" "$READY_TIMEOUT" service_healthy "$svc"
+done
 
 wait_for "datasource health passes again after restart" "$READY_TIMEOUT" datasource_ok
 wait_for "prometheus datasource health passes again after restart" "$READY_TIMEOUT" prom_datasource_ok
@@ -900,13 +932,15 @@ if [ "$TOPOLOGY" = split ]; then
     # because the target field was ever missing (every one of these services
     # writes it on their very first log line, at startup). Capturing to a file
     # first and grepping the file removes the pipe (and the SIGPIPE) entirely.
-    for svc in gateway ingester querier store compactor; do
+    # The three ingesters are services ingester-N but all run target=ingester.
+    for svc in gateway ingester-1 ingester-2 ingester-3 querier store compactor; do
+        want="${svc%-[0-9]}"
         LOG_FILE="$(mktemp)"
         dcq logs --no-log-prefix "$svc" >"$LOG_FILE" 2>/dev/null
-        if grep -q "\"target\":\"$svc\"" "$LOG_FILE"; then
-            log_pass "$svc log lines carry target=$svc"
+        if grep -q "\"target\":\"$want\"" "$LOG_FILE"; then
+            log_pass "$svc log lines carry target=$want"
         else
-            log_fail "$svc log lines do not carry target=$svc"
+            log_fail "$svc log lines do not carry target=$want"
         fi
         rm -f "$LOG_FILE"
         LOG_FILE=""
@@ -1000,6 +1034,44 @@ if [ "$TOPOLOGY" = split ]; then
     else
         echo "    the outage-time write's value is absent once the store recovered; last body: $BODY"
     fi
+
+    # Spec 10.1: with one ingester stopped, a batch it owns answers 503, reads
+    # answer 503, and both recover when it returns. The batch carries 50 series so
+    # at least one is owned by the stopped ingester (each owns about a third).
+    if dc stop ingester-2 >/dev/null 2>&1; then
+        log_pass "ingester-2 stopped"
+    else
+        log_fail "ingester-2 stop failed"
+    fi
+    RING_MS=$(( $(date +%s) * 1000 ))
+    RING_METRICS=""
+    for i in $(seq 0 49); do
+        RING_METRICS="$RING_METRICS{\"name\":\"ring_outage_$i\",\"labels\":{\"run_id\":\"$RUN_ID\"},\"timestamp_ms\":$RING_MS,\"value\":$i},"
+    done
+    RING_BATCH="{\"metrics\":[${RING_METRICS%,}]}"
+    ring_write_status() {
+        curl -s "${CURL_TIMEOUTS[@]}" -o /dev/null -w '%{http_code}' -X POST "$BACKEND/api/v1/ingest/metrics" \
+            -H "Content-Type: application/json" --data "$RING_BATCH"
+    }
+    CODE=$(ring_write_status)
+    if [ "$CODE" = 503 ]; then
+        log_pass "a write touching the stopped ingester answers 503"
+    else
+        log_fail "a write touching the stopped ingester answered $CODE, want 503"
+    fi
+    CODE=$(curl -s "${CURL_TIMEOUTS[@]}" -o /dev/null -w '%{http_code}' -G "$BACKEND/api/v1/query" --data-urlencode 'query=up')
+    if [ "$CODE" = 503 ]; then
+        log_pass "a read with an ingester stopped answers 503"
+    else
+        log_fail "a read with an ingester stopped answered $CODE, want 503"
+    fi
+    if dc start ingester-2 >/dev/null 2>&1; then
+        log_pass "ingester-2 started again"
+    else
+        log_fail "ingester-2 start failed"
+    fi
+    ring_write_recovered() { [ "$(ring_write_status)" = 204 ]; }
+    wait_for "the gateway accepts the batch again" "$READY_TIMEOUT" ring_write_recovered
 fi
 
 # ---- The demo is still live -----------------------------------------
