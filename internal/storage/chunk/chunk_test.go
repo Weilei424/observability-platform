@@ -499,3 +499,25 @@ func TestChunk_BytesFromBytes_SealedByCount(t *testing.T) {
 		t.Errorf("iterator error: %v", err)
 	}
 }
+
+// TestGenerationEncodingCost reports bytes per sample for a 120-sample chunk at
+// a 15 s interval, with generations from the pre-6.2 counter (one ingester
+// taking 1,000 samples/s between this series' samples) and from the 6.2 µs
+// clock. It records the figure ARCHITECTURE_NOTES.md quotes; it asserts only
+// that the clock costs under 6 bytes per sample more.
+func TestGenerationEncodingCost(t *testing.T) {
+	size := func(genStep int64) float64 {
+		c := chunk.NewChunk()
+		for i := int64(0); i < 120; i++ {
+			if err := c.Append(i*15000, float64(i), 1+i*genStep); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return float64(len(c.Bytes())) / 120
+	}
+	counter, clock := size(15_000), size(15_000_000) // 1,000 samples/s × 15 s; 15 s in µs
+	t.Logf("bytes/sample: counter %.2f, µs clock %.2f (+%.2f)", counter, clock, clock-counter)
+	if clock-counter > 6 {
+		t.Errorf("µs generations cost %.2f bytes/sample more, want under 6", clock-counter)
+	}
+}
