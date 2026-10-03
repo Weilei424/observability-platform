@@ -95,7 +95,8 @@ docker compose -f deployments/docker/docker-compose.split.yml up -d gateway quer
 docker compose -f deployments/docker/docker-compose.split.yml restart prometheus
 ```
 
-Check that both `ring ready` lines now say `members=4` with equal hashes.
+The two lists are separate literals that Compose does not tie together, so
+check that both `ring ready` lines now say `members=4` with equal hashes.
 
 To remove an ingester, **stop it first**: its shutdown runs a final flush into
 the store, so nothing it holds is left behind. Only then take it out of the
@@ -122,7 +123,7 @@ before removing it.
 ### Kubernetes (Helm)
 
 ```bash
-helm upgrade backend deployments/helm/backend -n obs --set topology=split --set split.ingester.replicas=4 --wait
+helm upgrade backend deployments/helm/backend -n obs --reuse-values --set split.ingester.replicas=4 --wait
 ```
 
 `split.ingester.replicas` (default 3, at least 1) sizes the ingester
