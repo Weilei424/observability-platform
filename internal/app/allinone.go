@@ -63,7 +63,7 @@ func BuildAllInOne(cfg *config.Config, log *slog.Logger) (*AllInOne, error) {
 
 	checkpoint := metrics.ReadCheckpoint(cfg.DataDir)
 	walLog.Info("WAL checkpoint", slog.Int("after_segment", checkpoint))
-	restored, err := replayMetricsWAL(walLog, walDir, checkpoint, blockStore.Append)
+	restored, err := replayMetricsWAL(walLog, walDir, checkpoint, blockStore.AppendGen)
 	if err != nil {
 		walLog.Error("WAL replay failed", slog.String("error", err.Error()))
 		return nil, err
