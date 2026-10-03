@@ -109,7 +109,10 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 		Registry:    reg,
 		HTTP:        inst.HTTP,
 		Ingest:      inst.Ingest,
-		Internal:    func(r chi.Router) { rpc.MountReads(r, head, logs.AsSource(logHead)) },
+		Internal: func(r chi.Router) {
+			rpc.MountReads(r, head, logs.AsSource(logHead))
+			rpc.MountWrites(r, writes, logHead, inst.Ingest)
+		},
 	})
 	flush := compactor.New(writes, nil, writes, time.Now, maintenanceConfig(cfg),
 		inst.Maintenance, flushLog)
