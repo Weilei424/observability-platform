@@ -169,6 +169,7 @@ func servedRoutes(t *testing.T) map[string]map[string]bool {
 		switch target {
 		case config.TargetGateway:
 			cfg.IngesterURL, cfg.QuerierURL = "http://127.0.0.1:1", "http://127.0.0.1:1"
+			cfg.IngesterURLs = []string{"http://127.0.0.1:1"}
 		case config.TargetIngester, config.TargetCompactor:
 			cfg.StoreURL = "http://127.0.0.1:1"
 		case config.TargetQuerier:
