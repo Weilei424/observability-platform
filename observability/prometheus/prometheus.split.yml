@@ -1,10 +1,11 @@
 # Scrape config for the split topology (deployments/docker/docker-compose.split.yml).
 #
 # Same separation as prometheus.yml: this Prometheus stores metrics ABOUT the
-# platform, never the workload. One target per component, each labelled with
-# it — the internals dashboard filters its HTTP panels on component so a request
-# the gateway proxies is counted once, and plots up by component so an outage
-# says which process is down.
+# platform, never the workload. One target per component process; the three
+# ingesters share component=ingester and differ by instance. The internals
+# dashboard filters its HTTP panels on component so a request the gateway
+# proxies is counted once, and plots up by component so an outage says which
+# process is down.
 global:
   scrape_interval: 15s
   scrape_timeout: 10s
@@ -17,7 +18,15 @@ scrape_configs:
         labels:
           service: observability-platform
           component: gateway
-      - targets: ["ingester:8080"]
+      - targets: ["ingester-1:8080"]
+        labels:
+          service: observability-platform
+          component: ingester
+      - targets: ["ingester-2:8080"]
+        labels:
+          service: observability-platform
+          component: ingester
+      - targets: ["ingester-3:8080"]
         labels:
           service: observability-platform
           component: ingester
