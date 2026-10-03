@@ -21,8 +21,16 @@ func Replay(dir string, fn func(labels []LabelPair, tsMs int64, value float64)) 
 }
 
 // ReplayFrom replays only WAL segments with a numeric index strictly greater
-// than afterSegment. Use afterSegment=0 to replay all segments.
+// than afterSegment, without generations. Use afterSegment=0 to replay all
+// segments.
 func ReplayFrom(dir string, afterSegment int, fn func(labels []LabelPair, tsMs int64, value float64)) error {
+	return ReplayFromGen(dir, afterSegment, func(l []LabelPair, ts int64, v float64, _ int64) { fn(l, ts, v) })
+}
+
+// ReplayFromGen is ReplayFrom reporting each record's generation: the one a
+// type-2 record carries, or 0 for a type-1 record or one written with
+// generation 0, meaning "assign one on replay".
+func ReplayFromGen(dir string, afterSegment int, fn func(labels []LabelPair, tsMs int64, value float64, gen int64)) error {
 	paths, err := segmentPaths(dir)
 	if err != nil {
 		return fmt.Errorf("wal replay: list segments: %w", err)
@@ -46,7 +54,7 @@ func ReplayFrom(dir string, afterSegment int, fn func(labels []LabelPair, tsMs i
 	return nil
 }
 
-func replaySegment(path string, isLast bool, fn func([]LabelPair, int64, float64)) error {
+func replaySegment(path string, isLast bool, fn func([]LabelPair, int64, float64, int64)) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("wal replay: open %s: %w", path, err)
@@ -99,11 +107,11 @@ func replaySegment(path string, isLast bool, fn func([]LabelPair, int64, float64
 			return fmt.Errorf("wal replay: read body in %s: %w", path, err)
 		}
 
-		labels, tsMs, value, ok := decodeRecord(body)
+		labels, tsMs, value, gen, ok := decodeRecord(body)
 		if !ok {
 			return fmt.Errorf("wal replay: corrupt record in %s", path)
 		}
-		fn(labels, tsMs, value)
+		fn(labels, tsMs, value, gen)
 		offset += 4 + int64(bodyLen)
 	}
 }
