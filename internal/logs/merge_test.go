@@ -3,6 +3,7 @@ package logs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"testing"
 
@@ -230,4 +231,25 @@ type readerOnly struct{ *fakeReader }
 type readerAndSource struct {
 	*fakeReader
 	staticSource
+}
+
+func TestLogsMergeHeadsUnionsAndDedups(t *testing.T) {
+	l := mustLabels(t, map[string]string{"s": "x"})
+	a := staticSource{streams: []StreamData{{Labels: l, Entries: []LogEntry{{TimestampNs: 1, Line: "a"}, {TimestampNs: 2, Line: "dup"}}}}}
+	b := staticSource{streams: []StreamData{{Labels: l, Entries: []LogEntry{{TimestampNs: 2, Line: "dup"}, {TimestampNs: 3, Line: "b"}}}}}
+	c := staticSource{}
+	got, err := MergeHeads(a, b, c).SelectStreams(context.Background(), nil, 0, 10)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	var lines []string
+	for _, e := range got[0].Entries {
+		lines = append(lines, e.Line)
+	}
+	if fmt.Sprint(lines) != "[a dup b]" {
+		t.Fatalf("lines = %v, want [a dup b]: a retried push must read back once", lines)
+	}
+	if _, err := MergeHeads(a, staticSource{err: errors.New("down")}).SelectStreams(context.Background(), nil, 0, 10); err == nil {
+		t.Error("a failing head must fail the read")
+	}
 }
