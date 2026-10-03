@@ -780,7 +780,7 @@ if [ "$TOPOLOGY" = split ]; then
     ingester_ingested() { # <service> -> sample count on stdout, nonzero exit if none yet
         local n
         n="$(curl -s "${CURL_TIMEOUTS[@]}" -G "$PROMETHEUS/api/v1/query" \
-            --data-urlencode "query=obs_samples_ingested_total{instance=\"$1:8080\"}" 2>/dev/null \
+            --data-urlencode "query=sum(obs_samples_ingested_total{instance=\"$1:8080\"})" 2>/dev/null \
             | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null)"
         echo "${n:-0}"
         awk -v c="${n:-0}" 'BEGIN { exit !(c > 0) }'
@@ -1049,21 +1049,27 @@ if [ "$TOPOLOGY" = split ]; then
         RING_METRICS="$RING_METRICS{\"name\":\"ring_outage_$i\",\"labels\":{\"run_id\":\"$RUN_ID\"},\"timestamp_ms\":$RING_MS,\"value\":$i},"
     done
     RING_BATCH="{\"metrics\":[${RING_METRICS%,}]}"
+    # No set -e here, but each curl is still guarded: a curl failure must become a
+    # reported FAIL, never leave ingester-2 stopped.
     ring_write_status() {
-        curl -s "${CURL_TIMEOUTS[@]}" -o /dev/null -w '%{http_code}' -X POST "$BACKEND/api/v1/ingest/metrics" \
-            -H "Content-Type: application/json" --data "$RING_BATCH"
+        curl -s "${CURL_TIMEOUTS[@]}" -o "$RING_BODY" -w '%{http_code}' -X POST "$BACKEND/api/v1/ingest/metrics" \
+            -H "Content-Type: application/json" --data "$RING_BATCH" 2>/dev/null || echo 000
     }
+    ring_read_status() {
+        curl -s "${CURL_TIMEOUTS[@]}" -o "$RING_BODY" -w '%{http_code}' -G "$BACKEND/api/v1/query" --data-urlencode 'query=up' 2>/dev/null || echo 000
+    }
+    RING_BODY="$(mktemp)"
     CODE=$(ring_write_status)
     if [ "$CODE" = 503 ]; then
         log_pass "a write touching the stopped ingester answers 503"
     else
-        log_fail "a write touching the stopped ingester answered $CODE, want 503"
+        log_fail "a write touching the stopped ingester answered $CODE, want 503; body: $(head -c 200 "$RING_BODY")"
     fi
-    CODE=$(curl -s "${CURL_TIMEOUTS[@]}" -o /dev/null -w '%{http_code}' -G "$BACKEND/api/v1/query" --data-urlencode 'query=up')
+    CODE=$(ring_read_status)
     if [ "$CODE" = 503 ]; then
         log_pass "a read with an ingester stopped answers 503"
     else
-        log_fail "a read with an ingester stopped answered $CODE, want 503"
+        log_fail "a read with an ingester stopped answered $CODE, want 503; body: $(head -c 200 "$RING_BODY")"
     fi
     if dc start ingester-2 >/dev/null 2>&1; then
         log_pass "ingester-2 started again"
@@ -1071,8 +1077,11 @@ if [ "$TOPOLOGY" = split ]; then
         log_fail "ingester-2 start failed"
     fi
     ring_write_recovered() { [ "$(ring_write_status)" = 204 ]; }
+    ring_read_recovered() { [ "$(ring_read_status)" = 200 ]; }
     wait_for "the gateway accepts the batch again" "$READY_TIMEOUT" ring_write_recovered
-fi
+    wait_for "reads through the gateway recover once the ingester is back" "$READY_TIMEOUT" ring_read_recovered
+    rm -f "$RING_BODY"
+    fi
 
 # ---- The demo is still live -----------------------------------------
 echo ""
