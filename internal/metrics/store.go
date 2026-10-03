@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"sync"
+	"time"
 
 	"github.com/masonwheeler/observability-platform/internal/storage/chunk"
 	"github.com/masonwheeler/observability-platform/internal/storage/index"
@@ -49,8 +50,12 @@ type MemoryStore struct {
 	mu      sync.RWMutex
 	series  map[SeriesID]*memorySeries
 	idx     *index.MemPostings
-	nextGen int64 // monotonic write-generation assigned to each appended sample
+	nextGen int64        // the smallest generation the next append may take
+	clock   func() int64 // Unix µs; see nextGenerationLocked
 }
+
+// wallMicros is the default generation clock.
+func wallMicros() int64 { return time.Now().UnixMicro() }
 
 // NewMemoryStore returns an empty MemoryStore.
 func NewMemoryStore() *MemoryStore {
@@ -58,7 +63,99 @@ func NewMemoryStore() *MemoryStore {
 		series:  make(map[SeriesID]*memorySeries),
 		idx:     index.NewMemPostings(),
 		nextGen: 1, // generation 0 is reserved for legacy (pre-generation) chunks
+		clock:   wallMicros,
 	}
+}
+
+// SetGenerationClock replaces the generation clock, which returns Unix
+// microseconds; nil restores the wall clock. A clock that returns 0 reduces the
+// rule to a plain counter, which tests that pin exact generations use. Call it
+// before concurrent use begins.
+func (s *MemoryStore) SetGenerationClock(now func() int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if now == nil {
+		now = wallMicros
+	}
+	s.clock = now
+}
+
+// nextGenerationLocked assigns a generation: max(nextGen, clock()). Generations
+// stay strictly increasing on one store, and track wall-clock time closely
+// enough to compare across ingesters: a write a later ingester accepts outranks
+// an earlier one when a series moves between them (Phase 6.2). The caller holds
+// s.mu.
+func (s *MemoryStore) nextGenerationLocked() (int64, error) {
+	gen := max(s.nextGen, s.clock())
+	if gen > chunk.MaxGeneration {
+		return 0, ErrGenerationExhausted
+	}
+	s.nextGen = gen + 1
+	return gen, nil
+}
+
+// ReserveGeneration assigns the next generation without appending, so a WAL
+// writer can record it before the sample reaches memory.
+func (s *MemoryStore) ReserveGeneration() (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.nextGenerationLocked()
+}
+
+// Append adds a sample with a newly assigned generation.
+func (s *MemoryStore) Append(labels Labels, timestampMs int64, value float64) error {
+	return s.appendInternal(labels, timestampMs, value, 0, 0)
+}
+
+// AppendGen adds a sample with generation gen, or a newly assigned one when gen
+// is 0. WAL replay uses it to restore each sample's original generation.
+func (s *MemoryStore) AppendGen(labels Labels, timestampMs int64, value float64, gen int64) error {
+	return s.appendInternal(labels, timestampMs, value, 0, gen)
+}
+
+// AppendTracked is Append recording walSeg (see AppendTrackedGen).
+func (s *MemoryStore) AppendTracked(labels Labels, timestampMs int64, value float64, walSeg int) error {
+	return s.appendInternal(labels, timestampMs, value, walSeg, 0)
+}
+
+// AppendTrackedGen is AppendGen recording walSeg as the WAL segment of a newly
+// allocated chunk, so OldestHeadSegment can return the right flush boundary.
+func (s *MemoryStore) AppendTrackedGen(labels Labels, timestampMs int64, value float64, gen int64, walSeg int) error {
+	return s.appendInternal(labels, timestampMs, value, walSeg, gen)
+}
+
+func (s *MemoryStore) appendInternal(labels Labels, timestampMs int64, value float64, walSeg int, gen int64) error {
+	id := SeriesID(labels.Hash())
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Settle the generation before any mutation, so exhaustion is an explicit
+	// error rather than a half-applied append.
+	if gen == 0 {
+		var err error
+		if gen, err = s.nextGenerationLocked(); err != nil {
+			return err
+		}
+	} else {
+		if gen > chunk.MaxGeneration {
+			return ErrGenerationExhausted
+		}
+		if gen >= s.nextGen {
+			s.nextGen = gen + 1
+		}
+	}
+
+	ms, ok := s.series[id]
+	if !ok {
+		ms = &memorySeries{labels: labels}
+		s.series[id] = ms
+		s.idx.Add(uint64(id), labelsToIndexPairs(labels))
+	}
+	if len(ms.chunks) == 0 || ms.chunks[len(ms.chunks)-1].Sealed() {
+		ms.chunks = append(ms.chunks, chunk.NewChunk())
+		ms.chunkSegs = append(ms.chunkSegs, walSeg)
+	}
+	return ms.chunks[len(ms.chunks)-1].Append(timestampMs, value, gen)
 }
 
 // EnsureGenFloor raises the write-generation counter so the next assigned
@@ -88,51 +185,6 @@ func (s *MemoryStore) GenerationExhausted() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.nextGen > chunk.MaxGeneration
-}
-
-// Append adds a sample to the series identified by labels.
-// Samples may be appended out of order; the chunk encodes them in insertion order
-// and QueryRange sorts on read. For equal timestamps, the last written value wins.
-func (s *MemoryStore) Append(labels Labels, timestampMs int64, value float64) error {
-	return s.appendInternal(labels, timestampMs, value, 0)
-}
-
-// AppendTracked is like Append but records walSeg as the WAL segment index in
-// which this sample is stored. When a new chunk is allocated, walSeg is
-// recorded as that chunk's segment so that OldestHeadSegment can return the
-// correct flush boundary. Call this from WALStore.Append; replay code uses
-// plain Append.
-func (s *MemoryStore) AppendTracked(labels Labels, timestampMs int64, value float64, walSeg int) error {
-	return s.appendInternal(labels, timestampMs, value, walSeg)
-}
-
-func (s *MemoryStore) appendInternal(labels Labels, timestampMs int64, value float64, walSeg int) error {
-	id := SeriesID(labels.Hash())
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Refuse before any mutation once the counter would exceed the bound, so
-	// exhaustion is an explicit error rather than a silently-rejected append.
-	if s.nextGen > chunk.MaxGeneration {
-		return ErrGenerationExhausted
-	}
-
-	ms, ok := s.series[id]
-	if !ok {
-		ms = &memorySeries{labels: labels}
-		s.series[id] = ms
-		s.idx.Add(uint64(id), labelsToIndexPairs(labels))
-	}
-
-	// Allocate a new head chunk when none exists or the current one is sealed.
-	if len(ms.chunks) == 0 || ms.chunks[len(ms.chunks)-1].Sealed() {
-		ms.chunks = append(ms.chunks, chunk.NewChunk())
-		ms.chunkSegs = append(ms.chunkSegs, walSeg)
-	}
-
-	gen := s.nextGen
-	s.nextGen++
-	return ms.chunks[len(ms.chunks)-1].Append(timestampMs, value, gen)
 }
 
 // OldestHeadSegment returns the smallest WAL segment index in which any chunk
