@@ -53,14 +53,12 @@ func (s *Server) buildRouter() chi.Router {
 	return r
 }
 
-// write, promRead, and lokiRead return the local handler, or on a gateway the
-// proxy for that route family.
-func (s *Server) write(local http.HandlerFunc) http.Handler {
-	if s.gateway != nil {
-		return s.gateway.write
-	}
-	return local
-}
+// write returns the local handler: a gateway runs the same handler and routes
+// the validated batch through Deps.Writes (see handleIngestMetrics, handleLokiPush).
+func (s *Server) write(local http.HandlerFunc) http.Handler { return local }
+
+// promRead and lokiRead return the local handler, or on a gateway the proxy for
+// that route family.
 
 func (s *Server) promRead(local http.HandlerFunc) http.Handler {
 	if s.gateway != nil {
