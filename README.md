@@ -31,9 +31,12 @@ make run         # run the backend directly, no Docker
 
 The backend runs as one process — the demo above — or split into five
 components: a gateway, an ingester, a querier, a store, and a compactor, each
-owning its own data. `make local-up-split` starts that version with the same
-Grafana, dashboards, and URLs; [docs/runbooks/split-demo.md](docs/runbooks/split-demo.md)
-walks through it, including what happens when a component goes down, and
+owning its own data. The split runs three ingesters: the gateway validates each
+write and sends every series and log stream to the ingester a hash ring assigns
+it, and the querier reads all of them, then the store. `make local-up-split`
+starts that version with the same Grafana, dashboards, and URLs; [docs/runbooks/split-demo.md](docs/runbooks/split-demo.md)
+walks through it, including what happens when a component goes down and how
+to add or remove an ingester, and
 [docs/architecture/components.md](docs/architecture/components.md) explains
 the design.
 
