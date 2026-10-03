@@ -210,6 +210,7 @@ func startCluster(t *testing.T) *cluster {
 	}
 	c.gateway = mk(config.TargetGateway, func(x *config.Config) {
 		x.IngesterURL, x.QuerierURL = peer(config.TargetIngester), peer(config.TargetQuerier)
+		x.IngesterURLs = []string{peer(config.TargetIngester)}
 	})
 	c.ingester = mk(config.TargetIngester, func(x *config.Config) { x.StoreURL = peer(config.TargetStore) })
 	c.querier = mk(config.TargetQuerier, func(x *config.Config) {
