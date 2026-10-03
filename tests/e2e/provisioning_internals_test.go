@@ -259,6 +259,8 @@ func registeredMetricNames(t *testing.T) map[string]bool {
 	inst.Maintenance.FlushFailuresTotal.Inc()
 	inst.LogFlush.Flushes.Inc()
 	inst.LogFlush.Failures.Inc()
+	// The gateway's ring metrics, which the dashboard graphs per ingester.
+	observability.NewRingMetrics().Register(reg, []string{"http://seed:8080"}, true)
 
 	// Gather once and discard the result before the real read below.
 	//
