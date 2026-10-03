@@ -32,7 +32,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "obs-internals" },
           "expr": "rate(obs_samples_ingested_total[1m])",
-          "legendFormat": "samples/s",
+          "legendFormat": "{{component}} {{instance}}",
           "refId": "A"
         }
       ],
@@ -65,7 +65,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "obs-internals" },
           "expr": "rate(obs_log_lines_ingested_total[1m])",
-          "legendFormat": "lines/s",
+          "legendFormat": "{{component}} {{instance}}",
           "refId": "A"
         }
       ],
@@ -553,6 +553,33 @@
         }
       ],
       "title": "Component Health",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "obs-internals" },
+      "description": "Write requests the gateway sent to each ring member, by outcome. A member whose error outcomes climb is the one the ring is failing to reach.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "pointSize": 5, "showPoints": "never", "spanNulls": false }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 64 },
+      "id": 16,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "obs-internals" },
+          "expr": "sum by (ingester, outcome)(rate(obs_gateway_ingester_requests_total[1m]))",
+          "legendFormat": "{{ingester}} {{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Gateway Writes by Ingester and Outcome",
       "type": "timeseries"
     }
   ],
