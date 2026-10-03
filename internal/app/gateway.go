@@ -8,16 +8,24 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/api"
 	"github.com/masonwheeler/observability-platform/internal/config"
 	"github.com/masonwheeler/observability-platform/internal/observability"
+	"github.com/masonwheeler/observability-platform/internal/ring"
+	"github.com/masonwheeler/observability-platform/internal/rpc"
 )
 
 // buildGateway assembles the gateway: all-in-one's public route table,
-// proxied -- writes to the ingester, reads to the querier.
+// validated and ring-routed writes, proxied reads.
 func buildGateway(cfg *config.Config, log *slog.Logger) (*App, error) {
 	mainLog := observability.Component(log, "main")
-	ingester, err := url.Parse(cfg.IngesterURL)
+	members, err := ring.New(cfg.IngesterURLs)
 	if err != nil {
-		err = fmt.Errorf("app: ingester URL: %w", err)
-		mainLog.Error("failed to parse ingester URL", slog.String("error", err.Error()))
+		err = fmt.Errorf("app: ingester ring: %w", err)
+		mainLog.Error("failed to build ingester ring", slog.String("error", err.Error()))
+		return nil, err
+	}
+	router, err := rpc.NewRouter(members, nil)
+	if err != nil {
+		err = fmt.Errorf("app: write router: %w", err)
+		mainLog.Error("failed to build write router", slog.String("error", err.Error()))
 		return nil, err
 	}
 	querier, err := url.Parse(cfg.QuerierURL)
@@ -33,7 +41,8 @@ func buildGateway(cfg *config.Config, log *slog.Logger) (*App, error) {
 		Registry:  reg,
 		HTTP:      inst.HTTP,
 		Ready:     alwaysReady,
-		Upstreams: &api.Upstreams{Ingester: ingester, Querier: querier},
+		Upstreams: &api.Upstreams{Querier: querier},
+		Writes:    router,
 	})
 	return &App{Target: config.TargetGateway, Handler: srv, log: log}, nil
 }
