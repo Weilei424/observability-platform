@@ -47,12 +47,6 @@ func (s *Server) handleIngestMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	type pending struct {
-		labels      metrics.Labels
-		timestampMs int64
-		value       float64
-	}
-
 	var validationErrors []ingestErrorItem
 	// firstRejectField holds, per rejected entry index, the field of the FIRST
 	// validation error recorded for that entry. One malformed entry (e.g. a
@@ -68,7 +62,7 @@ func (s *Server) handleIngestMetrics(w http.ResponseWriter, r *http.Request) {
 			firstRejectField[i] = field
 		}
 	}
-	samples := make([]pending, 0, len(req.Metrics))
+	samples := make([]metrics.PendingSample, 0, len(req.Metrics))
 
 	for i, entry := range req.Metrics {
 		var entryHasError bool
@@ -113,7 +107,7 @@ func (s *Server) handleIngestMetrics(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		samples = append(samples, pending{labels: labels, timestampMs: *entry.TimestampMs, value: *entry.Value})
+		samples = append(samples, metrics.PendingSample{Labels: labels, TimestampMs: *entry.TimestampMs, Value: *entry.Value})
 	}
 
 	if len(validationErrors) > 0 {
@@ -131,11 +125,20 @@ func (s *Server) handleIngestMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.writes != nil {
+		if err := s.writes.PushSamples(r.Context(), samples); err != nil {
+			s.writeRouteError(w, r, "metrics_ingest", err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	var appendErrors []error
 	var appended int
 	log := observability.Component(observability.FromContext(r.Context()), "metrics_ingest")
 	for _, ps := range samples {
-		if err := s.ingester.Append(ps.labels, ps.timestampMs, ps.value); err != nil {
+		if err := s.ingester.Append(ps.Labels, ps.TimestampMs, ps.Value); err != nil {
 			log.Error("ingester append failed", "err", err)
 			appendErrors = append(appendErrors, err)
 			continue
