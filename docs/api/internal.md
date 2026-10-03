@@ -143,6 +143,23 @@ rather than silently replaced.
 `{"streams":[{"labels":{"service":"api"},"entries":[[1758600000000000000,"line"]]}]}` →
 `{"streams":1,"entries":1}`
 
+## Push — ingester only
+
+The gateway validates a write, then sends each ingester the part the ring
+assigns it. The ingester validates again; a malformed body answers `400`.
+
+```http
+POST /internal/v1/metrics/push
+```
+
+`{"series":[{"labels":{"__name__":"http_requests_total"},"samples":[[1758600000000,"1"]]}]}`
+
+```http
+POST /internal/v1/logs/push
+```
+
+`{"streams":[{"labels":{"service":"api"},"entries":[[1758600000000000000,"line"]]}]}`
+
 ## Block maintenance — store only, driven by the compactor
 
 ```http
