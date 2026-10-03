@@ -30,5 +30,5 @@ func TestWALStoreFrontsAnyHead(t *testing.T) {
 
 type nopRecordWriter struct{}
 
-func (nopRecordWriter) WriteRecord([]wal.LabelPair, int64, float64) error { return nil }
-func (nopRecordWriter) SegmentIndex() int                                 { return 0 }
+func (nopRecordWriter) WriteRecordGen([]wal.LabelPair, int64, float64, int64) error { return nil }
+func (nopRecordWriter) SegmentIndex() int                                           { return 0 }
