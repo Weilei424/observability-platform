@@ -320,8 +320,8 @@ type pausingWriter struct {
 	resume    chan struct{} // closed by the test to release the pause
 }
 
-func (p *pausingWriter) WriteRecord(pairs []wal.LabelPair, tsMs int64, val float64) error {
-	err := p.inner.WriteRecord(pairs, tsMs, val)
+func (p *pausingWriter) WriteRecordGen(pairs []wal.LabelPair, tsMs int64, val float64, gen int64) error {
+	err := p.inner.WriteRecordGen(pairs, tsMs, val, gen)
 	close(p.afterDone) // WAL bytes on disk; AppendTracked has not been called yet
 	<-p.resume         // hold the appendMu window open while the test probes FlushBlock
 	return err
