@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -179,12 +180,67 @@ func (l *handoff) Addr() net.Addr { return l.addr }
 type cluster struct {
 	gateway, ingester, querier, store, compactor    *process
 	gatewayURL, ingesterURL, storeURL, compactorURL string
+	ingesters                                       []*process
+	ingesterURLs                                    []string
 }
 
-func startCluster(t *testing.T) *cluster {
+// startCluster is the one-ingester split cluster every 6.1 test runs on.
+func startCluster(t *testing.T) *cluster { return startClusterN(t, 1) }
+
+// newIngester builds (but does not start) one ingester flushing to the store.
+func (c *cluster) newIngester(t *testing.T) (*process, string) {
+	t.Helper()
+	addr := freeAddr(t)
+	return &process{t: t, cfg: &config.Config{
+		Target: config.TargetIngester, HTTPAddr: addr, DataDir: t.TempDir(), LogLevel: "info",
+		WALSegmentMaxBytes: 1 << 20, WALSyncEveryN: 1,
+		LogsFlushThresholdBytes: 64, // every few pushes flush to the store
+		MaintenanceInterval:     50 * time.Millisecond,
+		FlushInterval:           time.Hour, // count-based flushes only:
+		FlushSealedChunks:       1,         // flush as soon as a chunk seals
+		CompactionBaseRange:     2 * time.Hour, CompactionMultiplier: 4, CompactionLevels: 3,
+		StoreURL: c.storeURL,
+	}}, "http://" + addr
+}
+
+// addIngester starts one more ingester, not yet in any ring, and returns its URL.
+func (c *cluster) addIngester(t *testing.T) string {
+	t.Helper()
+	p, u := c.newIngester(t)
+	p.start()
+	t.Cleanup(p.stop)
+	c.ingesters = append(c.ingesters, p)
+	return u
+}
+
+// ingesterByURL returns the ingester process serving url.
+func (c *cluster) ingesterByURL(t *testing.T, url string) *process {
+	t.Helper()
+	for _, p := range c.ingesters {
+		if p.cfg.HTTPAddr == strings.TrimPrefix(url, "http://") {
+			return p
+		}
+	}
+	t.Fatalf("no ingester serves %s", url)
+	return nil
+}
+
+// reconfigure restarts the gateway and querier over urls: a membership change,
+// which takes a restart of both (spec section 7).
+func (c *cluster) reconfigure(t *testing.T, urls []string) {
+	t.Helper()
+	for _, p := range []*process{c.gateway, c.querier} {
+		p.stop()
+		p.cfg.IngesterURL, p.cfg.IngesterURLs = strings.Join(urls, ","), slices.Clone(urls)
+		p.start()
+	}
+	c.ingesterURLs = slices.Clone(urls)
+}
+
+func startClusterN(t *testing.T, n int) *cluster {
 	t.Helper()
 	addr := map[config.Target]string{}
-	for _, target := range []config.Target{config.TargetGateway, config.TargetIngester, config.TargetQuerier, config.TargetStore, config.TargetCompactor} {
+	for _, target := range []config.Target{config.TargetGateway, config.TargetQuerier, config.TargetStore, config.TargetCompactor} {
 		addr[target] = freeAddr(t)
 	}
 	peer := func(target config.Target) string { return "http://" + addr[target] }
@@ -200,22 +256,27 @@ func startCluster(t *testing.T) *cluster {
 		}
 	}
 	c := &cluster{
-		gatewayURL: peer(config.TargetGateway), ingesterURL: peer(config.TargetIngester),
-		storeURL: peer(config.TargetStore), compactorURL: peer(config.TargetCompactor),
+		gatewayURL: peer(config.TargetGateway),
+		storeURL:   peer(config.TargetStore), compactorURL: peer(config.TargetCompactor),
 	}
+	for range n {
+		p, u := c.newIngester(t)
+		c.ingesters = append(c.ingesters, p)
+		c.ingesterURLs = append(c.ingesterURLs, u)
+	}
+	c.ingester, c.ingesterURL = c.ingesters[0], c.ingesterURLs[0]
 	mk := func(target config.Target, set func(*config.Config)) *process {
 		conf := cfg(target)
 		set(conf)
 		return &process{t: t, cfg: conf}
 	}
 	c.gateway = mk(config.TargetGateway, func(x *config.Config) {
-		x.IngesterURL, x.QuerierURL = peer(config.TargetIngester), peer(config.TargetQuerier)
-		x.IngesterURLs = []string{peer(config.TargetIngester)}
+		x.IngesterURL, x.QuerierURL = strings.Join(c.ingesterURLs, ","), peer(config.TargetQuerier)
+		x.IngesterURLs = slices.Clone(c.ingesterURLs)
 	})
-	c.ingester = mk(config.TargetIngester, func(x *config.Config) { x.StoreURL = peer(config.TargetStore) })
 	c.querier = mk(config.TargetQuerier, func(x *config.Config) {
-		x.IngesterURL, x.StoreURL = peer(config.TargetIngester), peer(config.TargetStore)
-		x.IngesterURLs = []string{peer(config.TargetIngester)}
+		x.IngesterURL, x.StoreURL = strings.Join(c.ingesterURLs, ","), peer(config.TargetStore)
+		x.IngesterURLs = slices.Clone(c.ingesterURLs)
 	})
 	c.store = mk(config.TargetStore, func(*config.Config) {})
 	c.compactor = mk(config.TargetCompactor, func(x *config.Config) { x.StoreURL = peer(config.TargetStore) })
@@ -227,7 +288,10 @@ func startCluster(t *testing.T) *cluster {
 	// t.Cleanup registration line is never reached (t.Fatalf inside start()
 	// unwinds via runtime.Goexit before this loop would get there) if it were
 	// registered once after the loop instead.
-	for _, p := range []*process{c.gateway, c.querier, c.compactor, c.ingester, c.store} {
+	order := []*process{c.gateway, c.querier, c.compactor}
+	order = append(order, c.ingesters...)
+	order = append(order, c.store)
+	for _, p := range order {
 		p.start()
 		t.Cleanup(p.stop)
 	}
@@ -246,6 +310,24 @@ func (c *cluster) ingest(t *testing.T, name string, ts int64, v float64) {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("ingest %s@%d = %d: %s", name, ts, resp.StatusCode, b)
 	}
+}
+
+// ingestBatch posts one sample per name (labels run=split) in a single request
+// and returns the status code without failing on a non-204.
+func (c *cluster) ingestBatch(t *testing.T, names []string, ts int64, v float64) int {
+	t.Helper()
+	items := make([]string, len(names))
+	for i, name := range names {
+		items[i] = fmt.Sprintf(`{"name":%q,"labels":{"run":"split"},"timestamp_ms":%d,"value":%v}`, name, ts, v)
+	}
+	body := `{"metrics":[` + strings.Join(items, ",") + `]}`
+	resp, err := httpClient.Post(c.gatewayURL+"/api/v1/ingest/metrics", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode
 }
 
 // instant returns (value, HTTP status, errorType) for name at ts through the gateway.
@@ -291,6 +373,19 @@ func (c *cluster) pushLog(t *testing.T, service string, tsNs int64, line string)
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("loki push %q@%d = %d: %s", line, tsNs, resp.StatusCode, b)
 	}
+}
+
+// pushLogCode is pushLog returning the status instead of failing.
+func (c *cluster) pushLogCode(t *testing.T, service string, tsNs int64, line string) int {
+	t.Helper()
+	body := fmt.Sprintf(`{"streams":[{"stream":{"service":%q},"values":[["%d",%q]]}]}`, service, tsNs, line)
+	resp, err := httpClient.Post(c.gatewayURL+"/loki/api/v1/push", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode
 }
 
 // lokiEntry is one decoded Loki query_range log line.
