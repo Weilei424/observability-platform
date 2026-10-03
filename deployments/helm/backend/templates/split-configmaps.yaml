@@ -1,9 +1,9 @@
 {{- if eq .Values.topology "split" }}
-{{- if gt (int .Values.split.ingester.replicas) 1 }}
-{{- fail "split.ingester.replicas must be 1 until Phase 6.2: without a ring, a second ingester would hold writes no query reads" }}
+{{- if lt (int .Values.split.ingester.replicas) 1 }}
+{{- fail "split.ingester.replicas must be at least 1" }}
 {{- end }}
 {{- if gt (int .Values.split.store.replicas) 1 }}
-{{- fail "split.store.replicas must be 1 until Phase 6.2: a second store would hold blocks no querier reads" }}
+{{- fail "split.store.replicas must be 1 until Phase 6.4: a second store would hold blocks no querier reads" }}
 {{- end }}
 {{- if gt (int .Values.split.compactor.replicas) 1 }}
 {{- fail "split.compactor.replicas must be 1: two compactors would plan and run the same compactions" }}
@@ -24,7 +24,11 @@ data:
   OBS_TARGET: {{ $component | quote }}
   OBS_HTTP_ADDR: {{ printf ":%d" ($root.Values.service.port | int) | quote }}
   {{- range $peer := index $peers $component }}
+  {{- if eq $peer "ingester" }}
+  OBS_INGESTER_URL: {{ include "backend.ingesterURLs" $root | quote }}
+  {{- else }}
   OBS_{{ upper $peer }}_URL: {{ include "backend.peerURL" (list $root $peer) | quote }}
+  {{- end }}
   {{- end }}
   {{- range $key, $value := $root.Values.config }}
   {{ $key }}: {{ $value | quote }}
