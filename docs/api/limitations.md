@@ -75,11 +75,41 @@ filter.
 
 These are properties of the whole system, not of the query languages.
 
-- **One instance per component.** The backend runs all-in-one or split into
-  five components ([../architecture/components.md](../architecture/components.md)),
-  but there is one ingester and one store: no ring, no replication, no N-way
-  query fanout, and no multi-tenancy. Those are Phases 6.2–6.5 in
+- **One store, one compactor, no replication.** The backend runs all-in-one or
+  split into five components
+  ([../architecture/components.md](../architecture/components.md)). Writes are
+  sharded over a ring of ingesters, but there is one store and one compactor,
+  no replication, no parallel query fanout, and no multi-tenancy. Those are
+  Phases 6.3-6.5 in
   [`../planning/IMPLEMENTATION_PLAN.md`](../planning/IMPLEMENTATION_PLAN.md).
+- **Ring membership is static.** The gateway and querier read the ingester list
+  from `OBS_INGESTER_URL` at startup; adding or removing an ingester takes a
+  restart of both. There are no heartbeats, join or leave states, or hot reload.
+- **A gateway and querier list mismatch hides writes.** If the gateway routes
+  to an ingester the querier does not read, those writes are never returned.
+  Both log `ring ready` with `ring=<hash>` of the sorted member list at
+  startup: compare the two hashes. Compose and Helm render both lists from one
+  source.
+- **Ingesters are read one after another.** The querier reads every ingester in
+  turn, then the store, so read latency grows with the number of ingesters.
+  Parallel fanout is Phase 6.4.
+- **One ingester down fails every read and some writes.** A read needs every
+  member, so any unreachable ingester answers `503`. A write answers `503` only
+  when the batch has a key that ingester owns; other batches succeed. A `503`
+  can leave some of a batch's groups written; retrying the whole batch is safe.
+- **Removing an ingester can leave data unread.** Stop the ingester first: its
+  shutdown runs a final flush, and then the gateway and querier restart without
+  it. If that final flush fails, the unflushed data stays in the ingester's WAL
+  and is not read until the ingester rejoins the ring.
+- **Last-write-wins across ingesters follows the clock.** Write generations are
+  `max(previous + 1, now in Unix microseconds)`. Two writes to one series at
+  the same timestamp on two ingesters, within their clock skew, resolve by
+  clock, not by arrival order. On one ingester generations are strictly
+  increasing, so arrival order wins.
+- **Ingesters do not check ownership.** An ingester accepts any write sent to
+  it, on its public routes or the internal push routes. A write that skips the
+  ring is still read, because every read covers every ingester, but it
+  breaks the one-owner-per-series placement the ring promises.
 - **Queries, selectors, and label names must be valid UTF-8 and at most
   128 KiB.** A `query`, each `match[]`, or a `{name}` in a label-values path
   longer than 131072 bytes or not valid UTF-8 is refused with `400`
