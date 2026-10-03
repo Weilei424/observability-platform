@@ -3,6 +3,7 @@ package metrics_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -348,5 +349,62 @@ func TestMergeServesAPostRestartOverwrite(t *testing.T) {
 	got, err := metrics.NewQueryEngineFromSource(metrics.Merge(h2, store)).InstantQuery(metrics.Selector{MetricName: "restart"}, 0)
 	if err != nil || len(got) != 1 || got[0].Value != 999 {
 		t.Fatalf("post-restart overwrite = %+v, %v; want 999", got, err)
+	}
+}
+
+func TestMergeHeadsReadsEveryHeadInOrder(t *testing.T) {
+	var events []string
+	heads := []metrics.Source{
+		orderSource{Source: metrics.NewMemoryStore(), name: "h0", events: &events},
+		orderSource{Source: metrics.NewMemoryStore(), name: "h1", events: &events},
+		orderSource{Source: metrics.NewMemoryStore(), name: "h2", events: &events},
+	}
+	store := orderSource{Source: metrics.NewMemoryStore(), name: "store", events: &events}
+	if _, err := metrics.Merge(metrics.MergeHeads(heads...), store).Select(context.Background(), metrics.SelectParams{MinT: 0, MaxT: 10}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"h0 start", "h0 end", "h1 start", "h1 end", "h2 start", "h2 end", "store start", "store end"}
+	if fmt.Sprint(events) != fmt.Sprint(want) {
+		t.Fatalf("events = %v, want %v: every ingester must finish before the store starts", events, want)
+	}
+}
+
+// A series spread over three heads by a membership change merges by
+// generation: the newest write wins wherever it lives.
+func TestMergeHeadsResolvesOverlapByGeneration(t *testing.T) {
+	m, _ := metrics.NewLabels(map[string]string{"__name__": "m"})
+	mk := func(gen int64, ts int64, v float64) *metrics.MemoryStore {
+		s := metrics.NewMemoryStore()
+		if err := s.AppendGen(m, ts, v, gen); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	merged := metrics.MergeHeads(mk(300, 10, 3), mk(100, 10, 1), mk(200, 20, 2))
+	sds, err := merged.Select(context.Background(), metrics.SelectParams{MinT: 0, MaxT: 100})
+	if err != nil || len(sds) != 1 {
+		t.Fatalf("select = %+v, %v", sds, err)
+	}
+	got := sds[0].Samples
+	if len(got) != 2 || got[0].Value != 3 || got[1].Value != 2 {
+		t.Fatalf("samples = %+v, want ts10=3 (gen 300 beats 100), ts20=2", got)
+	}
+}
+
+func TestMergeHeadsFailsWhenAnyHeadFails(t *testing.T) {
+	ok := metrics.NewMemoryStore()
+	for i := range 3 {
+		heads := []metrics.Source{ok, ok, ok}
+		heads[i] = failingSource{ok}
+		if _, err := metrics.MergeHeads(heads...).Select(context.Background(), metrics.SelectParams{MinT: 0, MaxT: 1}); err == nil {
+			t.Errorf("head %d failing: no error; a partial answer is wrong", i)
+		}
+	}
+}
+
+func TestMergeHeadsOfOneIsThatHead(t *testing.T) {
+	s := metrics.NewMemoryStore()
+	if metrics.MergeHeads(s) != metrics.Source(s) {
+		t.Error("MergeHeads of one head should return it unchanged")
 	}
 }
