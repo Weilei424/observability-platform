@@ -35,8 +35,8 @@ func TestEachTargetExposesOnlyWhatItOwns(t *testing.T) {
 			lacks: []string{"obs_active_series", "obs_flushes_total", "obs_compactions_total", "obs_samples_ingested_total", "obs_blocks_total"},
 		},
 		config.TargetGateway: {
-			has:   []string{"obs_collector_errors_total"},
-			lacks: []string{"obs_active_series", "obs_flushes_total", "obs_compactions_total", "obs_samples_ingested_total", "obs_blocks_total"},
+			has:   []string{"obs_collector_errors_total", "obs_ring_members", "obs_samples_rejected_total"},
+			lacks: []string{"obs_active_series", "obs_flushes_total", "obs_compactions_total", "obs_blocks_total"},
 		},
 	}
 	for target, w := range cases {
