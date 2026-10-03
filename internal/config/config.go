@@ -60,8 +60,8 @@ type Config struct {
 	// IngesterURLs is OBS_INGESTER_URL split on commas and normalized: the ring's
 	// members on the gateway and querier (Phase 6.2). One URL is a one-member ring.
 	IngesterURLs []string
-	StoreURL    string
-	QuerierURL  string
+	StoreURL     string
+	QuerierURL   string
 
 	MaintenanceInterval  time.Duration
 	FlushInterval        time.Duration
