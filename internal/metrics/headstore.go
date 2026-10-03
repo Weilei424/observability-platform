@@ -277,6 +277,18 @@ func (h *HeadStore) AppendTracked(labels Labels, tsMs int64, val float64, walSeg
 	return h.mem.AppendTracked(labels, tsMs, val, walSeg)
 }
 
+func (h *HeadStore) ReserveGeneration() (int64, error) { return h.mem.ReserveGeneration() }
+
+// AppendGen adds a sample with generation gen (0 assigns one); WAL replay uses it.
+func (h *HeadStore) AppendGen(labels Labels, tsMs int64, val float64, gen int64) error {
+	return h.mem.AppendGen(labels, tsMs, val, gen)
+}
+
+// AppendTrackedGen adds a sample with generation gen and records its WAL segment.
+func (h *HeadStore) AppendTrackedGen(labels Labels, tsMs int64, val float64, gen int64, walSeg int) error {
+	return h.mem.AppendTrackedGen(labels, tsMs, val, gen, walSeg)
+}
+
 func (h *HeadStore) GenerationExhausted() bool               { return h.mem.GenerationExhausted() }
 func (h *HeadStore) OldestHeadSegment() int                  { return h.mem.OldestHeadSegment() }
 func (h *HeadStore) SetHeadFence(walSeg int)                 { h.mem.SetHeadFence(walSeg) }
