@@ -24,7 +24,11 @@ topology: all-in-one
 split:
   targets:
     gateway: http://observability-backend:8080
-    ingester: http://observability-ingester:8080
+    # One URL per ingester pod; keep it in step with the backend chart's split.ingester.replicas.
+    ingester:
+      - http://observability-ingester-0.observability-ingester-headless:8080
+      - http://observability-ingester-1.observability-ingester-headless:8080
+      - http://observability-ingester-2.observability-ingester-headless:8080
     querier: http://observability-querier:8080
     store: http://observability-store:8080
     compactor: http://observability-compactor:8080
