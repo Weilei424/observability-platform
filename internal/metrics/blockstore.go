@@ -307,6 +307,19 @@ func (bs *BlockStore) AppendTracked(labels Labels, tsMs int64, val float64, walS
 	return bs.mem.AppendTracked(labels, tsMs, val, walSeg)
 }
 
+// ReserveGeneration assigns the next generation without appending (WALStore).
+func (bs *BlockStore) ReserveGeneration() (int64, error) { return bs.mem.ReserveGeneration() }
+
+// AppendGen appends with generation gen, or a new one when gen is 0 (replay).
+func (bs *BlockStore) AppendGen(labels Labels, tsMs int64, val float64, gen int64) error {
+	return bs.mem.AppendGen(labels, tsMs, val, gen)
+}
+
+// AppendTrackedGen appends with generation gen and records walSeg.
+func (bs *BlockStore) AppendTrackedGen(labels Labels, tsMs int64, val float64, gen int64, walSeg int) error {
+	return bs.mem.AppendTrackedGen(labels, tsMs, val, gen, walSeg)
+}
+
 // OldestHeadSegment returns the WAL-segment floor across all in-memory head
 // chunks. Returns -1 when no series has chunks.
 func (bs *BlockStore) OldestHeadSegment() int {
