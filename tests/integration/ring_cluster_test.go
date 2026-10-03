@@ -2,6 +2,7 @@ package integration_test
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"slices"
 	"strings"
@@ -125,6 +126,8 @@ func TestRingClusterOneIngesterDown(t *testing.T) {
 	if code := c.ingestBatch(t, mixed, base, 7); code != http.StatusNoContent { // the client's retry
 		t.Fatalf("retry after recovery = %d, want 204", code)
 	}
+	// This checks the retried value only; a duplicate same-value rewrite at one
+	// timestamp is undetectable here. The log case below is the read-once check.
 	for _, name := range mixed {
 		if v, _, _ := c.instant(t, name, base); v != "7" {
 			t.Errorf("%s after the retry = %q, want 7", name, v)
@@ -154,20 +157,34 @@ func TestRingClusterOneIngesterDown(t *testing.T) {
 	}
 }
 
-// A write sent straight to one ingester's public route skips the ring but is
-// still read: reads cover every member.
+// A write sent straight to a NON-owner ingester's public route skips the ring
+// but is still read: reads cover every member.
 func TestRingClusterDirectIngesterWriteIsRead(t *testing.T) {
 	c := startClusterN(t, 3)
+	r, err := ring.New(c.ingesterURLs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := r.Owner(seriesKey(t, "direct_metric"))
+	var target string
+	for _, u := range c.ingesterURLs {
+		if u != owner {
+			target = u
+			break
+		}
+	}
 	base := time.Now().UnixMilli()
 	body := fmt.Sprintf(`{"metrics":[{"name":"direct_metric","labels":{"run":"split"},"timestamp_ms":%d,"value":5}]}`, base)
-	for _, u := range c.ingesterURLs { // every ingester, so at least two are non-owners
-		resp, err := httpClient.Post(u+"/api/v1/ingest/metrics", "application/json", strings.NewReader(body))
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp.Body.Close()
+	resp, err := httpClient.Post(target+"/api/v1/ingest/metrics", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("direct write to non-owner %s = %d: %s", target, resp.StatusCode, b)
 	}
 	if v, _, _ := c.instant(t, "direct_metric", base); v != "5" {
-		t.Fatalf("direct write read = %q, want 5", v)
+		t.Fatalf("direct write to non-owner read = %q, want 5", v)
 	}
 }
