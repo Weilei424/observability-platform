@@ -19,7 +19,7 @@ func TestEncodeDecodeRecord(t *testing.T) {
 	}
 
 	body := encoded[4:]
-	gotLabels, gotTs, gotVal, ok := decodeRecord(body)
+	gotLabels, gotTs, gotVal, _, ok := decodeRecord(body)
 	if !ok {
 		t.Fatal("decodeRecord returned ok=false")
 	}
@@ -43,7 +43,7 @@ func TestEncodeDecodeRecord_NaNInf(t *testing.T) {
 	labels := []LabelPair{{Name: "__name__", Value: "m"}}
 	for _, v := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
 		encoded := encodeRecord(labels, 0, v)
-		_, _, gotVal, ok := decodeRecord(encoded[4:])
+		_, _, gotVal, _, ok := decodeRecord(encoded[4:])
 		if !ok {
 			t.Fatalf("decodeRecord failed for value %v", v)
 		}
@@ -62,7 +62,7 @@ func TestDecodeRecord_TruncatedBodyReturnsFalse(t *testing.T) {
 	encoded := encodeRecord(labels, 1000, 1.0)
 	body := encoded[4:]
 	// Feed only half the body — must not panic and must return ok=false.
-	_, _, _, ok := decodeRecord(body[:len(body)/2])
+	_, _, _, _, ok := decodeRecord(body[:len(body)/2])
 	if ok {
 		t.Error("expected ok=false for truncated body")
 	}
@@ -70,7 +70,7 @@ func TestDecodeRecord_TruncatedBodyReturnsFalse(t *testing.T) {
 
 func TestEncodeDecodeRecord_ZeroLabels(t *testing.T) {
 	encoded := encodeRecord(nil, 5000, 3.14)
-	labels, tsMs, val, ok := decodeRecord(encoded[4:])
+	labels, tsMs, val, _, ok := decodeRecord(encoded[4:])
 	if !ok {
 		t.Fatal("decodeRecord returned ok=false for zero-label record")
 	}
@@ -88,7 +88,7 @@ func TestEncodeDecodeRecord_ZeroLabels(t *testing.T) {
 func TestEncodeDecodeRecord_EmptyNameValue(t *testing.T) {
 	labels := []LabelPair{{Name: "", Value: ""}, {Name: "__name__", Value: "m"}}
 	encoded := encodeRecord(labels, 0, 0)
-	got, _, _, ok := decodeRecord(encoded[4:])
+	got, _, _, _, ok := decodeRecord(encoded[4:])
 	if !ok {
 		t.Fatal("decodeRecord returned ok=false")
 	}
@@ -108,7 +108,7 @@ func TestDecodeRecord_TrailingBytesReturnsFalse(t *testing.T) {
 	encoded := encodeRecord(labels, 1000, 1.0)
 	body := encoded[4:]
 	bloated := append(body, 0xFF, 0xFF) // two trailing garbage bytes
-	_, _, _, ok := decodeRecord(bloated)
+	_, _, _, _, ok := decodeRecord(bloated)
 	if ok {
 		t.Error("expected ok=false when body has trailing bytes")
 	}
