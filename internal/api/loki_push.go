@@ -88,11 +88,6 @@ func (s *Server) handleLokiPush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	type pending struct {
-		labels logs.StreamLabels
-		tsNs   int64
-		line   string
-	}
 	var validationErrors []ingestErrorItem
 	// rejectedLineFields holds one entry per rejected log LINE, for counting.
 	// A per-value error (bad pair shape, bad timestamp, bad line) already
@@ -108,7 +103,7 @@ func (s *Server) handleLokiPush(w http.ResponseWriter, r *http.Request) {
 			rejectedLineFields = append(rejectedLineFields, field)
 		}
 	}
-	entries := make([]pending, 0, len(req.Streams))
+	entries := make([]logs.PendingEntry, 0, len(req.Streams))
 
 	for i, st := range req.Streams {
 		streamLabels := make(map[string]string, len(st.Stream))
@@ -166,7 +161,7 @@ func (s *Server) handleLokiPush(w http.ResponseWriter, r *http.Request) {
 				}
 				continue
 			}
-			entries = append(entries, pending{labels: sl, tsNs: tsNs, line: line})
+			entries = append(entries, logs.PendingEntry{Labels: sl, TimestampNs: tsNs, Line: line})
 		}
 	}
 
@@ -185,8 +180,17 @@ func (s *Server) handleLokiPush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.writes != nil {
+		if err := s.writes.PushEntries(r.Context(), entries); err != nil {
+			s.writeRouteError(w, r, "logs_push", err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	for i, e := range entries {
-		if err := s.logIngester.Append(e.labels, e.tsNs, e.line); err != nil {
+		if err := s.logIngester.Append(e.Labels, e.TimestampNs, e.Line); err != nil {
 			observability.Component(observability.FromContext(r.Context()), "logs_push").Error(
 				"log ingester append failed", "err", err)
 			// entries[:i] already landed; the push handler returns on the first
