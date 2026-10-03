@@ -90,10 +90,16 @@ func (w *WAL) openSegment(idx int) error {
 	return nil
 }
 
-// WriteRecord encodes and appends a sample record to the active segment.
+// WriteRecord writes a type-2 record with generation 0: "assign on replay".
+func (w *WAL) WriteRecord(labels []LabelPair, tsMs int64, value float64) error {
+	return w.WriteRecordGen(labels, tsMs, value, 0)
+}
+
+// WriteRecordGen encodes and appends a type-2 sample record carrying gen to the
+// active segment.
 // Rotates to a new segment when written bytes reach segMaxBytes.
 // Fsyncs every syncEveryN records (syncEveryN=1 means sync after every write).
-func (w *WAL) WriteRecord(labels []LabelPair, tsMs int64, value float64) error {
+func (w *WAL) WriteRecordGen(labels []LabelPair, tsMs int64, value float64, gen int64) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -105,7 +111,7 @@ func (w *WAL) WriteRecord(labels []LabelPair, tsMs int64, value float64) error {
 		return err
 	}
 
-	data := encodeRecord(labels, tsMs, value)
+	data := encodeRecordGen(labels, tsMs, value, gen)
 	if _, err := w.current.Write(data); err != nil {
 		return fmt.Errorf("wal: write record: %w", err)
 	}
