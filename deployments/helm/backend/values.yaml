@@ -48,8 +48,9 @@ startupProbe:
 # beyond the prometheus chart's own topology switch.
 topology: all-in-one
 
-# Settings for topology: split; ignored in all-in-one. The ingester, store, and
-# compactor are singletons until Phase 6.2 and the chart refuses more than one.
+# Settings for topology: split; ignored in all-in-one. The ingester runs
+# `split.ingester.replicas` pods behind a ring (Phase 6.2); the store and
+# compactor are singletons and the chart refuses more than one.
 # Their PVCs use persistence.storageClassName above.
 split:
   gateway:
@@ -68,7 +69,7 @@ split:
       requests: { cpu: 50m, memory: 64Mi }
       limits: { memory: 256Mi }
   ingester:
-    replicas: 1
+    replicas: 3
     persistence:
       size: 1Gi
     resources:
