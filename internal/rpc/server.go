@@ -137,3 +137,77 @@ func nonNil(s []string) []string {
 	}
 	return s
 }
+
+// MountWrites registers the ingester's push routes: the gateway sends each
+// ingester the samples and lines the ring assigns it, already validated. The
+// labels are validated again — a protocol bug must not write invalid data —
+// and a malformed body is a 400. ingest counts what lands; rejections were
+// counted by the gateway, except append failures, counted here.
+func MountWrites(r chi.Router, m metrics.Ingester, l logs.Ingester, ingest *observability.IngestMetrics) {
+	r.Post("/metrics/push", func(w http.ResponseWriter, req *http.Request) { metricsPush(w, req, m, ingest) })
+	r.Post("/logs/push", func(w http.ResponseWriter, req *http.Request) { logsPush(w, req, l, ingest) })
+}
+
+func metricsPush(w http.ResponseWriter, r *http.Request, ing metrics.Ingester, im *observability.IngestMetrics) {
+	body, ok := readBody(w, r, FlushBodyLimit)
+	if !ok {
+		return
+	}
+	var req metricsPushRequest
+	if !decodeStrict(w, body, &req) {
+		return
+	}
+	var batch []metrics.PendingSample
+	for _, s := range req.Series {
+		labels, err := metrics.NewLabels(s.Labels)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid series labels: "+err.Error())
+			return
+		}
+		for _, smp := range s.Samples {
+			batch = append(batch, metrics.PendingSample{Labels: labels, TimestampMs: smp.T, Value: smp.V})
+		}
+	}
+	for i, p := range batch {
+		if err := ing.Append(p.Labels, p.TimestampMs, p.Value); err != nil {
+			im.SamplesIngested.Add(float64(i))
+			im.SamplesRejected.WithLabelValues(observability.ReasonAppend).Add(float64(len(batch) - i))
+			internalError(w, r, "metrics push append failed", err)
+			return
+		}
+	}
+	im.SamplesIngested.Add(float64(len(batch)))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func logsPush(w http.ResponseWriter, r *http.Request, ing logs.Ingester, im *observability.IngestMetrics) {
+	body, ok := readBody(w, r, FlushBodyLimit)
+	if !ok {
+		return
+	}
+	var req logsPushRequest
+	if !decodeStrict(w, body, &req) {
+		return
+	}
+	var batch []logs.PendingEntry
+	for _, s := range req.Streams {
+		labels, err := logs.NewStreamLabels(s.Labels)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid stream labels: "+err.Error())
+			return
+		}
+		for _, e := range s.Entries {
+			batch = append(batch, logs.PendingEntry{Labels: labels, TimestampNs: e.T, Line: e.Line})
+		}
+	}
+	for i, e := range batch {
+		if err := ing.Append(e.Labels, e.TimestampNs, e.Line); err != nil {
+			im.LogLinesIngested.Add(float64(i))
+			im.LogLinesRejected.WithLabelValues(observability.ReasonAppend).Add(float64(len(batch) - i))
+			internalError(w, r, "logs push append failed", err)
+			return
+		}
+	}
+	im.LogLinesIngested.Add(float64(len(batch)))
+	w.WriteHeader(http.StatusNoContent)
+}
