@@ -59,7 +59,9 @@ type k8sObject struct {
 		Selector map[string]any `yaml:"selector"`
 		// ServiceName is a StatefulSet's governing (headless) Service.
 		ServiceName string `yaml:"serviceName"`
-		Template    struct {
+		// Replicas is a workload's replica count.
+		Replicas int `yaml:"replicas"`
+		Template struct {
 			Metadata struct {
 				Labels      map[string]string `yaml:"labels"`
 				Annotations map[string]string `yaml:"annotations"`
