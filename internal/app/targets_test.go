@@ -30,6 +30,7 @@ func withPeers(cfg *config.Config) *config.Config {
 		cfg.StoreURL = unreachable
 	case config.TargetQuerier:
 		cfg.IngesterURL, cfg.StoreURL = unreachable, unreachable
+		cfg.IngesterURLs = []string{unreachable}
 	}
 	return cfg
 }
@@ -126,7 +127,10 @@ func TestBuildLogsOnceWhenAPeerURLFailsToParse(t *testing.T) {
 	}{
 		{config.TargetIngester, func(cfg *config.Config) { cfg.StoreURL = invalidPeerURL }},
 		{config.TargetCompactor, func(cfg *config.Config) { cfg.StoreURL = invalidPeerURL }},
-		{config.TargetQuerier, func(cfg *config.Config) { cfg.IngesterURL = invalidPeerURL }},
+		{config.TargetQuerier, func(cfg *config.Config) {
+			cfg.IngesterURL = invalidPeerURL
+			cfg.IngesterURLs = []string{invalidPeerURL}
+		}},
 		{config.TargetGateway, func(cfg *config.Config) {
 			cfg.IngesterURL = invalidPeerURL
 			cfg.IngesterURLs = []string{invalidPeerURL}
