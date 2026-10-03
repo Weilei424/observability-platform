@@ -16,11 +16,13 @@ data:
       - job_name: observability-platform-split
         metrics_path: /metrics
         static_configs:
-        {{- range $component, $url := .Values.split.targets }}
+        {{- range $component, $urls := .Values.split.targets }}
+        {{- range $url := (kindIs "slice" $urls | ternary $urls (list $urls)) }}
           - targets: ["{{ trimPrefix "http://" $url }}"]
             labels:
               service: observability-platform
               component: {{ $component }}
+        {{- end }}
         {{- end }}
     {{- else }}
       - job_name: observability-platform-backend
