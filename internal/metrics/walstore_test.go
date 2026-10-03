@@ -13,7 +13,7 @@ import (
 // failingWriter always returns an error from WriteRecord.
 type failingWriter struct{}
 
-func (f *failingWriter) WriteRecord(_ []wal.LabelPair, _ int64, _ float64) error {
+func (f *failingWriter) WriteRecordGen(_ []wal.LabelPair, _ int64, _ float64, _ int64) error {
 	return errors.New("simulated WAL write failure")
 }
 
@@ -22,7 +22,7 @@ func (f *failingWriter) SegmentIndex() int { return 0 }
 // countingWriter records how many WAL records were written.
 type countingWriter struct{ writes int }
 
-func (c *countingWriter) WriteRecord(_ []wal.LabelPair, _ int64, _ float64) error {
+func (c *countingWriter) WriteRecordGen(_ []wal.LabelPair, _ int64, _ float64, _ int64) error {
 	c.writes++
 	return nil
 }
