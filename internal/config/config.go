@@ -57,6 +57,9 @@ type Config struct {
 
 	Target      Target
 	IngesterURL string
+	// IngesterURLs is OBS_INGESTER_URL split on commas and normalized: the ring's
+	// members on the gateway and querier (Phase 6.2). One URL is a one-member ring.
+	IngesterURLs []string
 	StoreURL    string
 	QuerierURL  string
 
@@ -200,6 +203,33 @@ func parseDuration(s, name string) (time.Duration, error) {
 	return d, nil
 }
 
+// validatePeerList splits raw on commas and validates each element as a peer
+// URL. Elements are trimmed of surrounding spaces; an empty element or two
+// elements that normalize to the same URL is an error. Messages name the
+// element by position, never by value, except through validatePeerURL, which
+// already withholds credentials.
+func validatePeerList(env string, target Target, raw string) ([]string, error) {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]int, len(parts))
+	for i, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return nil, fmt.Errorf("config: %s has an empty element at position %d for target %s", env, i+1, target)
+		}
+		u, err := validatePeerURL(env, target, part)
+		if err != nil {
+			return nil, err
+		}
+		if j, dup := seen[u]; dup {
+			return nil, fmt.Errorf("config: %s lists the same ingester at positions %d and %d for target %s (a duplicate)", env, j+1, i+1, target)
+		}
+		seen[u] = i
+		out = append(out, u)
+	}
+	return out, nil
+}
+
 // validateTopology checks the target and that exactly the peer URLs it needs
 // are set, each a base http(s) URL. Each peer field is normalized in place
 // (see validatePeerURL) once it passes.
@@ -224,7 +254,17 @@ func (c *Config) validateTopology() error {
 			return fmt.Errorf("config: target %s requires %s", c.Target, p.env)
 		case !needed && v != "":
 			return fmt.Errorf("config: %s is set but target %s does not use it; unset it", p.env, c.Target)
+		case v != "" && p == peerIngester:
+			urls, err := validatePeerList(p.env, c.Target, v)
+			if err != nil {
+				return err
+			}
+			c.IngesterURLs = urls
+			*fields[p] = strings.Join(urls, ",")
 		case v != "":
+			if strings.Contains(v, ",") {
+				return fmt.Errorf("config: %s must be a single URL for target %s; only OBS_INGESTER_URL takes a list", p.env, c.Target)
+			}
 			normalized, err := validatePeerURL(p.env, c.Target, v)
 			if err != nil {
 				return err
