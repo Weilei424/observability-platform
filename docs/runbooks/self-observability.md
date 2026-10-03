@@ -245,7 +245,11 @@ All `obs_*` metrics exposed by the backend (scraped by the internals Prometheus)
 - `obs_compaction_duration_seconds` — time spent in compaction (histogram)
 - `obs_retention_deleted_blocks_total` — blocks deleted by retention policy
 - `obs_flushes_total` — successful metrics head flushes (the compactor flushing the metrics head into a block)
-- `obs_flush_failures_total` — failed metrics head flushes. Log-store flushes are not instrumented, so a log flush can fail while this stays at zero.
+- `obs_flush_failures_total` — failed metrics head flushes. Log-store flushes are counted separately by `obs_log_flushes_total` and `obs_log_flush_failures_total`.
+
+**Ring (split topology):**
+- `obs_ring_members` — number of ingesters in the ring the gateway routes over or the querier reads; exported by both
+- `obs_gateway_ingester_requests_total{ingester,outcome}` — write groups the gateway sent to each ingester, by the ingester's `host:port` and outcome (`ok`, `unavailable`, or `error`); gateway only
 
 **Errors:**
 - `obs_collector_errors_total{collector}` — scrape-time collector failures (values: "wal", "logs")
