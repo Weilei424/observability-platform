@@ -6,7 +6,7 @@ import (
 )
 
 // Merge returns a Source that reads first to completion, then second, and
-// merges what they return. The querier uses Merge(ingester, store).
+// merges what they return. The querier uses Merge(MergeHeads(ingesters...), store).
 //
 // The order is the correctness argument, not a detail. The store registers a
 // flushed block before it acknowledges the flush, and the ingester drops those
@@ -96,4 +96,19 @@ func unionSorted(a, b []string) []string {
 		set[s] = struct{}{}
 	}
 	return sortedStringSet(set)
+}
+
+// MergeHeads folds every ingester into one Source that reads them in order,
+// each to completion before the next, merged by the generation rule. The
+// querier reads Merge(MergeHeads(ingesters...), store): every ingester
+// finishes before the store starts, which keeps Merge's no-gap argument true
+// for each of them. Any head failing fails the read.
+func MergeHeads(heads ...Source) Source {
+	if len(heads) == 0 {
+		panic("metrics: MergeHeads needs at least one head")
+	}
+	if len(heads) == 1 {
+		return heads[0]
+	}
+	return Merge(heads[0], MergeHeads(heads[1:]...))
 }
