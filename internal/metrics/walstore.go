@@ -81,7 +81,7 @@ func (s *WALStore) Append(labels Labels, tsMs int64, value float64) error {
 		return ErrGenerationExhausted
 	}
 	walSeg := s.w.SegmentIndex()
-	if err := s.w.WriteRecord(labelsToWALPairs(labels), tsMs, value); err != nil {
+	if err := s.w.WriteRecordGen(labelsToWALPairs(labels), tsMs, value, 0); err != nil {
 		return err
 	}
 	return s.store.AppendTracked(labels, tsMs, value, walSeg)
