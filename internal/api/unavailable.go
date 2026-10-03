@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/masonwheeler/observability-platform/internal/observability"
@@ -61,5 +62,24 @@ func writeLokiEvalError(w http.ResponseWriter, r *http.Request, logMsg string, e
 	default:
 		log.Error(logMsg, "err", err)
 		writeLokiError(w, http.StatusInternalServerError, "internal error")
+	}
+}
+
+// writeRouteError answers a write the gateway could not route (spec section
+// 5.3): an ingester outage is 503 in the write routes' {"error": ...} shape, a
+// client that went away is 499 with no body, and anything else -- an ingester
+// refusing a body the gateway validated -- is a protocol bug: 500, logged at
+// ERROR. Routing failures are not counted as rejections; the per-ingester
+// outcome counter records them.
+func (s *Server) writeRouteError(w http.ResponseWriter, r *http.Request, component string, err error) {
+	switch {
+	case isUnavailable(err):
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "ingester unavailable"})
+	case isCanceled(err):
+		w.WriteHeader(statusClientClosedConnection)
+	default:
+		observability.Component(observability.FromContext(r.Context()), component).Error(
+			"write routing failed", slog.String("error", err.Error()))
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 	}
 }
