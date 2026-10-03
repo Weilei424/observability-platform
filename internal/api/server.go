@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 
@@ -73,8 +74,19 @@ type Deps struct {
 	Ready func() error
 
 	// Upstreams, when set, makes this server a gateway (see gateway.go): every
-	// public route is proxied, and the engine and ingester fields are unused.
+	// read route is proxied, and the engine and ingester fields are unused.
 	Upstreams *Upstreams
+
+	// Writes, required with Upstreams, routes the gateway's validated writes.
+	Writes WriteRouter
+}
+
+// WriteRouter sends validated writes onward: the gateway's ring router. When
+// set, the write handlers validate exactly as all-in-one does -- same 400s, same
+// rejection counters -- then hand the batch to it instead of appending locally.
+type WriteRouter interface {
+	PushSamples(ctx context.Context, samples []metrics.PendingSample) error
+	PushEntries(ctx context.Context, entries []logs.PendingEntry) error
 }
 
 type Server struct {
@@ -92,6 +104,7 @@ type Server struct {
 	internal    func(chi.Router)
 	ready       func() error
 	gateway     *gatewayProxies
+	writes      WriteRouter
 }
 
 func New(d Deps) *Server {
@@ -104,8 +117,11 @@ func New(d Deps) *Server {
 		if d.Routes != RoutesAll {
 			panic("api: Deps.Upstreams requires Routes == RoutesAll")
 		}
-		if d.Upstreams.Ingester == nil || d.Upstreams.Querier == nil {
-			panic("api: Deps.Upstreams requires non-nil Ingester and Querier URLs")
+		if d.Upstreams.Querier == nil {
+			panic("api: Deps.Upstreams requires a non-nil Querier URL")
+		}
+		if d.Writes == nil {
+			panic("api: Deps.Upstreams requires Deps.Writes: a gateway routes writes itself")
 		}
 	}
 	if d.HTTP == nil {
@@ -127,6 +143,7 @@ func New(d Deps) *Server {
 		routes:      d.Routes,
 		internal:    d.Internal,
 		ready:       d.Ready,
+		writes:      d.Writes,
 	}
 	if d.Upstreams != nil {
 		s.gateway = newGatewayProxies(d.Upstreams)
