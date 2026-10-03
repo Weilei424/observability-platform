@@ -48,6 +48,7 @@ func MemberLabel(member string) string {
 	return u.Host
 }
 
+// PushSamples sends each sample to the ingester that owns its series.
 func (rt *Router) PushSamples(ctx context.Context, samples []metrics.PendingSample) error {
 	groups := map[string][]metrics.PendingSample{}
 	for _, s := range samples {
@@ -59,6 +60,7 @@ func (rt *Router) PushSamples(ctx context.Context, samples []metrics.PendingSamp
 	})
 }
 
+// PushEntries sends each log entry to the ingester that owns its stream.
 func (rt *Router) PushEntries(ctx context.Context, entries []logs.PendingEntry) error {
 	groups := map[string][]logs.PendingEntry{}
 	for _, e := range entries {
@@ -72,6 +74,10 @@ func (rt *Router) PushEntries(ctx context.Context, entries []logs.PendingEntry) 
 
 func fanOut[T any](ctx context.Context, rt *Router, groups map[string][]T, send func(context.Context, *Client, []T) error) error {
 	if err := ctx.Err(); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			// Same classification as Client.do: an expired deadline is an outage.
+			return fmt.Errorf("%w: write routing: %w", ErrUnavailable, err)
+		}
 		return err
 	}
 	var (
