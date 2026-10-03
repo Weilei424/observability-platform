@@ -77,6 +77,21 @@ app.kubernetes.io/component: {{ $component }}
 {{- printf "http://%s:%d" (include "backend.componentName" (list $root $component)) ($root.Values.service.port | int) -}}
 {{- end -}}
 
+{{/*
+backend.ingesterURLs: the ring's members, one per ingester replica, by the pod
+DNS names the StatefulSet's headless Service gives them. The gateway and querier
+both render it, so their lists always match (spec §7).
+*/}}
+{{- define "backend.ingesterURLs" -}}
+{{- $root := . -}}
+{{- $name := include "backend.componentName" (list $root "ingester") -}}
+{{- $urls := list -}}
+{{- range $i := until (int $root.Values.split.ingester.replicas) -}}
+{{- $urls = append $urls (printf "http://%s-%d.%s-headless:%d" $name $i $name ($root.Values.service.port | int)) -}}
+{{- end -}}
+{{- join "," $urls -}}
+{{- end -}}
+
 {{- define "backend.podSecurityContext" -}}
 securityContext:
   runAsNonRoot: true
