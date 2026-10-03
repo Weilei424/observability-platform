@@ -40,8 +40,8 @@ func (s *WALStore) SetTestBeforeCheckpoint(fn func()) {
 // *BlockStore satisfies it in all-in-one; the ingester's HeadStore, whose
 // flushes go to another process, satisfies it in split mode.
 type walHead interface {
-	AppendTracked(labels Labels, tsMs int64, val float64, walSeg int) error
-	GenerationExhausted() bool
+	ReserveGeneration() (int64, error)
+	AppendTrackedGen(labels Labels, tsMs int64, val float64, gen int64, walSeg int) error
 	OldestHeadSegment() int
 	FlushBlock() (bool, error)
 	SealedChunkCount() int
@@ -73,18 +73,19 @@ func NewWALStore(w wal.RecordWriter, store walHead, dataDir string) *WALStore {
 func (s *WALStore) Append(labels Labels, tsMs int64, value float64) error {
 	s.appendMu.Lock()
 	defer s.appendMu.Unlock()
-	// Preflight under appendMu: refuse an exhausted-generation write before
-	// persisting its WAL record, so repeated rejections cannot grow an undeletable
-	// WAL with records that can never be flushed. The check-then-write is atomic
-	// against concurrent appends because they all serialize on appendMu.
-	if s.store.GenerationExhausted() {
-		return ErrGenerationExhausted
-	}
-	walSeg := s.w.SegmentIndex()
-	if err := s.w.WriteRecordGen(labelsToWALPairs(labels), tsMs, value, 0); err != nil {
+	// Reserving the generation first is the exhaustion preflight too: it fails
+	// before anything is persisted, so repeated rejections cannot grow an
+	// undeletable WAL. The record carries the generation so replay restores it
+	// exactly; appendMu serializes reserve, write, and append.
+	gen, err := s.store.ReserveGeneration()
+	if err != nil {
 		return err
 	}
-	return s.store.AppendTracked(labels, tsMs, value, walSeg)
+	walSeg := s.w.SegmentIndex()
+	if err := s.w.WriteRecordGen(labelsToWALPairs(labels), tsMs, value, gen); err != nil {
+		return err
+	}
+	return s.store.AppendTrackedGen(labels, tsMs, value, gen, walSeg)
 }
 
 func (s *WALStore) SelectSeries(sel Selector) ([]MatchedSeries, error) {
