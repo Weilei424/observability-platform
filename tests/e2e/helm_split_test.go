@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -95,6 +96,46 @@ func TestSplitServicesSelectOnlyTheirComponent(t *testing.T) {
 
 // Each ConfigMap must be an environment config.Load accepts — the right target,
 // exactly the peers it needs — and every peer URL must reach that peer.
+// peerService resolves the host of one peer URL to the Service it reaches. A
+// host is either a Service name, or a StatefulSet pod's DNS name
+// <sts>-<i>.<headless>, which passes when <headless> is a rendered Service and
+// <sts> is a rendered StatefulSet with more than i replicas (the pod label must
+// also fit DNS's 63 characters). It returns the Service name, or why not.
+func peerService(objs []k8sObject, host string) (string, error) {
+	services := map[string]bool{}
+	replicas := map[string]int{}
+	for _, o := range objs {
+		switch o.Kind {
+		case "Service":
+			services[o.Metadata.Name] = true
+		case "StatefulSet":
+			replicas[o.Metadata.Name] = o.Spec.Replicas
+		}
+	}
+	if services[host] {
+		return host, nil
+	}
+	pod, headless, ok := strings.Cut(host, ".")
+	if !ok || !services[headless] {
+		return "", fmt.Errorf("host %q is neither a rendered Service nor a pod under a rendered Service", host)
+	}
+	if len(pod) > 63 {
+		return "", fmt.Errorf("pod label %q is %d chars, over DNS's 63", pod, len(pod))
+	}
+	i := strings.LastIndex(pod, "-")
+	if i < 0 {
+		return "", fmt.Errorf("pod label %q has no ordinal", pod)
+	}
+	ordinal, err := strconv.Atoi(pod[i+1:])
+	if err != nil || ordinal < 0 {
+		return "", fmt.Errorf("pod label %q has no ordinal", pod)
+	}
+	if n, ok := replicas[pod[:i]]; !ok || n <= ordinal {
+		return "", fmt.Errorf("pod %q: StatefulSet %q has %d replicas (present: %v)", pod, pod[:i], n, ok)
+	}
+	return headless, nil
+}
+
 func TestSplitConfigMapsLoadAndReachTheirPeers(t *testing.T) {
 	objs := renderSplit(t)
 	peerKeys := map[string]string{"OBS_INGESTER_URL": "ingester", "OBS_STORE_URL": "store", "OBS_QUERIER_URL": "querier"}
@@ -123,17 +164,24 @@ func TestSplitConfigMapsLoadAndReachTheirPeers(t *testing.T) {
 				t.Fatalf("config.Load with %s's ConfigMap: %v", component, err)
 			}
 			for key, peer := range peerKeys {
-				url, ok := o.Data[key]
+				value, ok := o.Data[key]
 				if !ok {
 					continue
 				}
-				host, port := hostPortFromURL(t, url)
-				svc := findObject(t, objs, "Service", host)
-				if !servicePortExists(svc, port) {
-					t.Errorf("%s = %s, but Service %s has no port %s", key, url, host, port)
-				}
-				if got := workloadSelectedBy(objs, svc); len(got) != 1 || splitNames[got[0]] != peer {
-					t.Errorf("%s = %s reaches %v, want the %s", key, url, got, peer)
+				for _, url := range strings.Split(value, ",") {
+					host, port := hostPortFromURL(t, url)
+					svcName, err := peerService(objs, host)
+					if err != nil {
+						t.Errorf("%s = %s: %v", key, url, err)
+						continue
+					}
+					svc := findObject(t, objs, "Service", svcName)
+					if !servicePortExists(svc, port) {
+						t.Errorf("%s = %s, but Service %s has no port %s", key, url, svcName, port)
+					}
+					if got := workloadSelectedBy(objs, svc); len(got) != 1 || splitNames[got[0]] != peer {
+						t.Errorf("%s = %s reaches %v, want the %s", key, url, got, peer)
+					}
 				}
 			}
 		})
@@ -185,7 +233,7 @@ func TestSplitProbePathsExist(t *testing.T) {
 
 func TestSplitRefusesMoreThanOneSingleton(t *testing.T) {
 	helmAvailable(t)
-	for component, mention := range map[string]string{"ingester": "6.2", "store": "6.2", "compactor": "two compactors"} {
+	for component, mention := range map[string]string{"store": "Phase 6.4", "compactor": "two compactors"} {
 		out, err := exec.Command("helm", "template", "backend", backendChart,
 			"--set", "topology=split", "--set", "split."+component+".replicas=2").CombinedOutput()
 		if err == nil {
@@ -449,9 +497,11 @@ func TestLongFullnameOverrideRendersValidDistinctNames(t *testing.T) {
 					}
 					for _, k := range []string{"OBS_INGESTER_URL", "OBS_STORE_URL", "OBS_QUERIER_URL"} {
 						if v := o.Data[k]; v != "" {
-							host := strings.Split(strings.TrimPrefix(v, "http://"), ":")[0]
-							if !services[host] {
-								t.Errorf("ConfigMap %s: %s = %q names no rendered Service", o.Metadata.Name, k, v)
+							for _, u := range strings.Split(v, ",") {
+								host := strings.Split(strings.TrimPrefix(u, "http://"), ":")[0]
+								if _, err := peerService(objs, host); err != nil {
+									t.Errorf("ConfigMap %s: %s = %q: %v", o.Metadata.Name, k, u, err)
+								}
 							}
 						}
 					}
@@ -511,5 +561,47 @@ func checkCollisionRefused(t *testing.T, name, component string) {
 	if _, err := exec.Command("helm", "template", "obs", backendChart, "--set", "topology=all-in-one",
 		"--set", "fullnameOverride="+name).CombinedOutput(); err != nil {
 		t.Errorf("all-in-one, fullnameOverride %q: %v, want it to render", name, err)
+	}
+}
+
+func TestSplitIngesterListFollowsReplicas(t *testing.T) {
+	for _, replicas := range []int{1, 3} {
+		objs := renderSplit(t, fmt.Sprintf("split.ingester.replicas=%d", replicas))
+		var want []string
+		for i := range replicas {
+			want = append(want, fmt.Sprintf("http://observability-ingester-%d.observability-ingester-headless:8080", i))
+		}
+		lists := map[string]string{}
+		for _, o := range objs {
+			if o.Kind == "ConfigMap" && o.Data["OBS_INGESTER_URL"] != "" {
+				lists[o.Data["OBS_TARGET"]] = o.Data["OBS_INGESTER_URL"]
+			}
+		}
+		for _, target := range []string{"gateway", "querier"} {
+			if got := lists[target]; got != strings.Join(want, ",") {
+				t.Errorf("replicas=%d: %s OBS_INGESTER_URL = %q, want %q", replicas, target, got, strings.Join(want, ","))
+			}
+		}
+		for _, o := range objs {
+			if o.Kind == "StatefulSet" && strings.HasSuffix(o.Metadata.Name, "-ingester") && o.Spec.Replicas != replicas {
+				t.Errorf("ingester StatefulSet replicas = %d, want %d", o.Spec.Replicas, replicas)
+			}
+		}
+	}
+}
+
+func TestSplitDefaultsToThreeIngesters(t *testing.T) {
+	for _, o := range renderSplit(t) {
+		if o.Kind == "StatefulSet" && strings.HasSuffix(o.Metadata.Name, "-ingester") && o.Spec.Replicas != 3 {
+			t.Errorf("default ingester replicas = %d, want 3", o.Spec.Replicas)
+		}
+	}
+}
+
+func TestSplitStoreStaysSingle(t *testing.T) {
+	out, err := exec.Command("helm", "template", "obs", backendChart, "--set", "topology=split",
+		"--set", "split.store.replicas=2").CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "Phase 6.4") {
+		t.Errorf("two stores rendered (err %v), want a failure pointing at Phase 6.4\n%.300s", err, out)
 	}
 }
