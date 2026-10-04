@@ -140,11 +140,23 @@ helm upgrade prometheus deployments/helm/prometheus -n obs --set topology=split 
   --set 'split.targets.ingester={http://observability-ingester-0.observability-ingester-headless:8080,http://observability-ingester-1.observability-ingester-headless:8080,http://observability-ingester-2.observability-ingester-headless:8080,http://observability-ingester-3.observability-ingester-headless:8080}' --wait
 ```
 
-To scale down, reduce the replica count the same way. Kubernetes stops the
-highest-numbered pod, whose graceful shutdown runs the final flush, but the
-gateway and querier roll to the shorter list only after the upgrade applies the
-change: until they do, reads answer `503`. A pod's PVC is kept after it is
-removed; scaling back up reattaches it.
+To scale down, stop the ingester first and shorten the lists second, as in
+Compose (`n` is the current replica count):
+
+```bash
+kubectl scale statefulset/observability-ingester -n obs --replicas=<n-1>
+kubectl wait --for=delete pod/observability-ingester-<n-1> -n obs --timeout=120s
+helm upgrade backend deployments/helm/backend -n obs --reuse-values --set split.ingester.replicas=<n-1> --wait
+```
+
+The wait matters: the highest-numbered pod's graceful shutdown runs the final
+flush, and the pod is gone only after it lands. Then upgrade the backend chart
+with the lower count, and update the Prometheus chart's `split.targets.ingester`
+list to the same number of entries. A single `helm upgrade` would run the
+StatefulSet scale-down and the gateway and querier rolls concurrently, so a new
+querier can drop the terminating ingester before its final flush lands: reads
+could answer `200` with that ingester's unflushed data missing. A pod's PVC is
+kept after it is removed; scaling back up reattaches it.
 
 ## Failure drill: stop one ingester
 
