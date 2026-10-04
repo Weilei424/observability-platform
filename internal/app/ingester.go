@@ -122,6 +122,11 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 		Handler: srv,
 		loops:   []func(ctx context.Context){flush.Run},
 		closers: []closer{
+			// Drain before the WAL closes: the maintenance loop's final flush
+			// took only sealed chunks, and an ingester removed from the ring
+			// must not leave its open chunks in a WAL no reader will see. On
+			// failure the data is still in the WAL and replays on the next start.
+			{component: "flush", msg: "drain failed: unflushed samples stay in this ingester's WAL until it restarts", close: writes.Drain},
 			{component: "wal", msg: "wal close error", close: w.Close},
 			// Close's final flush runs the hook above synchronously before Close
 			// returns, so if the only error Close reports is the one the hook just
