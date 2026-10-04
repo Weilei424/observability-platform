@@ -78,18 +78,34 @@ app.kubernetes.io/component: {{ $component }}
 {{- end -}}
 
 {{/*
-backend.ingesterURLs: the ring's members, one per ingester replica, by the pod
-DNS names the StatefulSet's headless Service gives them. The gateway and querier
-both render it, so their lists always match (spec §7).
+backend.ingesterURLs: the ring's members, by the pod DNS names the StatefulSet's
+headless Service gives them, for ordinals 0 to count-1. Called as (list $root
+count). The querier reads every replica; the gateway writes to the first
+backend.ingesterWriteCount of them, so its list is always a prefix of the
+querier's and it never writes to an ingester the querier does not read. Both
+come from this one helper (spec §7).
 */}}
 {{- define "backend.ingesterURLs" -}}
-{{- $root := . -}}
+{{- $root := index . 0 -}}
+{{- $count := index . 1 -}}
 {{- $name := include "backend.componentName" (list $root "ingester") -}}
 {{- $urls := list -}}
-{{- range $i := until (int $root.Values.split.ingester.replicas) -}}
+{{- range $i := until (int $count) -}}
 {{- $urls = append $urls (printf "http://%s-%d.%s-headless:%d" $name $i $name ($root.Values.service.port | int)) -}}
 {{- end -}}
 {{- join "," $urls -}}
+{{- end -}}
+
+{{/*
+backend.ingesterWriteCount: split.ingester.writeReplicas, or every replica when
+unset. A membership change raises replicas before writeReplicas (the querier
+reads a new ingester before the gateway writes to it) and lowers writeReplicas
+before replicas (the gateway stops writing to an ingester before the querier
+stops reading it).
+*/}}
+{{- define "backend.ingesterWriteCount" -}}
+{{- $v := .Values.split.ingester -}}
+{{- if hasKey $v "writeReplicas" -}}{{ int $v.writeReplicas }}{{- else -}}{{ int $v.replicas }}{{- end -}}
 {{- end -}}
 
 {{- define "backend.podSecurityContext" -}}
