@@ -310,3 +310,53 @@ func TestClientJoinsPeerURLWithoutDoubleSlash(t *testing.T) {
 		}
 	}
 }
+
+// Each operation expects one success status. A 204 where a body is due is a
+// protocol disagreement, never an empty success: an empty select would read
+// as "no data" instead of failing closed, and an empty flush answer would let
+// the ingester discard chunks the store never acknowledged. Likewise a push
+// answered 200 is not the push route's contract.
+func TestClientRefusesAnUnexpectedSuccessStatus(t *testing.T) {
+	answer := func(code int) *rpc.Client {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			if code == http.StatusOK {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(code)
+				_, _ = w.Write([]byte(`{}`))
+				return
+			}
+			w.WriteHeader(code)
+		}))
+		t.Cleanup(srv.Close)
+		return client(t, srv.URL)
+	}
+	protocolErr := func(name string, err error) {
+		t.Helper()
+		if err == nil || errors.Is(err, rpc.ErrUnavailable) {
+			t.Errorf("%s: err = %v, want a protocol error (not success, not an outage)", name, err)
+		}
+	}
+
+	nc := answer(http.StatusNoContent)
+	ctx := context.Background()
+	m, _ := metrics.NewLabels(map[string]string{"__name__": "m"})
+	s, _ := logs.NewStreamLabels(map[string]string{"service": "api"})
+
+	_, err := rpc.NewMetricsSource(nc).Select(ctx, metrics.SelectParams{Selector: metrics.Selector{MetricName: "m"}, MinT: 0, MaxT: 1})
+	protocolErr("metrics select answered 204", err)
+	_, err = rpc.NewMetricsSource(nc).SelectLabelNames(ctx)
+	protocolErr("metrics labels answered 204", err)
+	_, err = rpc.NewLogsSource(nc).SelectStreams(ctx, nil, 0, 1)
+	protocolErr("logs select answered 204", err)
+	_, err = rpc.NewBlockSink(nc).IngestSeriesChunks(ctx, nil)
+	protocolErr("metrics flush answered 204", err)
+	protocolErr("logs flush answered 204", rpc.NewChunkSink(nc).IngestStreams(ctx, nil))
+	_, err = rpc.NewBlockManager(nc).CompactOnce(func([]block.BlockInfo) [][]string { return [][]string{{"a"}} })
+	protocolErr("compact answered 204", err)
+	_, err = rpc.NewBlockManager(nc).ApplyRetention(time.Now(), time.Hour)
+	protocolErr("retention answered 204", err)
+
+	ok := answer(http.StatusOK)
+	protocolErr("metrics push answered 200", ok.PushSamples(ctx, []metrics.PendingSample{{Labels: m, TimestampMs: 1, Value: 1}}))
+	protocolErr("logs push answered 200", ok.PushEntries(ctx, []logs.PendingEntry{{Labels: s, TimestampNs: 1, Line: "l"}}))
+}
