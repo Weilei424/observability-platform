@@ -55,15 +55,27 @@ func NewClient(peer, base string) (*Client, error) {
 }
 
 // do sends in (JSON, when non-nil) to /internal/v1/<path> and decodes the
-// answer into out. A transport failure, a context deadline, or a 5xx is
+// 200 answer into out. A transport failure, a context deadline, or a 5xx is
 // ErrUnavailable — a deadline means the peer failed to answer in time, the
-// same as any other timeout; any other non-200 is a protocol disagreement
-// between two components and is returned as-is. On an error answer out is
+// same as any other timeout; any other status, 204 included, is a protocol
+// disagreement between two components and is returned as-is. On an error answer out is
 // still filled when the body decodes, so a partial result — compaction and
 // retention report one — survives. A cancellation is different from a
 // deadline: it is the caller giving up on its own, not the peer failing to
 // answer, so it is returned as the context's own error and is not ErrUnavailable.
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, in, out any) error {
+	return c.call(ctx, method, path, query, in, out, http.StatusOK)
+}
+
+// doNoContent is do for a route whose only success is 204 with no body: the
+// push routes. A 200 there is as much a protocol disagreement as a 204 where
+// do expects a body — each operation accepts exactly its own success status,
+// so a 204 can never pass for an empty read or an acknowledged flush.
+func (c *Client) doNoContent(ctx context.Context, method, path string, in any) error {
+	return c.call(ctx, method, path, nil, in, nil, http.StatusNoContent)
+}
+
+func (c *Client) call(ctx context.Context, method, path string, query url.Values, in, out any, want int) error {
 	var body io.Reader
 	if in != nil {
 		// marshalJSON, not json.Marshal: it is the one encoding path for every
@@ -97,8 +109,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	}
 	defer resp.Body.Close()
 
-	// The push routes answer 204 with no body, which is success.
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+	if resp.StatusCode != want {
 		// Cap what an error answer buffers: it is always small (an
 		// {"error": ...} object, or a maintenance route's partial count), so a
 		// misbehaving peer can't make the client hold an unbounded body in
@@ -122,7 +133,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		return fmt.Errorf("rpc: %s %s answered %d: %s", c.peer, path, resp.StatusCode, errorMessage(raw))
 	}
 
-	if resp.StatusCode == http.StatusNoContent {
+	if want == http.StatusNoContent {
 		return nil
 	}
 	raw, err := io.ReadAll(resp.Body)
