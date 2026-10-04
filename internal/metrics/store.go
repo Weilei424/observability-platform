@@ -189,6 +189,25 @@ func (s *MemoryStore) GenerationExhausted() bool {
 	return s.nextGen > chunk.MaxGeneration
 }
 
+// SealHeadChunks seals every series' open head chunk, so the next flush takes
+// all of the head, not only chunks that filled up. The next append to a series
+// starts a new chunk. Returns how many chunks it sealed.
+func (s *MemoryStore) SealHeadChunks() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, ms := range s.series {
+		if len(ms.chunks) == 0 {
+			continue
+		}
+		if last := ms.chunks[len(ms.chunks)-1]; !last.Sealed() && last.NumSamples() > 0 {
+			last.Seal()
+			n++
+		}
+	}
+	return n
+}
+
 // OldestHeadSegment returns the smallest WAL segment index in which any chunk
 // still in memory was allocated, sealed or not. Returns -1 when no series has
 // chunks. Use this to determine the safe WAL deletion boundary after a block flush.
