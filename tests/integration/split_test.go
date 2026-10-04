@@ -230,11 +230,22 @@ func (c *cluster) ingesterByURL(t *testing.T, url string) *process {
 func (c *cluster) reconfigure(t *testing.T, urls []string) {
 	t.Helper()
 	for _, p := range []*process{c.gateway, c.querier} {
-		p.stop()
-		p.cfg.IngesterURL, p.cfg.IngesterURLs = strings.Join(urls, ","), slices.Clone(urls)
-		p.start()
+		restartWithMembers(p, urls)
 	}
 	c.ingesterURLs = slices.Clone(urls)
+}
+
+// restartWithMembers restarts one gateway or querier over urls: one stage of a
+// staged membership change, where the querier and gateway move separately.
+func restartWithMembers(p *process, urls []string) {
+	p.t.Helper()
+	p.stop()
+	p.cfg.IngesterURL, p.cfg.IngesterURLs = strings.Join(urls, ","), slices.Clone(urls)
+	p.start()
+	// The stopped server closed its keep-alive connections; a pooled one the
+	// client still holds would fail the next POST with EOF (net/http retries
+	// only idempotent requests on a dead connection).
+	httpClient.CloseIdleConnections()
 }
 
 func startClusterN(t *testing.T, n int) *cluster {
