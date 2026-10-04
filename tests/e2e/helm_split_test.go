@@ -605,3 +605,52 @@ func TestSplitStoreStaysSingle(t *testing.T) {
 		t.Errorf("two stores rendered (err %v), want a failure pointing at Phase 6.4\n%.300s", err, out)
 	}
 }
+
+// ringLists returns the gateway's and querier's OBS_INGESTER_URL lists.
+func ringLists(t *testing.T, sets ...string) (gateway, querier []string) {
+	t.Helper()
+	for _, o := range renderSplit(t, sets...) {
+		if o.Kind != "ConfigMap" || o.Data["OBS_INGESTER_URL"] == "" {
+			continue
+		}
+		list := strings.Split(o.Data["OBS_INGESTER_URL"], ",")
+		switch o.Data["OBS_TARGET"] {
+		case "gateway":
+			gateway = list
+		case "querier":
+			querier = list
+		}
+	}
+	return gateway, querier
+}
+
+// A membership change is staged so the gateway never writes to an ingester the
+// querier does not read: the querier reads every replica, the gateway writes
+// to the first split.ingester.writeReplicas of them. Unset, both cover every
+// replica; set, the gateway's list is a prefix of the querier's.
+func TestSplitGatewayWritesToAPrefixOfTheQuerierList(t *testing.T) {
+	gw, q := ringLists(t)
+	if len(q) != 3 || strings.Join(gw, ",") != strings.Join(q, ",") {
+		t.Fatalf("default: gateway %v, querier %v; want both the same three ingesters", gw, q)
+	}
+	gw, q = ringLists(t, "split.ingester.replicas=4", "split.ingester.writeReplicas=3")
+	if len(q) != 4 || len(gw) != 3 {
+		t.Fatalf("replicas=4 writeReplicas=3: gateway %d members, querier %d; want 3 and 4", len(gw), len(q))
+	}
+	for i, u := range gw {
+		if u != q[i] {
+			t.Fatalf("gateway member %d = %s, querier's = %s; the gateway list must be a prefix of the querier's", i, u, q[i])
+		}
+	}
+}
+
+func TestSplitWriteReplicasOutOfRangeFailsTheRender(t *testing.T) {
+	helmAvailable(t)
+	for _, set := range []string{"split.ingester.writeReplicas=4", "split.ingester.writeReplicas=0"} {
+		out, err := exec.Command("helm", "template", "obs", backendChart, "--set", "topology=split",
+			"--set", set).CombinedOutput()
+		if err == nil || !strings.Contains(string(out), "writeReplicas") {
+			t.Errorf("%s with 3 replicas rendered (err %v), want a failure naming writeReplicas\n%.300s", set, err, out)
+		}
+	}
+}
