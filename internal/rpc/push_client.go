@@ -23,7 +23,7 @@ func (c *Client) PushSamples(ctx context.Context, samples []metrics.PendingSampl
 		}
 		req.Series[i].Samples = append(req.Series[i].Samples, wirePushSample{T: s.TimestampMs, V: s.Value})
 	}
-	return c.do(ctx, http.MethodPost, "metrics/push", nil, req, nil)
+	return c.doNoContent(ctx, http.MethodPost, "metrics/push", req)
 }
 
 // PushEntries sends log lines to the ingester's push route, grouped by stream
@@ -41,5 +41,5 @@ func (c *Client) PushEntries(ctx context.Context, entries []logs.PendingEntry) e
 		}
 		req.Streams[i].Entries = append(req.Streams[i].Entries, wireEntry{T: e.TimestampNs, Line: e.Line})
 	}
-	return c.do(ctx, http.MethodPost, "logs/push", nil, req, nil)
+	return c.doNoContent(ctx, http.MethodPost, "logs/push", req)
 }
