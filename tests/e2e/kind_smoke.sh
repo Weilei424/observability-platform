@@ -355,7 +355,9 @@ fi
 
 if [ "$TOPOLOGY" = split ]; then
     ROLLOUTS="statefulset/observability-ingester statefulset/observability-store deployment/observability-backend deployment/observability-querier deployment/observability-compactor"
-    WANT_PVCS=2
+    # One PVC per ingester replica (chart default is 3) plus the store's PVC (1) = 4 total.
+    # If the chart's split.ingester.replicas default changes, update this value.
+    WANT_PVCS=4
 else
     ROLLOUTS="statefulset/observability-backend"
     WANT_PVCS=1
