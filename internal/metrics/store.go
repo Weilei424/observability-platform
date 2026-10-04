@@ -102,7 +102,9 @@ func (s *MemoryStore) ReserveGeneration() (int64, error) {
 	return s.nextGenerationLocked()
 }
 
-// Append adds a sample with a newly assigned generation.
+// Append adds a sample with a newly assigned generation. Samples may be
+// appended out of order (the chunk encodes insertion order; reads sort), and for
+// equal timestamps the highest generation (last write) wins.
 func (s *MemoryStore) Append(labels Labels, timestampMs int64, value float64) error {
 	return s.appendInternal(labels, timestampMs, value, 0, 0)
 }
