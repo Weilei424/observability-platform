@@ -47,6 +47,7 @@ type walHead interface {
 	SealedChunkCount() int
 	queryStore
 	Source
+	SealHeadChunks() int
 }
 
 var (
@@ -115,6 +116,29 @@ func (s *WALStore) SelectLabelNames(ctx context.Context) ([]string, error) {
 
 func (s *WALStore) SelectLabelValues(ctx context.Context, name string) ([]string, error) {
 	return s.store.SelectLabelValues(ctx, name)
+}
+
+// Drain flushes the whole head, open chunks included, and checkpoints the WAL:
+// what an ingester does on its way out, so an ingester removed from the ring
+// leaves nothing in its WAL that no reader will see (Phase 6.2). Normal flushes
+// take only sealed chunks; Drain seals the open ones first, under appendMu so
+// no append lands between the seal and the flush. Call it once appends have
+// stopped. On error the unflushed data is still in the WAL and replays on the
+// next start.
+func (s *WALStore) Drain() error {
+	s.appendMu.Lock()
+	s.store.SealHeadChunks()
+	s.appendMu.Unlock()
+	for s.store.SealedChunkCount() > 0 {
+		wrote, err := s.FlushBlock()
+		if err != nil {
+			return err
+		}
+		if !wrote {
+			return nil
+		}
+	}
+	return nil
 }
 
 // FlushBlock flushes sealed chunks to a new immutable block and advances the WAL
