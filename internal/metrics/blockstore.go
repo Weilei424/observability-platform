@@ -307,6 +307,9 @@ func (bs *BlockStore) AppendTracked(labels Labels, tsMs int64, val float64, walS
 	return bs.mem.AppendTracked(labels, tsMs, val, walSeg)
 }
 
+// SealHeadChunks seals the in-memory head's open chunks (WALStore.Drain).
+func (bs *BlockStore) SealHeadChunks() int { return bs.mem.SealHeadChunks() }
+
 // ReserveGeneration assigns the next generation without appending (WALStore).
 func (bs *BlockStore) ReserveGeneration() (int64, error) { return bs.mem.ReserveGeneration() }
 
