@@ -2,6 +2,10 @@
 {{- if lt (int .Values.split.ingester.replicas) 1 }}
 {{- fail "split.ingester.replicas must be at least 1" }}
 {{- end }}
+{{- $writeCount := int (include "backend.ingesterWriteCount" .) }}
+{{- if or (lt $writeCount 1) (gt $writeCount (int .Values.split.ingester.replicas)) }}
+{{- fail (printf "split.ingester.writeReplicas must be between 1 and split.ingester.replicas (%d), got %d: the gateway may only write to ingesters the querier reads" (int .Values.split.ingester.replicas) $writeCount) }}
+{{- end }}
 {{- if gt (int .Values.split.store.replicas) 1 }}
 {{- fail "split.store.replicas must be 1 until Phase 6.4: a second store would hold blocks no querier reads" }}
 {{- end }}
@@ -24,8 +28,10 @@ data:
   OBS_TARGET: {{ $component | quote }}
   OBS_HTTP_ADDR: {{ printf ":%d" ($root.Values.service.port | int) | quote }}
   {{- range $peer := index $peers $component }}
-  {{- if eq $peer "ingester" }}
-  OBS_INGESTER_URL: {{ include "backend.ingesterURLs" $root | quote }}
+  {{- if and (eq $peer "ingester") (eq $component "gateway") }}
+  OBS_INGESTER_URL: {{ include "backend.ingesterURLs" (list $root (include "backend.ingesterWriteCount" $root)) | quote }}
+  {{- else if eq $peer "ingester" }}
+  OBS_INGESTER_URL: {{ include "backend.ingesterURLs" (list $root $root.Values.split.ingester.replicas) | quote }}
   {{- else }}
   OBS_{{ upper $peer }}_URL: {{ include "backend.peerURL" (list $root $peer) | quote }}
   {{- end }}
