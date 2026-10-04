@@ -188,3 +188,66 @@ func TestRingClusterDirectIngesterWriteIsRead(t *testing.T) {
 		t.Fatalf("direct write to non-owner read = %q, want 5", v)
 	}
 }
+
+// TestRingClusterStagedMembershipChangeNeverHidesWrites drives the Helm chart's
+// staged procedure in process, with writes in every window. Adding: the
+// querier reads the new ingester before the gateway writes to it. Removing:
+// the gateway stops writing to it, it stops (its final flush reaches the
+// store) while reads fail closed with 503, then the querier drops it. At no
+// stage may a read answer 200 with an acknowledged write missing.
+func TestRingClusterStagedMembershipChangeNeverHidesWrites(t *testing.T) {
+	c := startClusterN(t, 3)
+	three := slices.Clone(c.ingesterURLs)
+	base := time.Now().UnixMilli()
+	var written []string
+	write := func(stage string, n int) {
+		t.Helper()
+		var names []string
+		for i := range n {
+			names = append(names, fmt.Sprintf("staged_%s_%d", stage, i))
+		}
+		if code := c.ingestBatch(t, names, base, 1); code != http.StatusNoContent {
+			t.Fatalf("%s: write = %d, want 204", stage, code)
+		}
+		written = append(written, names...)
+	}
+	readAll := func(stage string) {
+		t.Helper()
+		for _, name := range written {
+			if v, code, _ := c.instant(t, name, base); v != "1" {
+				t.Fatalf("%s: %s read = %q (%d); an acknowledged write is hidden", stage, name, v, code)
+			}
+		}
+	}
+
+	write("before", 30)
+	added := c.addIngester(t)
+	four := append(slices.Clone(three), added)
+
+	// Add, stage 1: the querier reads four members, the gateway still writes to three.
+	restartWithMembers(c.querier, four)
+	write("querier_first", 30)
+	readAll("add stage 1")
+	// Add, stage 2: the gateway writes to all four.
+	restartWithMembers(c.gateway, four)
+	write("both_four", 60)
+	if v := metricValue(t, added, "obs_samples_ingested_total"); v == 0 {
+		t.Fatal("the added ingester took no writes after the gateway moved to four members")
+	}
+	readAll("add stage 2")
+
+	// Remove, stage 1: the gateway stops writing to the added ingester.
+	restartWithMembers(c.gateway, three)
+	write("gateway_three", 30)
+	readAll("remove stage 1")
+	// Remove, stage 2: the ingester stops; its final flush reaches the store.
+	// The querier still lists it, so reads fail closed rather than miss data.
+	c.ingesterByURL(t, added).stop()
+	if _, code, errType := c.instant(t, written[0], base); code != http.StatusServiceUnavailable || errType != "unavailable" {
+		t.Fatalf("remove stage 2: read = %d %q, want 503 unavailable while a listed ingester is down", code, errType)
+	}
+	// Remove, stage 3: the querier drops it; every write is still read.
+	restartWithMembers(c.querier, three)
+	c.ingesterURLs = three
+	readAll("remove stage 3")
+}
