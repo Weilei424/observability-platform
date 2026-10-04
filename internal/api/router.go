@@ -57,9 +57,8 @@ func (s *Server) buildRouter() chi.Router {
 // the validated batch through Deps.Writes (see handleIngestMetrics, handleLokiPush).
 func (s *Server) write(local http.HandlerFunc) http.Handler { return local }
 
-// promRead and lokiRead return the local handler, or on a gateway the proxy for
-// that route family.
-
+// promRead returns the local handler, or on a gateway the proxy for the
+// Prometheus route family.
 func (s *Server) promRead(local http.HandlerFunc) http.Handler {
 	if s.gateway != nil {
 		return s.gateway.promRead
@@ -67,6 +66,7 @@ func (s *Server) promRead(local http.HandlerFunc) http.Handler {
 	return local
 }
 
+// lokiRead is promRead for the Loki route family.
 func (s *Server) lokiRead(local http.HandlerFunc) http.Handler {
 	if s.gateway != nil {
 		return s.gateway.lokiRead
