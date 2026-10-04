@@ -529,9 +529,78 @@ it at ERROR; the level is not made target-dependent.
   (`OBS_INGESTER_URL`, `OBS_STORE_URL`, `OBS_QUERIER_URL`) is missing or one it does not use
   is set.
 
-**Hand-off to 6.2.** Generations are per-ingester counters. Once the ring can move a series
-between ingesters, last-write-wins across them needs a rule before membership changes are
-allowed.
+**Resolved in 6.2: clock generations.** The per-ingester counters 6.1 left behind are
+replaced by hybrid clock generations; see "Ring-based sharding (introduced in 6.2)".
+
+### Ring-based sharding (introduced in 6.2)
+
+`OBS_INGESTER_URL` takes a comma-separated list on the gateway and querier, and the
+gateway routes each write to the ingester that owns it. The design is
+`docs/superpowers/specs/2026-10-01-phase-6.2-ring-sharding-design.md`; this section
+records the decisions and the one place the code diverged from it.
+
+- **A token ring, not `hash % N`.** Each member holds 128 tokens; a key is mixed with
+  splitmix64 and owned by the first token at or after it, clockwise. This is the shape
+  Cortex and Loki use, and it is what 6.3 needs: replication walks the ring to the next
+  distinct members. Ties between equal tokens go to the member sorting first, and
+  placement ignores the order of the configured list (`TestPlacementIgnoresListOrder`,
+  `TestRingHashIgnoresOrder`, `TestTokenTieGoesToTheMemberSortingFirst`). Balance is
+  within +-25% for 3 and 5 members (`TestBalance`); adding a member moves 1/(N+1) +- 0.05
+  of the keys and only to that member (`TestAddingAMemberMovesOnlyItsShare`).
+  `TestGoldenPlacement` pins the placement, so a change to it fails loudly.
+- **Keys.** Series route by series fingerprint; streams by stream fingerprint, so one
+  stream stays on one ingester.
+- **Static membership.** A change takes a restart of the gateway and querier. Both log
+  a `ring` line with the member count and a hash of the sorted list; Compose and the
+  runbook compare the two. Only Helm renders both lists from one helper; in Compose they
+  are two hand-edited literals, checked by that hash.
+- **The gateway validates with all-in-one's code.** The write proxy is gone: the
+  gateway decodes and validates with the same handler code as all-in-one
+  (`TestGatewayValidationMatchesAllInOne`), then sends each owner its group over
+  `POST /internal/v1/metrics/push` and `/logs/push`. Groups go out concurrently and the
+  worst outcome wins: `500` over `503` over `499`. The gateway owns the ingest rejection
+  counters. An already-expired write deadline is routed as an outage (`503`), matching
+  `Client.do` (`TestRouterExpiredDeadlineIsUnavailable`).
+- **Divergence from the spec.** Spec 5.2 said the ingester push route keeps no
+  rejection counter. The code counts append failures there under rejection reason
+  `append`: the gateway already accepted the sample, so a failure to store it would
+  otherwise be invisible.
+- **`MergeHeads` and the no-gap order.** The querier reads every ingester to
+  completion, sequentially, then the store; `metrics.MergeHeads` / `logs.MergeHeads`
+  combine the ingester answers with the 6.1 rules, then the existing merge adds the store.
+  The 6.1 argument still holds per ingester: a flush registers its block before the
+  ingester discards, and all ingesters finish before the store starts, so a sample
+  missing from every ingester answer was already in the store. Any ingester failing
+  fails the whole read (`503`). Parallel fanout and pruning stay with 6.4.
+- **Hybrid clock generations.** A write's generation is `max(previous + 1, now in Unix
+  microseconds)` in every target, with an injectable clock. It is monotonic per series
+  even if the clock steps back, and across ingesters it orders a moved series' writes by
+  wall clock, which resolves 6.1's hand-off. The persisted floor (`genfloor`) still keeps
+  a restarted ingester ahead of anything it shipped.
+- **WAL record type 2.** A new record type carries the generation; type-1 records
+  replay as generation 0, and replay restores generations exactly and raises the floor
+  past them (`TestReplayRestoresExactGenerations`,
+  `TestReplayRaisesFloorPastRestoredGenerations`). A truncated or padded type-2 record is
+  corrupt like any other.
+- **Measured cost.** `TestGenerationEncodingCost` (120-sample chunk, 15 s interval):
+  4.64 bytes/sample with the pre-6.2 counter, 5.63 with microsecond clock generations,
+  +0.99 bytes/sample.
+- **Membership changes.** Adding a member moves about 1/(N+1) of the keys; older data
+  stays on the previous owner until it flushes, every read covers both, and generations
+  order any overlap. The integration test (3 to 4) checks this: the old owner's graceful
+  stop flushes its write into a store block with its original generation; exact replay
+  restoration is proven at unit level. Removing a member means stopping it first so its
+  final flush runs.
+- **Failure semantics.** One ingester down: batches with keys it owns answer `503`,
+  other batches `204`, reads `503`; a retry after recovery reads back once.
+- **Observability and checks.** The kind and Compose spread checks read per-instance
+  counters through the self-observability Prometheus, because the backend image is
+  distroless.
+
+**Hand-off to 6.3.** The ring already orders members around each key. Replication takes
+the next R distinct members clockwise, and the write outcome rule becomes a quorum rule.
+Reads already cover every member, so replicated duplicates are a dedup problem for 6.4,
+not a completeness one.
 
 ---
 
@@ -653,6 +722,10 @@ The backend exposes the following metrics at `/metrics`, scraped by a separate P
 - `obs_flush_failures_total` — failed metrics head flushes
 - `obs_log_flushes_total` — successful log-store flushes
 - `obs_log_flush_failures_total` — failed log-store flushes
+
+**Ring (gateway and querier):**
+- `obs_ring_members` — ingesters in the configured ring
+- `obs_gateway_ingester_requests_total{ingester, outcome}` — gateway push requests per ingester and outcome
 
 In split, `obs_active_series` counts the ingester's head series and `obs_log_streams_total` the store's persisted streams.
 
