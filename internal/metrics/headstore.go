@@ -277,6 +277,8 @@ func (h *HeadStore) AppendTracked(labels Labels, tsMs int64, val float64, walSeg
 	return h.mem.AppendTracked(labels, tsMs, val, walSeg)
 }
 
+// ReserveGeneration assigns the next write generation without appending, so the
+// WAL record can carry it before the sample reaches the head.
 func (h *HeadStore) ReserveGeneration() (int64, error) { return h.mem.ReserveGeneration() }
 
 // AppendGen adds a sample with generation gen (0 assigns one); WAL replay uses it.
