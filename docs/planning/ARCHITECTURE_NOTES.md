@@ -596,8 +596,18 @@ records the decisions and the one place the code diverged from it.
   stays on the previous owner until it flushes, every read covers both, and generations
   order any overlap. The integration test (3 to 4) checks this: the old owner's graceful
   stop flushes its write into a store block with its original generation; exact replay
-  restoration is proven at unit level. Removing a member means stopping it first so its
-  final flush runs.
+  restoration is proven at unit level. A change is staged so the gateway never writes to
+  an ingester the querier does not read: adding, the querier gains it before the
+  gateway; removing, the gateway drops it, the ingester stops, then the querier drops
+  it. Helm enforces this with `split.ingester.writeReplicas` (the gateway's list is a
+  prefix of the querier's); `TestRingClusterStagedMembershipChangeNeverHidesWrites`
+  drives both stages with writes in every window.
+- **Ingesters drain on stop.** The ingester target's graceful shutdown seals every open
+  head chunk and flushes the whole head before the WAL closes (`WALStore.Drain`); the
+  maintenance loop's final flush takes only full chunks, which would have left a
+  removed ingester's recent samples in a WAL no reader sees. A restart therefore writes
+  one more small block (compaction merges it) and normally replays nothing; all-in-one
+  is unchanged.
 - **Failure semantics.** One ingester down: batches with keys it owns answer `503`,
   other batches `204`, reads `503`; a retry after recovery reads back once.
 - **Observability and checks.** The kind and Compose spread checks read per-instance
