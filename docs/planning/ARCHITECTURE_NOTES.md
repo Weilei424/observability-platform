@@ -564,7 +564,10 @@ records the decisions and the one place the code diverged from it.
 - **Divergence from the spec.** Spec 5.2 said the ingester push route keeps no
   rejection counter. The code counts append failures there under rejection reason
   `append`: the gateway already accepted the sample, so a failure to store it would
-  otherwise be invisible.
+  otherwise be invisible. On an append failure the push route stops and counts the
+  remainder under `append`, while all-in-one's metrics handler continues past a failure
+  and its logs handler counts abandoned lines under `batch`; totals match, the reason
+  split differs.
 - **`MergeHeads` and the no-gap order.** The querier reads every ingester to
   completion, sequentially, then the store; `metrics.MergeHeads` / `logs.MergeHeads`
   combine the ingester answers with the 6.1 rules, then the existing merge adds the store.
@@ -581,7 +584,11 @@ records the decisions and the one place the code diverged from it.
   replay as generation 0, and replay restores generations exactly and raises the floor
   past them (`TestReplayRestoresExactGenerations`,
   `TestReplayRaisesFloorPastRestoredGenerations`). A truncated or padded type-2 record is
-  corrupt like any other.
+  corrupt like any other. After upgrading to 6.2, a type-1 record replays with a fresh
+  generation, so while pre-6.2 segments are still past the checkpoint a pre-upgrade sample
+  can outrank a post-upgrade overwrite at the same series and timestamp; let the head
+  flush (the checkpoint passes those segments) before relying on same-timestamp
+  overwrites across a restart.
 - **Measured cost.** `TestGenerationEncodingCost` (120-sample chunk, 15 s interval):
   4.64 bytes/sample with the pre-6.2 counter, 5.63 with microsecond clock generations,
   +0.99 bytes/sample.
