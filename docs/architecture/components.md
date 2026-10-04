@@ -122,21 +122,27 @@ every ingester in turn, then the store.
 
 ### Membership changes
 
-Membership is static; a change takes a restart of the gateway and the querier.
+Membership is static; a change takes a restart of the gateway and the querier,
+staged so the gateway never writes to an ingester the querier does not read (a
+read would answer `200` with those writes missing):
 
-- **Adding an ingester:** start it, then restart the gateway and querier with
-  the longer list. About 1/N of series and streams route to the new member from
-  then on. Their older data stays on the previous owner until that ingester
-  flushes it; every read covers both, and generations order any overlap.
-- **Removing an ingester:** stop it first (its shutdown runs the final flush),
-  then restart the gateway and querier without it. Anything a failed final
-  flush left behind stays in that ingester's WAL and is not read until it
-  rejoins ([../api/limitations.md](../api/limitations.md)).
-- The gateway's and querier's lists must match. Helm renders both from one
-  helper (`backend.ingesterURLs`); in Compose the two literal lists are edited
-  by hand and must be kept identical, and the `ring` hash in the two `ring
-  ready` startup lines confirms it. A gateway writing to a member the querier does not read
-  hides those writes.
+- **Adding an ingester:** start it, restart the **querier** with the longer
+  list, then the **gateway**. About 1/N of series and streams route to the new
+  member from then on. Their older data stays on the previous owner until that
+  ingester flushes it; every read covers both, and generations order any
+  overlap.
+- **Removing an ingester:** restart the **gateway** without it, stop it, then
+  restart the **querier** without it. An ingester's graceful stop drains its
+  head: it seals and flushes every chunk, not only full ones, so nothing it
+  holds is left behind. Reads answer `503` while a stopped ingester is still on
+  the querier's list. What a failed drain leaves stays in that ingester's WAL
+  and is not read until it rejoins ([../api/limitations.md](../api/limitations.md)).
+- Once a change is complete the two lists match. Helm renders both from one
+  helper (`backend.ingesterURLs`) and stages the change with
+  `split.ingester.writeReplicas`, which keeps the gateway's list a prefix of
+  the querier's; in Compose the two literal lists are edited by hand in the
+  order above, and the `ring` hash in the two `ring ready` startup lines
+  confirms they match at the end.
 
 ### Generations
 
