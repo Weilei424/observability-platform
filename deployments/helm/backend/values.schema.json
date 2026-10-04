@@ -55,7 +55,24 @@
         "gateway": { "$ref": "#/$defs/statelessComponent" },
         "querier": { "$ref": "#/$defs/statelessComponent" },
         "compactor": { "$ref": "#/$defs/statelessComponent" },
-        "ingester": { "$ref": "#/$defs/statefulComponent" },
+        "ingester": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "replicas": { "type": "integer", "minimum": 1 },
+            "writeReplicas": {
+              "description": "How many of the replicas, from ordinal 0, the gateway writes to; the querier reads every replica. Unset means all of them. Lower it before adding an ingester's writes or before removing one (deployments/helm/README.md).",
+              "type": "integer",
+              "minimum": 1
+            },
+            "resources": { "type": "object" },
+            "persistence": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": { "size": { "type": "string" } }
+            }
+          }
+        },
         "store": { "$ref": "#/$defs/statefulComponent" }
       }
     }
