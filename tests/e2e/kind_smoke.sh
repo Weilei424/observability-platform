@@ -504,8 +504,9 @@ else
     log_fail "seeding the marker returned HTTP $STATUS, want 204"
 fi
 
-# Split only: 120 samples seal one chunk, so the ingester's graceful stop below
-# flushes this series to the store before it exits. Reading it back after the
+# Split only: 120 samples seal one chunk, so the owning ingester's graceful stop
+# below (every ingester is restarted) flushes this series to the store before
+# it exits. Reading it back after the
 # ingester's own restart proves only that the series survived — the ingester
 # could equally have replayed it from its own WAL. Reading it back after the
 # store's restart proves only that the marker survived a store restart: the
@@ -528,13 +529,13 @@ kill "$PF_PID" 2>/dev/null; PF_PID=""
 
 # ---- Restart ---------------------------------------------------------
 
-# restart_pod <statefulset> — deletes the StatefulSet's pod and proves a new
-# object replaced it. A StatefulSet pod keeps its name across a reschedule, so
+# restart_pod <statefulset> [ordinal] — deletes the StatefulSet's pod (ordinal
+# 0 unless given) and proves a new object replaced it. A StatefulSet pod keeps its name across a reschedule, so
 # only the UID can show that the replacement is a different process; without
 # that, a delete that never happened would leave every later check satisfied by
 # the original pod.
 restart_pod() {
-    local sts="$1" pod="$1-0" old_uid new_uid poll_start
+    local sts="$1" pod="$1-${2:-0}" old_uid new_uid poll_start
     echo ""
     echo "-- Deleting pod $pod --"
     old_uid=$(kubectl get pod "$pod" -n "$NS" -o jsonpath='{.metadata.uid}' 2>/dev/null)
@@ -625,9 +626,21 @@ marker_reads_back() {
 }
 
 if [ "$TOPOLOGY" = split ]; then
-    restart_pod observability-ingester
-    marker_reads_back "data persists across the ingester's restart" k8s_e2e_marker
-    marker_reads_back "the flushed series persists across the ingester's restart" k8s_e2e_flush_marker
+    # The ring decides which ingester owns each marker (with three members both
+    # land on ingester-2), so restart every replica: the owner's graceful stop
+    # then flushes its marker to the store and its restart replays the WAL,
+    # whichever pod that is. Restarting only ordinal 0 could pass without
+    # touching either marker.
+    INGESTERS=$(kubectl get statefulset observability-ingester -n "$NS" -o jsonpath='{.spec.replicas}' 2>/dev/null)
+    if [ -z "$INGESTERS" ] || [ "$INGESTERS" -lt 1 ]; then
+        log_fail "could not read the ingester StatefulSet's replica count; restarting ordinal 0 only"
+        INGESTERS=1
+    fi
+    for i in $(seq 0 $((INGESTERS - 1))); do
+        restart_pod observability-ingester "$i"
+    done
+    marker_reads_back "data persists across every ingester's restart" k8s_e2e_marker
+    marker_reads_back "the flushed series persists across every ingester's restart" k8s_e2e_flush_marker
     restart_pod observability-store
     marker_reads_back "data persists across the store's restart" k8s_e2e_marker
     marker_reads_back "the flushed series persists across the store's restart" k8s_e2e_flush_marker
