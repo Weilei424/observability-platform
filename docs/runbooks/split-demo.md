@@ -68,11 +68,24 @@ and look for `"target":"ingester"` and the other targets beside `component`.
 ## Add or remove an ingester
 
 Membership is static: the gateway and the querier read the ingester list once,
-at startup. Both lists must be identical, and both must be restarted for a
-change to take effect. The ring moves only the keys the changed member gains
-or loses: adding a fourth ingester routes about a quarter of series and
-streams to it. Their older data stays on the previous owner until it flushes,
-and every read covers both.
+at startup, so a change takes a restart of each. The ring moves only the keys
+the changed member gains or loses: adding a fourth ingester routes about a
+quarter of series and streams to it. Their older data stays on the previous
+owner until it flushes, and every read covers both.
+
+Order the two restarts so the gateway never writes to an ingester the querier
+does not read — otherwise a read can answer `200` with acknowledged writes
+missing:
+
+- **Adding:** start the ingester, move the **querier** to the longer list,
+  then the **gateway**.
+- **Removing:** move the **gateway** to the shorter list, stop the ingester,
+  then move the **querier**.
+
+An ingester's graceful stop drains it: it seals and flushes every head chunk,
+not only full ones, into the store, so a removed ingester leaves nothing
+behind. While a stopped ingester is still on the querier's list, reads answer
+`503` — they fail closed, never incomplete.
 
 ### Compose
 
@@ -81,82 +94,93 @@ To add `ingester-4`:
 1. In `deployments/docker/docker-compose.split.yml`, add an `ingester-4`
    service beside `ingester-3` (same `<<: *ingester` and `*ingester-env`, with
    its own `obs-ingester-4-data` volume, declared under `volumes:`), and add it
-   to the producers' `depends_on`.
-2. Append `,http://ingester-4:8080` to `OBS_INGESTER_URL` on **both** the
-   gateway and the querier.
-3. Add an `ingester-4:8080` target with `component: ingester` to
-   `observability/prometheus/prometheus.split.yml`.
-4. Start the new ingester first, then recreate the gateway and querier, which
-   picks up their changed environment:
+   to the producers' `depends_on`. Add an `ingester-4:8080` target with
+   `component: ingester` to `observability/prometheus/prometheus.split.yml`.
+2. Start it, then append `,http://ingester-4:8080` to the **querier's**
+   `OBS_INGESTER_URL` and recreate the querier:
 
-```bash
-docker compose -f deployments/docker/docker-compose.split.yml up -d ingester-4
-docker compose -f deployments/docker/docker-compose.split.yml up -d gateway querier
-docker compose -f deployments/docker/docker-compose.split.yml restart prometheus
-```
+   ```bash
+   docker compose -f deployments/docker/docker-compose.split.yml up -d ingester-4
+   docker compose -f deployments/docker/docker-compose.split.yml up -d querier
+   ```
 
-The two lists are separate literals that Compose does not tie together, so
-check that both `ring ready` lines now say `members=4` with equal hashes.
+3. Append the same URL to the **gateway's** `OBS_INGESTER_URL` and recreate it:
 
-To remove an ingester, **stop it first**: its shutdown runs a final flush into
-the store, so nothing it holds is left behind. Only then take it out of the
-lists.
+   ```bash
+   docker compose -f deployments/docker/docker-compose.split.yml up -d gateway
+   docker compose -f deployments/docker/docker-compose.split.yml restart prometheus
+   ```
 
-```bash
-docker compose -f deployments/docker/docker-compose.split.yml stop ingester-3
-```
+The two lists are separate literals that Compose does not tie together. They
+differ between steps 2 and 3 on purpose; once both are done, check that the
+gateway's and the querier's `ring ready` lines say `members=4` with equal hashes.
 
-Then delete it from `OBS_INGESTER_URL` on both the gateway and the querier (and
-from the Prometheus targets), and recreate them:
+To remove `ingester-3`:
 
-```bash
-docker compose -f deployments/docker/docker-compose.split.yml up -d gateway querier
-```
+1. Delete it from the **gateway's** `OBS_INGESTER_URL` and recreate the gateway
+   (`up -d gateway`). It stops receiving writes; the querier still reads it.
+2. Stop it. Its shutdown drains the head into the store:
 
-Until you do, reads answer `503`, because the querier still expects the
-stopped ingester. If the final flush failed (the stop log says so, and
-`obs_log_flush_failures_total` or `obs_flush_failures_total` counted it), what
-it could not flush remains in that ingester's WAL on its volume and is not
-read until the ingester rejoins the ring; start it again and let it flush
-before removing it.
+   ```bash
+   docker compose -f deployments/docker/docker-compose.split.yml stop ingester-3
+   ```
+
+3. Delete it from the **querier's** `OBS_INGESTER_URL` (and from the Prometheus
+   targets) and recreate the querier (`up -d querier`). Reads answer `503`
+   between steps 2 and 3.
+
+If the drain failed (the stop log says so at ERROR, and
+`obs_flush_failures_total` or `obs_log_flush_failures_total` counted it), what
+it could not flush remains in that ingester's WAL on its volume. Put it back on
+the querier's list, start it again, and stop it once the store is reachable.
 
 ### Kubernetes (Helm)
 
+`split.ingester.replicas` (default 3, at least 1) sizes the ingester
+StatefulSet; the querier reads every replica, by the pods' DNS names under the
+headless Service (`<ingester>-<i>.<ingester>-headless`).
+`split.ingester.writeReplicas` (default: all replicas; between 1 and
+`replicas`) is how many of them, from ordinal 0, the gateway writes to, so the
+gateway's list is always a prefix of the querier's. Both Deployments carry a
+`checksum/config` annotation, so a changed list rolls them by itself; staging
+the two values keeps every intermediate state safe.
+
+To add a fourth ingester, first add the pod and the querier's read, then the
+gateway's writes:
+
 ```bash
-helm upgrade backend deployments/helm/backend -n obs --reuse-values --set split.ingester.replicas=4 --wait
+helm upgrade backend deployments/helm/backend -n obs --reuse-values \
+  --set split.ingester.replicas=4 --set split.ingester.writeReplicas=3 --wait
+helm upgrade backend deployments/helm/backend -n obs --reuse-values \
+  --set split.ingester.writeReplicas=4 --wait
 ```
 
-`split.ingester.replicas` (default 3, at least 1) sizes the ingester
-StatefulSet and re-renders the list in both the gateway's and the querier's
-ConfigMap from the pods' DNS names under the headless Service
-(`<ingester>-<i>.<ingester>-headless`). Both Deployments carry a
-`checksum/config` annotation of that ConfigMap file, so the changed list rolls
-the gateway and the querier by itself. The Prometheus chart's
-`split.targets.ingester` is a list that must match the replica count; update it
-with the same number of entries:
+To remove one (`n` is the current replica count), stop the gateway's writes,
+let the pod drain, then shrink the querier's list:
+
+```bash
+helm upgrade backend deployments/helm/backend -n obs --reuse-values \
+  --set split.ingester.writeReplicas=<n-1> --wait
+kubectl scale statefulset/observability-ingester -n obs --replicas=<n-1>
+kubectl wait --for=delete pod/observability-ingester-<n-1> -n obs --timeout=120s
+helm upgrade backend deployments/helm/backend -n obs --reuse-values \
+  --set split.ingester.replicas=<n-1> --wait
+```
+
+The wait matters: the pod is gone only after its drain lands in the store.
+Reads answer `503` between the scale and the last upgrade. A single upgrade
+that lowers `replicas` would run the scale-down and the querier's roll
+concurrently, so a new querier could drop the terminating ingester before its
+drain lands. A pod's PVC is kept after it is removed; scaling back up
+reattaches it.
+
+The Prometheus chart's `split.targets.ingester` is a list that must match the
+replica count; update it after each change with the same number of entries:
 
 ```bash
 helm upgrade prometheus deployments/helm/prometheus -n obs --set topology=split \
   --set 'split.targets.ingester={http://observability-ingester-0.observability-ingester-headless:8080,http://observability-ingester-1.observability-ingester-headless:8080,http://observability-ingester-2.observability-ingester-headless:8080,http://observability-ingester-3.observability-ingester-headless:8080}' --wait
 ```
-
-To scale down, stop the ingester first and shorten the lists second, as in
-Compose (`n` is the current replica count):
-
-```bash
-kubectl scale statefulset/observability-ingester -n obs --replicas=<n-1>
-kubectl wait --for=delete pod/observability-ingester-<n-1> -n obs --timeout=120s
-helm upgrade backend deployments/helm/backend -n obs --reuse-values --set split.ingester.replicas=<n-1> --wait
-```
-
-The wait matters: the highest-numbered pod's graceful shutdown runs the final
-flush, and the pod is gone only after it lands. Then upgrade the backend chart
-with the lower count, and update the Prometheus chart's `split.targets.ingester`
-list to the same number of entries. A single `helm upgrade` would run the
-StatefulSet scale-down and the gateway and querier rolls concurrently, so a new
-querier can drop the terminating ingester before its final flush lands: reads
-could answer `200` with that ingester's unflushed data missing. A pod's PVC is
-kept after it is removed; scaling back up reattaches it.
 
 ## Failure drill: stop one ingester
 
