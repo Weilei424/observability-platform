@@ -279,6 +279,11 @@ func (c *Chunk) Append(tsMs int64, val float64, gen int64) error {
 	return nil
 }
 
+// Seal closes the chunk early: later appends return ErrChunkFull. An ingester
+// draining on its way out seals its open head chunks so the flush, which takes
+// only sealed chunks, sends them too. The caller serializes it with Append.
+func (c *Chunk) Seal() { c.sealed = true }
+
 // Sealed reports whether the chunk has been sealed.
 func (c *Chunk) Sealed() bool { return c.sealed }
 
