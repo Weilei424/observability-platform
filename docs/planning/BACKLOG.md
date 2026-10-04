@@ -853,6 +853,8 @@ every ingester (6.4 keeps parallel fanout, pruning, and replica dedup), and reso
 **Deployment**
 - [x] Compose split runs three ingesters; scrape config and dashboard per ingester — `make smoke-compose-split` 104/0 on 2026-10-03
 - [x] Helm `split.ingester.replicas` (default 3) renders the ring list from pod DNS; the prometheus chart scrapes each ingester pod — `tests/e2e/helm_split_test.go` (`TestSplitIngesterListFollowsReplicas`, `TestSplitDefaultsToThreeIngesters`, `TestSplitStoreStaysSingle`), `tests/e2e/helm_split_prometheus_test.go`
+- [x] Staged membership changes — `split.ingester.writeReplicas` (default all replicas, 1..`replicas`) keeps the gateway's ring list a prefix of the querier's, so a change never routes writes to an ingester the querier does not read; the runbook stages adds (querier first) and removals (gateway first, then stop, then querier) — `TestSplitGatewayWritesToAPrefixOfTheQuerierList`, `TestSplitWriteReplicasOutOfRangeFailsTheRender`, and in process `TestRingClusterStagedMembershipChangeNeverHidesWrites` (writes in every window; reads complete or `503`, never an incomplete `200`) — added after a Codex review
+- [x] Ingesters drain on stop — the ingester's graceful shutdown seals and flushes its whole head (`WALStore.Drain`), so a removed ingester leaves no samples in a WAL no reader sees — `TestWALStore_DrainFlushesOpenChunksToo`, `TestChunk_SealClosesAnOpenChunk`, and the removal stage of `TestRingClusterStagedMembershipChangeNeverHidesWrites`
 
 **Verification**
 - [x] Verify: the same series or stream routes to the same ingester while membership is stable — `internal/ring` `TestGoldenPlacement`, `TestPlacementIgnoresListOrder`, `TestRingHashIgnoresOrder`
