@@ -250,7 +250,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "obs-internals" },
           "expr": "obs_wal_bytes",
-          "legendFormat": "{{wal}}",
+          "legendFormat": "{{wal}} {{instance}}",
           "refId": "A"
         }
       ],
@@ -283,7 +283,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "obs-internals" },
           "expr": "obs_wal_segments",
-          "legendFormat": "{{wal}}",
+          "legendFormat": "{{wal}} {{instance}}",
           "refId": "A"
         }
       ],
@@ -355,13 +355,13 @@
         {
           "datasource": { "type": "prometheus", "uid": "obs-internals" },
           "expr": "obs_active_series",
-          "legendFormat": "series",
+          "legendFormat": "series {{instance}}",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "obs-internals" },
           "expr": "obs_log_streams_total",
-          "legendFormat": "streams",
+          "legendFormat": "streams {{instance}}",
           "refId": "B"
         }
       ],
@@ -428,25 +428,25 @@
         {
           "datasource": { "type": "prometheus", "uid": "obs-internals" },
           "expr": "rate(obs_compaction_failures_total[5m])",
-          "legendFormat": "compaction",
+          "legendFormat": "compaction {{instance}}",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "obs-internals" },
           "expr": "rate(obs_flush_failures_total[5m])",
-          "legendFormat": "flush",
+          "legendFormat": "flush {{instance}}",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "obs-internals" },
           "expr": "rate(obs_collector_errors_total[5m])",
-          "legendFormat": "collector",
+          "legendFormat": "collector {{instance}}",
           "refId": "C"
         },
         {
           "datasource": { "type": "prometheus", "uid": "obs-internals" },
           "expr": "rate(obs_log_flush_failures_total[5m])",
-          "legendFormat": "log flush",
+          "legendFormat": "log flush {{instance}}",
           "refId": "D"
         }
       ],
@@ -548,7 +548,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "obs-internals" },
           "expr": "up{service=\"observability-platform\"}",
-          "legendFormat": "{{component}}",
+          "legendFormat": "{{component}} {{instance}}",
           "refId": "A"
         }
       ],
