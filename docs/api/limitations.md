@@ -86,11 +86,14 @@ These are properties of the whole system, not of the query languages.
   from `OBS_INGESTER_URL` at startup; adding or removing an ingester takes a
   restart of both. There are no heartbeats, join or leave states, or hot reload.
 - **A gateway and querier list mismatch hides writes.** If the gateway routes
-  to an ingester the querier does not read, those writes are never returned.
-  Both log `ring ready` with `ring=<hash>` of the sorted member list at
-  startup: compare the two hashes. Helm renders both lists from one
-  helper; in Compose the two lists are edited by hand and must be kept
-  identical.
+  to an ingester the querier does not read, those writes are never returned. A
+  membership change is therefore staged: the querier gains an ingester before
+  the gateway, and the gateway loses it before the querier
+  ([../runbooks/split-demo.md](../runbooks/split-demo.md)). Helm enforces the
+  order with `split.ingester.writeReplicas`; in Compose the two lists are
+  edited by hand, in that order. Both log `ring ready` with `ring=<hash>` of
+  the sorted member list at startup: once a change is complete, the two hashes
+  must be equal.
 - **Ingesters are read one after another.** The querier reads every ingester in
   turn, then the store, so read latency grows with the number of ingesters.
   Parallel fanout is Phase 6.4.
@@ -98,10 +101,12 @@ These are properties of the whole system, not of the query languages.
   member, so any unreachable ingester answers `503`. A write answers `503` only
   when the batch has a key that ingester owns; other batches succeed. A `503`
   can leave some of a batch's groups written; retrying the whole batch is safe.
-- **Removing an ingester can leave data unread.** Stop the ingester first: its
-  shutdown runs a final flush, and then the gateway and querier restart without
-  it. If that final flush fails, the unflushed data stays in the ingester's WAL
-  and is not read until the ingester rejoins the ring.
+- **Removing an ingester can leave data unread if its drain fails.** An
+  ingester's graceful stop seals and flushes its whole head into the store. If
+  the store is unreachable, the drain fails (logged at ERROR) and the unflushed
+  data stays in the ingester's WAL, not read until the ingester rejoins the
+  ring. Reads answer `503` while a stopped ingester is still on the querier's
+  list.
 - **Upgrading to 6.2 has an overwrite window.** A pre-6.2 WAL record replays with a
   fresh generation, so on a restart while pre-6.2 segments are still past the
   checkpoint, a pre-upgrade sample can outrank a post-upgrade overwrite at the same
