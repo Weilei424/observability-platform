@@ -74,7 +74,8 @@ type Deps struct {
 	Ready func() error
 
 	// Upstreams, when set, makes this server a gateway (see gateway.go): every
-	// read route is proxied, and the engine and ingester fields are unused.
+	// read route is proxied and writes are served locally through Writes, so the
+	// engine and ingester fields are unused.
 	Upstreams *Upstreams
 
 	// Writes, required with Upstreams, routes the gateway's validated writes.
