@@ -521,3 +521,25 @@ func TestGenerationEncodingCost(t *testing.T) {
 		t.Errorf("µs generations cost %.2f bytes/sample more, want under 6", clock-counter)
 	}
 }
+
+// Seal closes an open head chunk early, so a draining ingester can flush it:
+// it refuses further appends and round-trips like a chunk sealed by size.
+func TestChunk_SealClosesAnOpenChunk(t *testing.T) {
+	c := chunk.NewChunk()
+	for i := int64(0); i < 5; i++ {
+		if err := c.Append(i*1000, float64(i), i+1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.Seal()
+	if !c.Sealed() {
+		t.Fatal("Sealed() = false after Seal")
+	}
+	if err := c.Append(9000, 9, 9); err != chunk.ErrChunkFull {
+		t.Fatalf("Append after Seal = %v, want ErrChunkFull", err)
+	}
+	back, err := chunk.FromBytes(c.Bytes())
+	if err != nil || back.NumSamples() != 5 || back.MaxTs() != 4000 {
+		t.Fatalf("round trip = %v samples %d maxTs %d", err, back.NumSamples(), back.MaxTs())
+	}
+}
