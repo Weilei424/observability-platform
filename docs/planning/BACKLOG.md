@@ -833,7 +833,7 @@ every ingester (6.4 keeps parallel fanout, pruning, and replica dedup), and reso
 
 **Ring**
 - [x] `internal/ring` — 128 tokens per member, splitmix64-mixed keys, ties to the member sorting first; golden placement, balance (±25%), add/remove moving only the changed member's share, single member, edge keys — `internal/ring` tests `TestGoldenPlacement`, `TestBalance`, `TestAddingAMemberMovesOnlyItsShare`, `TestRemovingAMemberMovesOnlyItsKeys`, `TestSingleMemberOwnsEverything`, `TestTokenTieGoesToTheMemberSortingFirst`, `TestNewRefusesBadLists`
-- [x] Series route by series fingerprint; streams by stream fingerprint, so a stream stays on one ingester — `internal/rpc/router_test.go`; `TestRingClusterSpreadsWritesAndReadsEverything` (ingesters took 192/141/123 samples under Compose)
+- [x] Series route by series fingerprint; streams by stream fingerprint, so a stream stays on one ingester — `internal/rpc/router_test.go`; `TestRingClusterSpreadsWritesAndReadsEverything` (every ingester takes writes and the gateway reads all of them back); under Compose, `make smoke-compose-split` on 2026-10-03 showed the ingesters taking 192/141/123 samples
 
 **Generations**
 - [x] Hybrid clock generations — `max(previous + 1, now in Unix µs)` in every target; injectable clock; step-back and floor tests — `internal/metrics/generation_test.go` (clock rule, step-back, zero clock, `AppendGen` floor, `ReserveGeneration` exhaustion, microsecond units)
@@ -855,7 +855,7 @@ every ingester (6.4 keeps parallel fanout, pruning, and replica dedup), and reso
 - [x] Helm `split.ingester.replicas` (default 3) renders the ring list from pod DNS; the prometheus chart scrapes each ingester pod — `tests/e2e/helm_split_test.go` (`TestSplitIngesterListFollowsReplicas`, `TestSplitDefaultsToThreeIngesters`, `TestSplitStoreStaysSingle`), `tests/e2e/helm_split_prometheus_test.go`
 
 **Verification**
-- [x] Verify: the same series or stream routes to the same ingester while membership is stable — `internal/ring` golden and order-independence tests — `internal/ring` `TestGoldenPlacement`, `TestPlacementIgnoresListOrder`, `TestRingHashIgnoresOrder`
+- [x] Verify: the same series or stream routes to the same ingester while membership is stable — `internal/ring` `TestGoldenPlacement`, `TestPlacementIgnoresListOrder`, `TestRingHashIgnoresOrder`
 - [x] Verify: adding or removing an ingester remaps only part of the keyspace — ring unit tests, and the in-process 3 → 4 change with every read still complete — ring unit tests, and `TestRingClusterMembershipChangeAndLastWriteWins` (3 to 4, every read complete)
 - [x] Verify: an overwrite of a moved series wins, also after its old owner replays its WAL — `TestRingClusterMembershipChangeAndLastWriteWins` (the old owner's graceful stop flushes its write into a store block with its original generation) plus exact replay restoration at unit level (`TestReplayRestoresExactGenerations`)
 - [x] Verify: one ingester down — writes it owns `503`, other writes `204`, reads `503`; a retry after recovery reads back once — `TestRingClusterOneIngesterDown` (503s, healthy-only batch 204, recovery, retry reads back once); also `TestRingClusterDirectIngesterWriteIsRead`
@@ -870,6 +870,9 @@ every ingester (6.4 keeps parallel fanout, pruning, and replica dedup), and reso
 - [ ] Deduplicate replicated samples/log lines
 - [ ] Failure test: one ingester unavailable but quorum succeeds
 - [ ] Failure test: quorum unavailable causes write failure
+
+**Deferred from 6.2** — unscheduled
+- [ ] Request deadlines on the gateway's routed writes and the querier's ingester reads — a hung (not refused) ingester stalls its batches until the client gives up
 
 ### Phase 6.4 — Query Fanout and Merge
 - [ ] Implement metrics query fanout
