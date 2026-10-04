@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/storage/block"
+	"github.com/masonwheeler/observability-platform/internal/storage/wal"
 )
 
 // recordingSink forwards to a real BlockStore unless told to fail, and records
@@ -222,5 +224,53 @@ func TestHeadStore_DropsSeriesWhoseHeadEmptied(t *testing.T) {
 	}
 	if vals := h.LabelValues("__name__"); len(vals) != 0 {
 		t.Fatalf("head still indexes %v after its only chunk was flushed", vals)
+	}
+}
+
+// Drain is what an ingester does on its way out: every head chunk, sealed or
+// still open, reaches the store, so a removed ingester leaves nothing behind
+// in its WAL that no reader will ever see.
+func TestWALStore_DrainFlushesOpenChunksToo(t *testing.T) {
+	dataDir := t.TempDir()
+	target := newSinkTarget(t)
+	h, err := metrics.OpenHeadStore(dataDir, &recordingSink{target: target}, metrics.HeadStoreOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := wal.Open(filepath.Join(dataDir, "metrics", "wal"), 1<<20, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = w.Close() })
+	ws := metrics.NewWALStore(w, h, dataDir)
+	sealed, _ := metrics.NewLabels(map[string]string{"__name__": "sealed_and_open"})
+	open, _ := metrics.NewLabels(map[string]string{"__name__": "open_only"})
+	for i := range 125 { // one sealed chunk of 120 plus an open chunk of 5
+		if err := ws.Append(sealed, int64(i)*1000, float64(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := range 3 {
+		if err := ws.Append(open, int64(i)*1000, float64(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := ws.Drain(); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	ctx := context.Background()
+	for _, c := range []struct {
+		name string
+		want int
+	}{{"sealed_and_open", 125}, {"open_only", 3}} {
+		sds, err := target.Select(ctx, metrics.SelectParams{Selector: metrics.Selector{MetricName: c.name}, MinT: 0, MaxT: 1 << 40})
+		if err != nil || len(sds) != 1 || len(sds[0].Samples) != c.want {
+			t.Errorf("store holds %s = %+v, %v; want %d samples", c.name, sds, err, c.want)
+		}
+		head, _ := h.Select(ctx, metrics.SelectParams{Selector: metrics.Selector{MetricName: c.name}, MinT: 0, MaxT: 1 << 40})
+		if len(head) != 0 {
+			t.Errorf("head still holds %s after Drain: %+v", c.name, head)
+		}
 	}
 }
