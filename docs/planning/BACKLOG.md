@@ -812,11 +812,7 @@ its assertions.
 - [x] Verify: a store outage fails reads with `503` while writes keep succeeding, and reads recover when it returns — under Compose: `make smoke-compose-split` 91/0 at `de9d351` on 2026-09-29, covering metrics and Loki reads (503), writes (204), and recovery by value
 - [x] Verify: the all-in-one smoke tests stay green — `make smoke`, `make smoke-compose`, and `smoke-kind`. At `d220245` on 2026-09-29: `make smoke` 13/13 and 33/33 against a fresh all-in-one backend; `make smoke-compose` 71/0. `smoke-kind` via the kind all-in-one CI job, green at `5142375` on 2026-09-30 ([CI run 108](https://github.com/Weilei424/observability-platform/actions/runs/36748648546))
 
-**Hand-off to 6.2:** write generations are per-ingester counters. Once the ring can
-move a series between ingesters, two ingesters' generations for the same series are
-not comparable, so 6.2's design must choose a last-write-wins rule across ingesters
-before it allows membership changes. *(6.2's design: hybrid clock generations recorded
-in the WAL — see Phase 6.2.)*
+**Hand-off to 6.2:** resolved by clock generations; see Phase 6.2.
 
 **Deferred from 6.1** — unscheduled
 - [ ] Ingester backpressure and head limits — while the store is down the head and WALs grow without bound; the flush-failure counters and `obs_wal_bytes` make that visible, nothing limits it
@@ -836,35 +832,35 @@ every ingester (6.4 keeps parallel fanout, pruning, and replica dedup), and reso
 6.1's hand-off: last-write-wins across ingesters.
 
 **Ring**
-- [ ] `internal/ring` — 128 tokens per member, splitmix64-mixed keys, ties to the member sorting first; golden placement, balance (±25%), add/remove moving only the changed member's share, single member, edge keys
-- [ ] Series route by series fingerprint; streams by stream fingerprint, so a stream stays on one ingester
+- [x] `internal/ring` — 128 tokens per member, splitmix64-mixed keys, ties to the member sorting first; golden placement, balance (±25%), add/remove moving only the changed member's share, single member, edge keys — `internal/ring` tests `TestGoldenPlacement`, `TestBalance`, `TestAddingAMemberMovesOnlyItsShare`, `TestRemovingAMemberMovesOnlyItsKeys`, `TestSingleMemberOwnsEverything`, `TestTokenTieGoesToTheMemberSortingFirst`, `TestNewRefusesBadLists`
+- [x] Series route by series fingerprint; streams by stream fingerprint, so a stream stays on one ingester — `internal/rpc/router_test.go`; `TestRingClusterSpreadsWritesAndReadsEverything` (ingesters took 192/141/123 samples under Compose)
 
 **Generations**
-- [ ] Hybrid clock generations — `max(previous + 1, now in Unix µs)` in every target; injectable clock; step-back and floor tests
-- [ ] WAL record type 2 carrying the generation; replay restores it exactly; type-1 records still replay
-- [ ] Chunk bytes-per-sample cost of µs generations measured and recorded
+- [x] Hybrid clock generations — `max(previous + 1, now in Unix µs)` in every target; injectable clock; step-back and floor tests — `internal/metrics/generation_test.go` (clock rule, step-back, zero clock, `AppendGen` floor, `ReserveGeneration` exhaustion, microsecond units)
+- [x] WAL record type 2 carrying the generation; replay restores it exactly; type-1 records still replay — `internal/storage/wal/record_gen_test.go`; `internal/metrics/walstore_gen_test.go` (`TestWALStoreRecordsTheGenerationItAssigns`, `TestReplayRestoresExactGenerations`, `TestReplayRaisesFloorPastRestoredGenerations`)
+- [x] Chunk bytes-per-sample cost of µs generations measured and recorded — `TestGenerationEncodingCost`: 4.64 bytes/sample with the pre-6.2 counter, 5.63 with microsecond generations (+0.99)
 
 **Reads and configuration**
-- [ ] `MergeHeads` — every ingester read to completion, then the store; fails closed
-- [ ] `OBS_INGESTER_URL` takes a comma-separated list on the gateway and querier; duplicates, empty elements, and a comma in `OBS_STORE_URL`/`OBS_QUERIER_URL` refused
+- [x] `MergeHeads` — every ingester read to completion, then the store; fails closed — `internal/metrics/merge_test.go`, `internal/logs/merge_test.go`
+- [x] `OBS_INGESTER_URL` takes a comma-separated list on the gateway and querier; duplicates, empty elements, and a comma in `OBS_STORE_URL`/`OBS_QUERIER_URL` refused — `internal/config/config_ring_test.go`
 
 **Writes**
-- [ ] Ingester push routes `POST /internal/v1/metrics/push` and `/logs/push`
-- [ ] Ring router — groups by owner, sends concurrently, worst outcome wins (`500` > `503` > `499`)
-- [ ] Gateway validates writes with all-in-one's handler code and routes them; the write proxy is removed
-- [ ] `obs_ring_members`, `obs_gateway_ingester_requests_total{ingester, outcome}`; the gateway owns the ingest rejection counters; startup `ring` hash on gateway and querier
+- [x] Ingester push routes `POST /internal/v1/metrics/push` and `/logs/push` — `internal/rpc/push_test.go`
+- [x] Ring router — groups by owner, sends concurrently, worst outcome wins (`500` > `503` > `499`) — `internal/rpc/router_test.go` incl. `TestRouterSucceedsWhenOnlyHealthyMembersAreTouched`, `TestRouterExpiredDeadlineIsUnavailable`
+- [x] Gateway validates writes with all-in-one's handler code and routes them; the write proxy is removed — `internal/api/gateway_write_test.go` (`TestGatewayRoutesValidWrites`, `TestGatewayValidationMatchesAllInOne`, `TestGatewayWriteOutcomes`)
+- [x] `obs_ring_members`, `obs_gateway_ingester_requests_total{ingester, outcome}`; the gateway owns the ingest rejection counters; startup `ring` hash on gateway and querier — `internal/observability/ring_test.go`, `internal/app/ring_wiring_test.go` (`TestGatewayAndQuerierLogTheSameRing`)
 
 **Deployment**
-- [ ] Compose split runs three ingesters; scrape config and dashboard per ingester
-- [ ] Helm `split.ingester.replicas` (default 3) renders the ring list from pod DNS; the prometheus chart scrapes each ingester pod
+- [x] Compose split runs three ingesters; scrape config and dashboard per ingester — `make smoke-compose-split` 104/0 on 2026-10-03
+- [x] Helm `split.ingester.replicas` (default 3) renders the ring list from pod DNS; the prometheus chart scrapes each ingester pod — `tests/e2e/helm_split_test.go` (`TestSplitIngesterListFollowsReplicas`, `TestSplitDefaultsToThreeIngesters`, `TestSplitStoreStaysSingle`), `tests/e2e/helm_split_prometheus_test.go`
 
 **Verification**
-- [ ] Verify: the same series or stream routes to the same ingester while membership is stable — `internal/ring` golden and order-independence tests
-- [ ] Verify: adding or removing an ingester remaps only part of the keyspace — ring unit tests, and the in-process 3 → 4 change with every read still complete
-- [ ] Verify: an overwrite of a moved series wins, also after its old owner replays its WAL
-- [ ] Verify: one ingester down — writes it owns `503`, other writes `204`, reads `503`; a retry after recovery reads back once
-- [ ] Verify: `make smoke-compose-split` with three ingesters, and the all-in-one smoke tests still green
-- [ ] Verify: kind split with three ingesters — closes in CI after a push
+- [x] Verify: the same series or stream routes to the same ingester while membership is stable — `internal/ring` golden and order-independence tests — `internal/ring` `TestGoldenPlacement`, `TestPlacementIgnoresListOrder`, `TestRingHashIgnoresOrder`
+- [x] Verify: adding or removing an ingester remaps only part of the keyspace — ring unit tests, and the in-process 3 → 4 change with every read still complete — ring unit tests, and `TestRingClusterMembershipChangeAndLastWriteWins` (3 to 4, every read complete)
+- [x] Verify: an overwrite of a moved series wins, also after its old owner replays its WAL — `TestRingClusterMembershipChangeAndLastWriteWins` (the old owner's graceful stop flushes its write into a store block with its original generation) plus exact replay restoration at unit level (`TestReplayRestoresExactGenerations`)
+- [x] Verify: one ingester down — writes it owns `503`, other writes `204`, reads `503`; a retry after recovery reads back once — `TestRingClusterOneIngesterDown` (503s, healthy-only batch 204, recovery, retry reads back once); also `TestRingClusterDirectIngesterWriteIsRead`
+- [x] Verify: `make smoke-compose-split` with three ingesters, and the all-in-one smoke tests still green — `make smoke-compose-split` 104/0 and `make smoke-compose` (all-in-one) 71/0, both on 2026-10-03
+- [ ] Verify: kind split with three ingesters — closes in CI after a push (not run locally: cgroup v1 host)
 
 ### Phase 6.3 — Replication and Failure Handling
 - [ ] Add configurable replication factor
