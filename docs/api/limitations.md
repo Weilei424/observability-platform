@@ -102,6 +102,11 @@ These are properties of the whole system, not of the query languages.
   shutdown runs a final flush, and then the gateway and querier restart without
   it. If that final flush fails, the unflushed data stays in the ingester's WAL
   and is not read until the ingester rejoins the ring.
+- **Upgrading to 6.2 has an overwrite window.** A pre-6.2 WAL record replays with a
+  fresh generation, so on a restart while pre-6.2 segments are still past the
+  checkpoint, a pre-upgrade sample can outrank a post-upgrade overwrite at the same
+  series and timestamp. After upgrading, let the head flush (the WAL checkpoint passes
+  the pre-6.2 segments) before relying on same-timestamp overwrites across a restart.
 - **Last-write-wins across ingesters follows the clock.** Write generations are
   `max(previous + 1, now in Unix microseconds)`. Two writes to one series at
   the same timestamp on two ingesters, within their clock skew, resolve by
