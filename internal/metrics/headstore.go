@@ -291,6 +291,9 @@ func (h *HeadStore) AppendTrackedGen(labels Labels, tsMs int64, val float64, gen
 	return h.mem.AppendTrackedGen(labels, tsMs, val, gen, walSeg)
 }
 
+// SealHeadChunks seals the head's open chunks so the next flush sends them.
+func (h *HeadStore) SealHeadChunks() int { return h.mem.SealHeadChunks() }
+
 func (h *HeadStore) GenerationExhausted() bool               { return h.mem.GenerationExhausted() }
 func (h *HeadStore) OldestHeadSegment() int                  { return h.mem.OldestHeadSegment() }
 func (h *HeadStore) SetHeadFence(walSeg int)                 { h.mem.SetHeadFence(walSeg) }
