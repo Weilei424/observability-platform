@@ -121,8 +121,10 @@ func (s *WALStore) SelectLabelValues(ctx context.Context, name string) ([]string
 }
 
 // ErrDrainIncomplete reports a drain that flushed what it sealed but found the
-// head non-empty afterwards: writes are still arriving at this ingester.
-var ErrDrainIncomplete = errors.New("metrics: head not empty after the drain: writes are still arriving")
+// head non-empty afterwards: something appended during the drain. The
+// ingester's write gate (internal/drain) closes before a drain starts, so
+// this is the check that the gate held.
+var ErrDrainIncomplete = errors.New("head not empty after the drain")
 
 // Drain flushes the whole head, open chunks included, and checkpoints the WAL,
 // all within ctx: what an ingester does on its way out, and what the drain
@@ -159,6 +161,12 @@ func (s *WALStore) Drain(ctx context.Context) error {
 // sealed chunks exist; (true, nil) when a block was written.
 func (s *WALStore) FlushBlock() (bool, error) {
 	return s.flushBlock(context.Background())
+}
+
+// FlushBlockContext is FlushBlock bounded by ctx: the maintenance loop's
+// flush, cancelled when the loop stops.
+func (s *WALStore) FlushBlockContext(ctx context.Context) (bool, error) {
+	return s.flushBlock(ctx)
 }
 
 func (s *WALStore) flushBlock(ctx context.Context) (bool, error) {
