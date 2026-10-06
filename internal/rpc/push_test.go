@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"context"
+	"errors"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/masonwheeler/observability-platform/internal/drain"
 	"github.com/masonwheeler/observability-platform/internal/logs"
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/observability"
@@ -106,5 +108,32 @@ func TestPushRoutesRefuseBadBodies(t *testing.T) {
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("%s %s = %d, want 400", tc.path, tc.body, resp.StatusCode)
 		}
+	}
+}
+
+func TestPushToADrainingIngesterIsAnOutage(t *testing.T) {
+	g := drain.NewGate()
+	if err := g.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	m, l := &recordingMetrics{}, &recordingLogs{}
+	r := chi.NewRouter()
+	r.Route("/internal/v1", func(r chi.Router) { MountWrites(r, g.Metrics(m), g.Logs(l), observability.NewIngestMetrics()) })
+	srv := httptest.NewServer(r)
+	t.Cleanup(srv.Close)
+	c, err := NewClient("ingester", srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := metrics.NewLabels(map[string]string{"__name__": "a"})
+	if err := c.PushSamples(context.Background(), []metrics.PendingSample{{Labels: a, TimestampMs: 1, Value: 1}}); !errors.Is(err, ErrUnavailable) || !strings.Contains(err.Error(), "503") {
+		t.Errorf("PushSamples to a draining ingester: err = %v, want ErrUnavailable from a 503", err)
+	}
+	s, _ := logs.NewStreamLabels(map[string]string{"service": "api"})
+	if err := c.PushEntries(context.Background(), []logs.PendingEntry{{Labels: s, TimestampNs: 1, Line: "x"}}); !errors.Is(err, ErrUnavailable) || !strings.Contains(err.Error(), "503") {
+		t.Errorf("PushEntries to a draining ingester: err = %v, want ErrUnavailable from a 503", err)
+	}
+	if len(m.got) != 0 || len(l.got) != 0 {
+		t.Errorf("a draining ingester appended %d samples and %d lines", len(m.got), len(l.got))
 	}
 }
