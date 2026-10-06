@@ -90,9 +90,13 @@ These are properties of the whole system, not of the query languages.
   membership change is therefore staged: the querier gains an ingester before
   the gateway, and the gateway loses it before the querier
   ([../runbooks/split-demo.md](../runbooks/split-demo.md)). Helm stages it with
-  `split.ingester.writeReplicas` and, on an upgrade, reads the live lists and
-  refuses an unstaged change; `helm template` cannot read them, so a preview
-  checks only what `split.ingester.previous` says. In Compose the two lists are
+  `split.ingester.writeReplicas` and, on an upgrade, reads the ingester counts
+  the running gateway and querier pods loaded, refusing an unstaged change and
+  any ring change while either Deployment is still rolling out. It can only see
+  what the Kubernetes API reports: a ConfigMap or Deployment edited by hand
+  outside Helm is not checked. `helm template` cannot read the live release, so
+  a preview checks only what `split.ingester.previous` says, and a real upgrade
+  refuses that value. In Compose the two lists are
   edited by hand, in that order. Both log `ring ready` with `ring=<hash>` of
   the sorted member list at startup: once a change is complete, the two hashes
   must be equal.
@@ -106,9 +110,11 @@ These are properties of the whole system, not of the query languages.
 - **Removing an ingester needs its drain acknowledged.** `POST
   /internal/v1/drain` answers `200` only once the ingester's whole head is in
   the store; skip that and stop it anyway, and anything a failed or cut-short
-  drain left stays in its WAL, not read once the querier drops it. A graceful
-  stop also drains, bounded to 40 s so it fits the 60 s grace period, but its
-  outcome is only a log line. Reads answer `503` while a stopped ingester is
+  drain left stays in its WAL, not read once the querier drops it. Once a drain
+  starts, the ingester refuses every write with `503` until it restarts, so
+  drain only an ingester the gateway no longer writes to. A graceful stop also
+  drains, within a 50 s shutdown budget so it fits the 60 s grace period, but
+  its outcome is only a log line. Reads answer `503` while a stopped ingester is
   still on the querier's list.
 - **Upgrading to 6.2 has an overwrite window.** A pre-6.2 WAL record replays with a
   fresh generation, so on a restart while pre-6.2 segments are still past the
