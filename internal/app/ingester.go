@@ -12,6 +12,7 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/api"
 	"github.com/masonwheeler/observability-platform/internal/compactor"
 	"github.com/masonwheeler/observability-platform/internal/config"
+	"github.com/masonwheeler/observability-platform/internal/drain"
 	"github.com/masonwheeler/observability-platform/internal/logs"
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/observability"
@@ -21,8 +22,9 @@ import (
 )
 
 // ingesterDrainTimeout bounds one drain of the whole head, on the drain route
-// and at shutdown. With the HTTP server's 10s drain before it, a stop stays
-// inside the 60s grace period Compose and the Helm chart give an ingester.
+// and at shutdown. At shutdown it is also inside the process's shutdown budget
+// (cmd/server), which keeps a stop within the 60s grace period Compose and the
+// Helm chart give an ingester.
 const ingesterDrainTimeout = 40 * time.Second
 
 // buildIngester assembles the ingester: the metrics WAL and head, the logs WAL
@@ -102,10 +104,20 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 			flushLog.Error("logs flush failed", slog.String("error", err.Error()))
 		}
 	})
-	// drain flushes the whole head — metrics, open chunks included, then logs —
-	// within ctx, and succeeds only if both heads are empty afterwards. The
-	// drain route runs it before an ingester is removed; shutdown runs it last.
-	drain := func(ctx context.Context) error {
+	// gate is the write barrier: every write, public or internal, passes it,
+	// and a drain closes it for good before flushing, so nothing can land in a
+	// head the drain already emptied. A 200 from the drain route therefore
+	// covers every write this ingester ever acknowledged.
+	gate := drain.NewGate()
+	// drainHeads closes the gate, waiting for admitted writes to finish, then
+	// flushes the whole head — metrics, open chunks included, then logs — and
+	// succeeds only if both heads are empty afterwards. Everything runs within
+	// ctx. The drain route runs it before an ingester is removed; shutdown
+	// runs it last.
+	drainHeads := func(ctx context.Context) error {
+		if err := gate.Close(ctx); err != nil {
+			return fmt.Errorf("waiting for in-flight writes: %w", err)
+		}
 		if err := writes.Drain(ctx); err != nil {
 			return fmt.Errorf("metrics: %w", err)
 		}
@@ -113,7 +125,7 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 			return fmt.Errorf("logs: %w", err)
 		}
 		if !logHead.Empty() {
-			return errors.New("logs: head not empty after the drain: writes are still arriving")
+			return errors.New("logs: head not empty after the drain")
 		}
 		return nil
 	}
@@ -121,15 +133,15 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 		Config:      cfg,
 		Logger:      log,
 		Routes:      api.RoutesWrite,
-		Ingester:    writes,
-		LogIngester: logHead,
+		Ingester:    gate.Metrics(writes),
+		LogIngester: gate.Logs(logHead),
 		Registry:    reg,
 		HTTP:        inst.HTTP,
 		Ingest:      inst.Ingest,
 		Internal: func(r chi.Router) {
-			rpc.MountDrain(r, drain, ingesterDrainTimeout)
+			rpc.MountDrain(r, drainHeads, ingesterDrainTimeout)
 			rpc.MountReads(r, head, logs.AsSource(logHead))
-			rpc.MountWrites(r, writes, logHead, inst.Ingest)
+			rpc.MountWrites(r, gate.Metrics(writes), gate.Logs(logHead), inst.Ingest)
 		},
 	})
 	mcfg := maintenanceConfig(cfg)
@@ -144,21 +156,26 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 		closers: []closer{
 			// One bounded drain before the WALs close, in place of the loop's
 			// final flush: an ingester removed from the ring must not leave its
-			// open chunks or buffered lines in a WAL no reader will see. Both
-			// heads are attempted. A failed logs flush is already logged once by
-			// the flush hook above, so this reports only what the hook cannot:
-			// a metrics failure, or lines still arriving. On failure the data
-			// is still in the WAL and replays on the next start.
-			{component: "flush", msg: "drain failed: unflushed data stays in this ingester's WAL until it restarts", close: func() error {
-				ctx, cancel := context.WithTimeout(context.Background(), ingesterDrainTimeout)
+			// open chunks or buffered lines in a WAL no reader will see. It
+			// shares the process's shutdown budget (ctx) and is capped at
+			// ingesterDrainTimeout. Both heads are attempted. A failed logs
+			// flush is already logged once by the flush hook above, so this
+			// reports only what the hook cannot: the gate or a metrics failure,
+			// or lines left in the head. On failure the data is still in the
+			// WAL and replays on the next start.
+			{component: "flush", msg: "drain failed: unflushed data stays in this ingester's WAL until it restarts", closeCtx: func(ctx context.Context) error {
+				ctx, cancel := context.WithTimeout(ctx, ingesterDrainTimeout)
 				defer cancel()
+				if err := gate.Close(ctx); err != nil {
+					return fmt.Errorf("waiting for in-flight writes: %w", err)
+				}
 				metricsErr := writes.Drain(ctx)
 				logsErr := logHead.FlushContext(ctx)
 				if metricsErr != nil {
 					return fmt.Errorf("metrics: %w", metricsErr)
 				}
 				if logsErr == nil && !logHead.Empty() {
-					return errors.New("logs: head not empty after the drain: writes are still arriving")
+					return errors.New("logs: head not empty after the drain")
 				}
 				return nil
 			}},
