@@ -313,3 +313,54 @@ func (hangingSink) IngestSeriesChunks(ctx context.Context, _ []metrics.SeriesChu
 	<-ctx.Done()
 	return block.Meta{}, ctx.Err()
 }
+
+// stallingSink holds every call until release is closed, whatever its context
+// says: a flush that is slow to give the lock back.
+type stallingSink struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *stallingSink) IngestSeriesChunks(context.Context, []metrics.SeriesChunks) (block.Meta, error) {
+	s.once.Do(func() { close(s.entered) })
+	<-s.release
+	return block.Meta{}, errors.New("released")
+}
+
+// A drain's deadline covers the wait behind a maintenance flush already
+// holding the flush lock, not only its own calls to the store.
+func TestHeadStore_FlushBlockContextHonorsItsDeadlineWhileAnotherFlushRuns(t *testing.T) {
+	dataDir := t.TempDir()
+	sink := &stallingSink{entered: make(chan struct{}), release: make(chan struct{})}
+	h, err := metrics.OpenHeadStore(dataDir, sink, metrics.HeadStoreOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := wal.Open(filepath.Join(dataDir, "metrics", "wal"), 1<<20, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = w.Close() })
+	ws := metrics.NewWALStore(w, h, dataDir)
+	l, _ := metrics.NewLabels(map[string]string{"__name__": "slow"})
+	if err := ws.Append(l, 1000, 1); err != nil {
+		t.Fatal(err)
+	}
+	h.SealHeadChunks()
+
+	first := make(chan error, 1)
+	go func() { _, err := h.FlushBlock(); first <- err }()
+	<-sink.entered
+	defer func() { close(sink.release); <-first }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := h.FlushBlockContext(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("FlushBlockContext behind a running flush: err = %v, want DeadlineExceeded", err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("FlushBlockContext waited %v past its 50ms deadline", d)
+	}
+}
