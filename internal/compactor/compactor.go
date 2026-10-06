@@ -39,6 +39,10 @@ type Config struct {
 	FlushWALBytes       int64
 	Ranges              []int64 // ascending compaction ranges in ms
 	Retention           time.Duration
+	// SkipFinalFlush leaves out Run's flush on shutdown: the ingester drains
+	// its whole head on the way out instead (WALStore.Drain), and a flush
+	// first would only stack another bounded wait onto the pod's grace period.
+	SkipFinalFlush bool
 }
 
 // Compactor runs background storage maintenance: flush, compaction, retention.
@@ -157,7 +161,7 @@ func (c *Compactor) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			if c.flusher != nil {
+			if c.flusher != nil && !c.cfg.SkipFinalFlush {
 				if _, err := c.flusher.FlushBlock(); err != nil {
 					c.log.Error("final flush failed", slog.String("error", err.Error()))
 				}
