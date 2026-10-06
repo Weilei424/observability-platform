@@ -12,9 +12,13 @@ import (
 // Flusher flushes sealed head chunks to a new block and advances the WAL
 // checkpoint. FlushBlock reports whether a block was actually written (false
 // for a no-op when no sealed chunks exist) so the loop counts only real
-// flushes. SealedChunkCount is the head's backlog, the count-based trigger.
+// flushes. FlushBlockContext is the same flush bounded by ctx: the loop runs
+// it with its own context, so a shutdown cancels a flush in progress rather
+// than waiting out a slow store before the ingester's bounded drain can start.
+// SealedChunkCount is the head's backlog, the count-based trigger.
 type Flusher interface {
 	FlushBlock() (bool, error)
+	FlushBlockContext(ctx context.Context) (bool, error)
 	SealedChunkCount() int
 }
 
@@ -79,12 +83,12 @@ func New(flusher Flusher, blocks BlockManager, walSizer WALSizer, clock func() t
 // RunOnce performs one maintenance pass: flush (if due) → compact to stability →
 // retention. Errors are logged and metered; a pass is best-effort.
 func (c *Compactor) RunOnce(ctx context.Context) {
-	c.maybeFlush()
+	c.maybeFlush(ctx)
 	c.compactToStable(ctx)
 	c.applyRetention()
 }
 
-func (c *Compactor) maybeFlush() {
+func (c *Compactor) maybeFlush(ctx context.Context) {
 	if c.flusher == nil {
 		return
 	}
@@ -100,8 +104,13 @@ func (c *Compactor) maybeFlush() {
 	if !due {
 		return
 	}
-	wrote, err := c.flusher.FlushBlock()
+	wrote, err := c.flusher.FlushBlockContext(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			// Shutdown cancelled the flush. Not a failure: the chunks stay in
+			// the head for the final flush or the ingester's drain.
+			return
+		}
 		c.metrics.FlushFailuresTotal.Inc()
 		// ERROR, matching the ingester's logs-flush hook (component "flush"): in
 		// split mode a failed flush means the store peer is unreachable (Task 19
