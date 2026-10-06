@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -48,6 +49,7 @@ type walHead interface {
 	queryStore
 	Source
 	SealHeadChunks() int
+	FlushBlockContext(ctx context.Context) (bool, error)
 }
 
 var (
@@ -118,25 +120,33 @@ func (s *WALStore) SelectLabelValues(ctx context.Context, name string) ([]string
 	return s.store.SelectLabelValues(ctx, name)
 }
 
-// Drain flushes the whole head, open chunks included, and checkpoints the WAL:
-// what an ingester does on its way out, so an ingester removed from the ring
-// leaves nothing in its WAL that no reader will see (Phase 6.2). Normal flushes
-// take only sealed chunks; Drain seals the open ones first, under appendMu so
-// no append lands between the seal and the flush. Call it once appends have
-// stopped. On error the unflushed data is still in the WAL and replays on the
-// next start.
-func (s *WALStore) Drain() error {
+// ErrDrainIncomplete reports a drain that flushed what it sealed but found the
+// head non-empty afterwards: writes are still arriving at this ingester.
+var ErrDrainIncomplete = errors.New("metrics: head not empty after the drain: writes are still arriving")
+
+// Drain flushes the whole head, open chunks included, and checkpoints the WAL,
+// all within ctx: what an ingester does on its way out, and what the drain
+// route does before an ingester is removed, so a removed ingester leaves
+// nothing in its WAL that no reader will see (Phase 6.2). Normal flushes take
+// only sealed chunks; Drain seals the open ones first, under appendMu so no
+// append lands between the seal and the flush. It succeeds only if the head is
+// empty at the end. On any error the unflushed data is still in the WAL and
+// replays on the next start.
+func (s *WALStore) Drain(ctx context.Context) error {
 	s.appendMu.Lock()
 	s.store.SealHeadChunks()
 	s.appendMu.Unlock()
 	for s.store.SealedChunkCount() > 0 {
-		wrote, err := s.FlushBlock()
+		wrote, err := s.flushBlock(ctx)
 		if err != nil {
 			return err
 		}
 		if !wrote {
-			return nil
+			break
 		}
+	}
+	if s.store.OldestHeadSegment() >= 0 {
+		return ErrDrainIncomplete
 	}
 	return nil
 }
@@ -148,7 +158,11 @@ func (s *WALStore) Drain() error {
 // be deleted. Returns (false, nil) without touching checkpoint or WAL when no
 // sealed chunks exist; (true, nil) when a block was written.
 func (s *WALStore) FlushBlock() (bool, error) {
-	wrote, err := s.store.FlushBlock()
+	return s.flushBlock(context.Background())
+}
+
+func (s *WALStore) flushBlock(ctx context.Context) (bool, error) {
+	wrote, err := s.store.FlushBlockContext(ctx)
 	if err != nil {
 		return false, fmt.Errorf("walstore: flush block: %w", err)
 	}
