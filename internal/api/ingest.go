@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/masonwheeler/observability-platform/internal/drain"
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/observability"
 )
@@ -137,8 +138,16 @@ func (s *Server) handleIngestMetrics(w http.ResponseWriter, r *http.Request) {
 	var appendErrors []error
 	var appended int
 	log := observability.Component(observability.FromContext(r.Context()), "metrics_ingest")
-	for _, ps := range samples {
+	for i, ps := range samples {
 		if err := s.ingester.Append(ps.Labels, ps.TimestampMs, ps.Value); err != nil {
+			if errors.Is(err, drain.ErrDraining) {
+				// A draining ingester refuses the rest of the batch: 503, so the
+				// client retries it against the ring, not a server error.
+				s.ingest.SamplesIngested.Add(float64(appended))
+				s.ingest.SamplesRejected.WithLabelValues(observability.ReasonAppend).Add(float64(len(appendErrors) + len(samples) - i))
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+				return
+			}
 			log.Error("ingester append failed", "err", err)
 			appendErrors = append(appendErrors, err)
 			continue
