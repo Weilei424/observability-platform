@@ -130,6 +130,12 @@ func writeGenFloor(path string, v int64) error {
 // rest stay in memory for the next attempt. The error makes WALStore skip the
 // checkpoint for this round; the per-chunk fence keeps a later one correct.
 func (h *HeadStore) FlushBlock() (bool, error) {
+	return h.FlushBlockContext(context.Background())
+}
+
+// FlushBlockContext is FlushBlock bounded by ctx as well as the per-batch
+// timeout: a drain gives the whole flush one deadline.
+func (h *HeadStore) FlushBlockContext(ctx context.Context) (bool, error) {
 	h.flushMu.Lock()
 	defer h.flushMu.Unlock()
 
@@ -142,8 +148,8 @@ func (h *HeadStore) FlushBlock() (bool, error) {
 	}
 	sent := false
 	for _, batch := range batchSeriesChunks(snapshot, h.batchBytes, block.MaxChunksPerSeries) {
-		ctx, cancel := context.WithTimeout(context.Background(), h.timeout)
-		_, err := h.sink.IngestSeriesChunks(ctx, batch)
+		batchCtx, cancel := context.WithTimeout(ctx, h.timeout)
+		_, err := h.sink.IngestSeriesChunks(batchCtx, batch)
 		cancel()
 		if err != nil {
 			return sent, fmt.Errorf("metrics: flush to block sink: %w", err)
