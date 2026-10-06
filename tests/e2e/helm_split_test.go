@@ -328,10 +328,10 @@ func renderPodSpecObjects(t *testing.T, extra ...string) []podSpecObject {
 }
 
 // TestSplitStatefulSetsGetAGracefulShutdownBudget pins the controller ruling:
-// the ingester's graceful shutdown can take about 40s against a slow store (a
-// 30s metrics flush plus a 10s logs flush), so Kubernetes' default 30s grace
-// period would SIGKILL it mid-flush. The Compose split already uses 60s; this
-// chart uses 60s for headroom.
+// the ingester's graceful shutdown can take up to its 50s shutdown budget
+// against a slow store (a 10s HTTP drain, then a drain of its head), so
+// Kubernetes' default 30s grace period would SIGKILL it mid-flush. The Compose
+// split already uses 60s; this chart uses 60s for headroom.
 func TestSplitStatefulSetsGetAGracefulShutdownBudget(t *testing.T) {
 	checked := 0
 	for _, o := range renderPodSpecObjects(t, "--set", "topology=split") {
