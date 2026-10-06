@@ -132,18 +132,22 @@ read would answer `200` with those writes missing):
   ingester flushes it; every read covers both, and generations order any
   overlap.
 - **Removing an ingester:** restart the **gateway** without it, drain it
-  (`POST /internal/v1/drain` answers `200` only once its whole head — every
-  metrics chunk, open ones included, and every buffered log line — is in the
-  store), stop it, then restart the **querier** without it. Reads answer `503`
-  while a stopped ingester is still on the querier's list. A graceful stop runs
-  the same drain under the same 40 s bound, but only the route's `200` is an
-  acknowledgment; what a failed drain leaves stays in that ingester's WAL
+  (`POST /internal/v1/drain` first stops the ingester taking writes, then
+  answers `200` only once its whole head — every metrics chunk, open ones
+  included, and every buffered log line — is in the store, so the `200` covers
+  every write it acknowledged), stop it, then restart the **querier** without
+  it. Reads answer `503` while a stopped ingester is still on the querier's
+  list. A graceful stop runs the same drain within the process's shutdown
+  budget, but only the route's `200` is an acknowledgment; what a failed drain
+  leaves stays in that ingester's WAL
   ([../api/limitations.md](../api/limitations.md)).
 - Once a change is complete the two lists match. Helm renders both from one
   helper (`backend.ingesterURLs`) and stages the change with
   `split.ingester.writeReplicas`, which keeps the gateway's list a prefix of
-  the querier's, and on an upgrade it reads the live lists and refuses an
-  unstaged change; in Compose the two literal lists are edited by hand in the
+  the querier's, and on an upgrade it reads the ingester counts the running
+  gateway and querier pods loaded (a pod-template annotation) and refuses an
+  unstaged change, or any ring change while either Deployment is still rolling
+  out; in Compose the two literal lists are edited by hand in the
   order above, and the `ring` hash in the two `ring ready` startup lines
   confirms they match at the end.
 
