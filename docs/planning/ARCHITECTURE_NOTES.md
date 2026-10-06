@@ -306,7 +306,7 @@ signals correlate.
 
 `deployments/docker/docker-compose.split.yml` runs the split topology (6.1) with the gateway
 aliased as `backend`, so every datasource, producer, and URL that names the backend reaches
-it unchanged. Its ingester and store get a 60 s `stop_grace_period` (the ingester's worst-case graceful stop is about 50 s: 10 s HTTP drain, 30 s metrics flush batch, 10 s logs flush).
+it unchanged. Its ingester and store get a 60 s `stop_grace_period` (the ingester's graceful stop is bounded by a 50 s shutdown budget: a 10 s HTTP drain, then the drain of its head).
 
 Three provisioned dashboards: `obs-metrics-v1` (load generator), `obs-logs-v1` (sample
 app logs), `obs-sample-app-v1` (sample app metrics). Phase 5.3 adds a fourth for backend
@@ -601,18 +601,24 @@ records the decisions and the one place the code diverged from it.
   gateway; removing, the gateway drops it, the ingester stops, then the querier drops
   it. Helm stages this with `split.ingester.writeReplicas` (the gateway's list is a
   prefix of the querier's) and, because the two Deployments roll independently, reads
-  the live lists with `lookup` on an upgrade and refuses a change whose old and new
-  pods could overlap unsafely (`TestSplitRefusesUnstagedRingChanges`, through
-  `split.ingester.previous` since a preview cannot look up);
+  with `lookup` on an upgrade the ingester counts the running pods loaded (a
+  pod-template annotation on each Deployment), refusing a change whose old and new
+  pods could overlap unsafely and any ring change while either Deployment is still
+  rolling out (`TestRingStagingReadsTheRunningRelease` over fixture objects;
+  `split.ingester.previous` stands in for a preview, and a real upgrade refuses it);
   `TestRingClusterStagedMembershipChangeNeverHidesWrites` drives both stages with
   writes in every window.
-- **Ingesters drain, with an acknowledgment.** `POST /internal/v1/drain` seals every
-  open head chunk and flushes the whole head — metrics and logs — within 40 s,
-  answering `200` only when it all reached the store and the head was empty after;
-  removal waits for that `200` before the querier drops the ingester. A graceful stop
-  runs the same bounded drain in place of the maintenance loop's final flush, so the
-  stop fits the 60 s grace period (10 s HTTP drain + 40 s); its outcome is only a log
-  line. A restart therefore writes one more small block (compaction merges it) and
+- **Ingesters drain, with an acknowledgment.** `POST /internal/v1/drain` first
+  closes a write barrier (`internal/drain`): every write route, public and internal,
+  refuses with `503` from then until a restart, and the drain waits for writes
+  already admitted. It then seals every open head chunk and flushes the whole head —
+  metrics and logs — within 40 s, lock waits included, answering `200` only when it
+  all reached the store and the head was empty after, so the `200` covers every
+  acknowledged write (`TestRingClusterDrainIsAWriteBarrier`). Removal waits for that
+  `200` before the querier drops the ingester. A graceful stop runs the same drain in
+  place of the maintenance loop's final flush; the loop's own flush is cancelled at
+  shutdown, and the whole stop shares one 50 s budget (`cmd/server`) inside the 60 s
+  grace period. Its outcome is only a log line. A restart therefore writes one more small block (compaction merges it) and
   normally replays nothing; all-in-one is unchanged.
 - **Failure semantics.** One ingester down: batches with keys it owns answer `503`,
   other batches `204`, reads `503`; a retry after recovery reads back once.
