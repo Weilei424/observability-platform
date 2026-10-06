@@ -25,10 +25,13 @@ type App struct {
 }
 
 // closer is one resource to release at shutdown, and the line its failure logs.
+// closeCtx, when set, is used instead of close: a closer that waits on a peer
+// (the ingester's drain) takes what is left of the shutdown budget.
 type closer struct {
 	component string
 	msg       string
 	close     func() error
+	closeCtx  func(ctx context.Context) error
 }
 
 // alwaysReady is the readiness of a component that owns no data directory:
@@ -92,13 +95,23 @@ func (a *App) Run(ctx context.Context) {
 	wg.Wait()
 }
 
-// Close releases resources in the order they were registered, logging each
-// failure under its own component. Shutdown still completes: there is nothing
-// left to retry at this point, and the next start replays from whatever
-// reached disk.
-func (a *App) Close() {
+// Close is CloseContext with no shutdown budget of its own.
+func (a *App) Close() { a.CloseContext(context.Background()) }
+
+// CloseContext releases resources in the order they were registered, logging
+// each failure under its own component. A closer that waits on a peer is
+// bounded by ctx, the rest of the process's shutdown budget. Shutdown still
+// completes: there is nothing left to retry at this point, and the next start
+// replays from whatever reached disk.
+func (a *App) CloseContext(ctx context.Context) {
 	for _, c := range a.closers {
-		if err := c.close(); err != nil {
+		var err error
+		if c.closeCtx != nil {
+			err = c.closeCtx(ctx)
+		} else {
+			err = c.close()
+		}
+		if err != nil {
 			observability.Component(a.log, c.component).Error(c.msg, slog.String("error", err.Error()))
 		}
 	}
