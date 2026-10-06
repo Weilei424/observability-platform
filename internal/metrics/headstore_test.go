@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/storage/block"
@@ -256,7 +257,7 @@ func TestWALStore_DrainFlushesOpenChunksToo(t *testing.T) {
 		}
 	}
 
-	if err := ws.Drain(); err != nil {
+	if err := ws.Drain(context.Background()); err != nil {
 		t.Fatalf("Drain: %v", err)
 	}
 	ctx := context.Background()
@@ -273,4 +274,42 @@ func TestWALStore_DrainFlushesOpenChunksToo(t *testing.T) {
 			t.Errorf("head still holds %s after Drain: %+v", c.name, head)
 		}
 	}
+}
+
+// A drain is bounded by its context: past the deadline it fails, and what it
+// could not flush stays in the head and the WAL for the next start.
+func TestWALStore_DrainHonorsItsDeadline(t *testing.T) {
+	dataDir := t.TempDir()
+	h, err := metrics.OpenHeadStore(dataDir, hangingSink{}, metrics.HeadStoreOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := wal.Open(filepath.Join(dataDir, "metrics", "wal"), 1<<20, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = w.Close() })
+	ws := metrics.NewWALStore(w, h, dataDir)
+	l, _ := metrics.NewLabels(map[string]string{"__name__": "stuck"})
+	if err := ws.Append(l, 1000, 1); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := ws.Drain(ctx); err == nil {
+		t.Fatal("Drain past its deadline returned nil")
+	}
+	sds, _ := h.Select(context.Background(), metrics.SelectParams{Selector: metrics.Selector{MetricName: "stuck"}, MinT: 0, MaxT: 1 << 40})
+	if len(sds) != 1 {
+		t.Fatalf("head after a failed drain = %+v, want the sample still there", sds)
+	}
+}
+
+// hangingSink is a store that never answers: each call ends only when its
+// context does, as the real RPC sink's does.
+type hangingSink struct{}
+
+func (hangingSink) IngestSeriesChunks(ctx context.Context, _ []metrics.SeriesChunks) (block.Meta, error) {
+	<-ctx.Done()
+	return block.Meta{}, ctx.Err()
 }
