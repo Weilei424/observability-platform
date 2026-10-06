@@ -21,6 +21,11 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/storage/wal"
 )
 
+// shutdownBudget bounds a stop from the signal to the last closer, leaving
+// 10s of the 60s grace period Compose and the Helm chart give a component for
+// closing the WALs and exiting.
+const shutdownBudget = 50 * time.Second
+
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -114,14 +119,20 @@ func main() {
 	<-ctx.Done()
 	mainLog.Info("shutdown signal received")
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// One budget for the whole stop, inside the 60s grace period Compose and
+	// the Helm chart give a component: the HTTP drain takes at most 10s of it,
+	// the loops stop promptly (cancelling any flush in progress), and the
+	// closers -- the ingester's bounded drain among them -- get the rest.
+	budget, cancelBudget := context.WithTimeout(context.Background(), shutdownBudget)
+	defer cancelBudget()
+	httpCtx, cancel := context.WithTimeout(budget, 10*time.Second)
 	defer cancel()
-	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+	if err := httpSrv.Shutdown(httpCtx); err != nil {
 		mainLog.Error("http shutdown error", slog.String("error", err.Error()))
 	}
 
 	<-runDone // the maintenance loop performs its final flush on ctx cancellation
-	a.Close()
+	a.CloseContext(budget)
 	mainLog.Info("shutdown complete")
 }
 
