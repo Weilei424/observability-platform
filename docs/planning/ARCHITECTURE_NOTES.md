@@ -599,15 +599,21 @@ records the decisions and the one place the code diverged from it.
   restoration is proven at unit level. A change is staged so the gateway never writes to
   an ingester the querier does not read: adding, the querier gains it before the
   gateway; removing, the gateway drops it, the ingester stops, then the querier drops
-  it. Helm enforces this with `split.ingester.writeReplicas` (the gateway's list is a
-  prefix of the querier's); `TestRingClusterStagedMembershipChangeNeverHidesWrites`
-  drives both stages with writes in every window.
-- **Ingesters drain on stop.** The ingester target's graceful shutdown seals every open
-  head chunk and flushes the whole head before the WAL closes (`WALStore.Drain`); the
-  maintenance loop's final flush takes only full chunks, which would have left a
-  removed ingester's recent samples in a WAL no reader sees. A restart therefore writes
-  one more small block (compaction merges it) and normally replays nothing; all-in-one
-  is unchanged.
+  it. Helm stages this with `split.ingester.writeReplicas` (the gateway's list is a
+  prefix of the querier's) and, because the two Deployments roll independently, reads
+  the live lists with `lookup` on an upgrade and refuses a change whose old and new
+  pods could overlap unsafely (`TestSplitRefusesUnstagedRingChanges`, through
+  `split.ingester.previous` since a preview cannot look up);
+  `TestRingClusterStagedMembershipChangeNeverHidesWrites` drives both stages with
+  writes in every window.
+- **Ingesters drain, with an acknowledgment.** `POST /internal/v1/drain` seals every
+  open head chunk and flushes the whole head — metrics and logs — within 40 s,
+  answering `200` only when it all reached the store and the head was empty after;
+  removal waits for that `200` before the querier drops the ingester. A graceful stop
+  runs the same bounded drain in place of the maintenance loop's final flush, so the
+  stop fits the 60 s grace period (10 s HTTP drain + 40 s); its outcome is only a log
+  line. A restart therefore writes one more small block (compaction merges it) and
+  normally replays nothing; all-in-one is unchanged.
 - **Failure semantics.** One ingester down: batches with keys it owns answer `503`,
   other batches `204`, reads `503`; a retry after recovery reads back once.
 - **Observability and checks.** The kind and Compose spread checks read per-instance
