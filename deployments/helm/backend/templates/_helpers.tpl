@@ -108,6 +108,84 @@ stops reading it).
 {{- if hasKey $v "writeReplicas" -}}{{ int $v.writeReplicas }}{{- else -}}{{ int $v.replicas }}{{- end -}}
 {{- end -}}
 
+{{/*
+backend.ingesterCountAnnotation: the pod-template annotation recording how many
+ingesters a gateway pod writes to or a querier pod reads. It is what the running
+pods loaded, which the staging check in split-configmaps.yaml compares against.
+*/}}
+{{- define "backend.ingesterCountAnnotation" -}}
+observability-platform.dev/ingester-count
+{{- end -}}
+
+{{/*
+backend.ringStagingCheck: refuse a ring change that skips a stage. Called as
+(list $root $live), where $live holds the live "gateway" and "querier"
+Deployments and their "gatewayConfig" and "querierConfig" ConfigMaps, as
+lookup returns them (empty when there is no live release).
+
+The gateway and querier roll independently, so an old pod of one runs beside a
+new pod of the other. Stay safe across that overlap: a new gateway may write
+only to ingesters the old querier reads, and a new querier must still read
+every ingester the old gateway writes to.
+
+The previous lists are what the running pods loaded, not what a ConfigMap now
+says: each Deployment's pod template records its ingester count
+(backend.ingesterCountAnnotation), and a ring change is refused while either
+Deployment is still rolling out, because its old pods may still hold an older
+list. A release whose templates predate the annotation falls back to its
+ConfigMaps. split.ingester.previous stands in for the live counts only where
+there is no live release to look up (helm template); a real upgrade refuses it.
+*/}}
+{{- define "backend.ringStagingCheck" -}}
+{{- $root := index . 0 -}}
+{{- $live := index . 1 -}}
+{{- $replicas := int $root.Values.split.ingester.replicas -}}
+{{- $writeCount := int (include "backend.ingesterWriteCount" $root) -}}
+{{- $gwDep := $live.gateway -}}
+{{- $qDep := $live.querier -}}
+{{- $prev := dict -}}
+{{- if and $gwDep $qDep -}}
+{{- if $root.Values.split.ingester.previous -}}
+{{- fail "split.ingester.previous is for previews only (helm template, which cannot look up the live release): remove it; an upgrade reads the running gateway and querier" -}}
+{{- end -}}
+{{- $key := include "backend.ingesterCountAnnotation" $root -}}
+{{- $gwCount := dig "spec" "template" "metadata" "annotations" $key "" $gwDep -}}
+{{- $qCount := dig "spec" "template" "metadata" "annotations" $key "" $qDep -}}
+{{- $gw := $live.gatewayConfig -}}
+{{- $q := $live.querierConfig -}}
+{{- if and $gwCount $qCount -}}
+{{- $prev = dict "replicas" (int $qCount) "writeReplicas" (int $gwCount) -}}
+{{- else if and $gw $q $gw.data $q.data $gw.data.OBS_INGESTER_URL $q.data.OBS_INGESTER_URL -}}
+{{- $prev = dict "replicas" (len (splitList "," $q.data.OBS_INGESTER_URL)) "writeReplicas" (len (splitList "," $gw.data.OBS_INGESTER_URL)) -}}
+{{- end -}}
+{{- if and $prev (or (ne $writeCount (int $prev.writeReplicas)) (ne $replicas (int $prev.replicas))) -}}
+{{- range $dep := list $gwDep $qDep -}}
+{{- $want := int (dig "spec" "replicas" 1 $dep) -}}
+{{- $generation := int (dig "metadata" "generation" 0 $dep) -}}
+{{- $observed := int (dig "status" "observedGeneration" 0 $dep) -}}
+{{- $total := int (dig "status" "replicas" 0 $dep) -}}
+{{- $updated := int (dig "status" "updatedReplicas" 0 $dep) -}}
+{{- $available := int (dig "status" "availableReplicas" 0 $dep) -}}
+{{- if or (lt $observed $generation) (ne $updated $want) (ne $total $updated) (lt $available $updated) -}}
+{{- fail (printf "ring change refused: deployment/%s has not finished rolling out (%d of %d replicas updated, %d running, %d available), so its old pods may still hold an older ingester list. Wait for `kubectl rollout status deployment/%s` to succeed, or helm rollback, then retry" $dep.metadata.name $updated $want $total $available $dep.metadata.name) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- else -}}
+{{- with $root.Values.split.ingester.previous -}}
+{{- $prev = dict "replicas" (int .replicas) "writeReplicas" (int .writeReplicas) -}}
+{{- end -}}
+{{- end -}}
+{{- if $prev -}}
+{{- if gt $writeCount (int $prev.replicas) -}}
+{{- fail (printf "unstaged ring change: the gateway would write to %d ingesters while the running querier reads only %d. Add an ingester in two upgrades: first split.ingester.replicas=%d with split.ingester.writeReplicas=%d, then raise writeReplicas" $writeCount (int $prev.replicas) $replicas (int $prev.replicas)) -}}
+{{- end -}}
+{{- if lt $replicas (int $prev.writeReplicas) -}}
+{{- fail (printf "unstaged ring change: the querier would read %d ingesters while the running gateway writes to %d. Remove an ingester in stages: first lower split.ingester.writeReplicas to %d, drain the ingester (POST /internal/v1/drain answers 200) and scale it down, then lower replicas" $replicas (int $prev.writeReplicas) $replicas) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "backend.podSecurityContext" -}}
 securityContext:
   runAsNonRoot: true
