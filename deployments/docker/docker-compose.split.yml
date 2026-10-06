@@ -15,10 +15,10 @@ name: observability-platform-split
 x-ingester: &ingester
   restart: unless-stopped
   # Docker's default stop_grace_period is 10s: SIGTERM, then SIGKILL if the
-  # container hasn't exited by then. The ingester's worst-case graceful stop is
-  # about 50s: a 10s HTTP drain, a 30s metrics flush batch, then a 10s logs
-  # flush. Against a slow or loaded store the default grace period can
-  # SIGKILL it mid-flush; 60s covers that with margin.
+  # container hasn't exited by then. The ingester's graceful stop is bounded by
+  # its 50s shutdown budget: a 10s HTTP drain, then a drain of its whole head
+  # into the store. Against a slow or loaded store the default grace period can
+  # SIGKILL it mid-flush; 60s covers the budget with margin.
   stop_grace_period: 60s
   build:
     context: ../../
