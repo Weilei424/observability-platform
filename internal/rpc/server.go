@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/masonwheeler/observability-platform/internal/drain"
 	"github.com/masonwheeler/observability-platform/internal/logs"
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/observability"
@@ -125,6 +126,13 @@ func internalError(w http.ResponseWriter, r *http.Request, msg string, err error
 	if errors.Is(err, context.Canceled) || r.Context().Err() != nil {
 		log.Debug(msg+" (caller cancelled)", "err", err)
 		writeError(w, statusClientClosedRequest, err.Error())
+		return
+	}
+	if errors.Is(err, drain.ErrDraining) {
+		// Expected while an ingester is removed or stops: a 503, which the
+		// gateway reports as this peer's outage, not a server error.
+		log.Warn(msg, "err", err)
+		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
 	log.Error(msg, "err", err)
