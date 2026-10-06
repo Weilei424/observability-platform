@@ -83,11 +83,13 @@ missing:
   then move the **querier**.
 
 Before a removed ingester leaves the querier's list, drain it and wait for the
-acknowledgment: `POST /internal/v1/drain` seals and flushes its whole head —
-every metrics chunk and buffered log line — into the store and answers `200`
-only once all of it is there ([../api/internal.md](../api/internal.md)). A
-graceful stop runs the same drain, but a stop's outcome is only a log line;
-the route's `200` is what you wait for. While a stopped ingester is still on
+acknowledgment: `POST /internal/v1/drain` stops the ingester taking writes,
+seals and flushes its whole head — every metrics chunk and buffered log line —
+into the store, and answers `200` only once all of it is there
+([../api/internal.md](../api/internal.md)). From the first drain call until it
+restarts, the ingester refuses every write with `503`, so drain it only after
+the gateway has stopped writing to it. A graceful stop runs the same drain, but
+a stop's outcome is only a log line; the route's `200` is what you wait for. While a stopped ingester is still on
 the querier's list, reads answer `503` — they fail closed, never incomplete.
 
 ### Compose
@@ -151,11 +153,16 @@ headless Service (`<ingester>-<i>.<ingester>-headless`).
 gateway's list is always a prefix of the querier's. Both Deployments carry a
 `checksum/config` annotation, so a changed list rolls them by itself, old and
 new pods of each running side by side for a while. On an upgrade the chart
-reads the live gateway and querier lists and refuses a change that is not
+reads the ingester counts the running gateway and querier pods loaded (an
+annotation on each Deployment's pod template) and refuses a change that is not
 staged — a new gateway writing to an ingester the old querier does not read,
 or a new querier dropping one the old gateway writes to — and the failure
-names the next safe step. (`helm template` cannot read the live release; set
-`split.ingester.previous.replicas` and `.writeReplicas` to preview the check.)
+names the next safe step. It also refuses any ring change while either
+Deployment is still rolling out, since its old pods may hold an older list:
+after a failed or stuck upgrade, wait for `kubectl rollout status` or
+`helm rollback` first. (`helm template` cannot read the live release; set both
+`split.ingester.previous.replicas` and `.writeReplicas` to preview the check.
+A real upgrade refuses them.)
 
 To add a fourth ingester, first add the pod and the querier's read, then the
 gateway's writes:
