@@ -65,6 +65,15 @@
               "type": "integer",
               "minimum": 1
             },
+            "previous": {
+              "description": "For previews only (helm template cannot look up the live release): the replicas and writeReplicas the release currently renders. A real upgrade reads them from the live gateway and querier ConfigMaps.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "replicas": { "type": "integer", "minimum": 1 },
+                "writeReplicas": { "type": "integer", "minimum": 1 }
+              }
+            },
             "resources": { "type": "object" },
             "persistence": {
               "type": "object",
