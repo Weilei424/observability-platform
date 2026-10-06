@@ -378,6 +378,51 @@ else
     log_fail "$BOUND of $WANT_PVCS PVCs bound: $(kubectl get pvc -n "$NS" 2>&1 | tail -4)"
 fi
 
+# ---- Ring staging against the live release (split only) ----------------
+#
+# helm template cannot run lookup, so tests/e2e/helm_ring_staging_test.go
+# checks backend.ringStagingCheck over fixture objects. These upgrades check
+# it reads the real ones: the running Deployments' pod-template annotations
+# and rollout status. A refused render changes nothing in the release.
+if [ "$TOPOLOGY" = split ]; then
+    echo ""
+    echo "-- Ring staging against the live release --"
+    # expect_refused <label> <message> <helm --set args...>
+    expect_refused() {
+        local label="$1" want="$2" out
+        shift 2
+        if out=$(helm upgrade backend "$REPO_ROOT/deployments/helm/backend" -n "$NS" \
+                "${TOPOLOGY_SET[@]}" "$@" 2>&1); then
+            log_fail "$label: the upgrade went through, want it refused"
+        elif grep -qF "$want" <<<"$out"; then
+            log_pass "$label"
+        else
+            log_fail "$label: refused for another reason: $(tail -3 <<<"$out")"
+        fi
+    }
+    expect_refused "a one-step ingester add is refused from the live lists" \
+        "unstaged ring change" --set split.ingester.replicas=4
+    expect_refused "split.ingester.previous is refused on a real upgrade" \
+        "previews only" --set split.ingester.previous.replicas=3 --set split.ingester.previous.writeReplicas=3
+    # A querier rollout that has not finished: paused, with a template change
+    # the controller has not rolled out. A ring change must wait for it.
+    QUERIER=deployment/observability-querier
+    if kubectl rollout pause "$QUERIER" -n "$NS" >/dev/null \
+        && kubectl patch "$QUERIER" -n "$NS" --type merge \
+            -p '{"spec":{"template":{"metadata":{"annotations":{"e2e/unfinished-rollout":"1"}}}}}' >/dev/null; then
+        expect_refused "a ring change waits for an unfinished querier rollout" \
+            "has not finished rolling out" --set split.ingester.replicas=4 --set split.ingester.writeReplicas=3
+    else
+        log_fail "could not pause and patch $QUERIER to stage an unfinished rollout"
+    fi
+    kubectl rollout resume "$QUERIER" -n "$NS" >/dev/null
+    if kubectl rollout status "$QUERIER" -n "$NS" --timeout="$ROLLOUT_TIMEOUT" >/dev/null; then
+        log_pass "$QUERIER finished the staged rollout"
+    else
+        log_fail "$QUERIER did not finish rolling out after resume"
+    fi
+fi
+
 echo ""
 echo "-- helm install prometheus --"
 # The self-observability Prometheus (Phase 5.3): scrapes the backend's own
