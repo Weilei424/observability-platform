@@ -470,3 +470,37 @@ func TestJSONStringBytesMatchesEncodingJSON(t *testing.T) {
 		})
 	}
 }
+
+// FlushContext bounds the whole flush by ctx (the ingester's drain), and Empty
+// reports whether anything is left for the next flush.
+func TestHeadFlushContextHonorsItsDeadline(t *testing.T) {
+	dir := t.TempDir()
+	cs, err := OpenChunkStore(filepath.Join(dir, "chunks"), filepath.Join(dir, "index"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &flakySink{target: cs, block: make(chan struct{})}
+	h, _ := openPolicyHead(t, sink, HeadOptions{TolerateFlushErrors: true, FlushTimeout: time.Hour}, 1<<30)
+	t.Cleanup(func() { sink.block = nil; _ = h.Close() })
+	if err := h.Append(mustLabels(t, map[string]string{"service": "api"}), 1, "a"); err != nil {
+		t.Fatal(err)
+	}
+	if h.Empty() {
+		t.Fatal("Empty() = true with a buffered line")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := h.FlushContext(ctx); err == nil {
+		t.Fatal("FlushContext past its deadline returned nil")
+	}
+	if h.Empty() {
+		t.Fatal("a failed flush emptied the head")
+	}
+	sink.block = nil
+	if err := h.FlushContext(context.Background()); err != nil {
+		t.Fatalf("FlushContext with the store answering: %v", err)
+	}
+	if !h.Empty() {
+		t.Fatal("Empty() = false after a successful flush")
+	}
+}
