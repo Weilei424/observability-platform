@@ -654,3 +654,43 @@ func TestSplitWriteReplicasOutOfRangeFailsTheRender(t *testing.T) {
 		}
 	}
 }
+
+// On an upgrade the chart reads the live gateway and querier lists and refuses
+// a change that would let a new gateway write to an ingester an old querier
+// does not read (adding in one step), or a new querier drop an ingester an
+// old gateway still writes to (removing in one step). split.ingester.previous
+// stands in for the live lists, which `helm template` cannot look up.
+func TestSplitRefusesUnstagedRingChanges(t *testing.T) {
+	helmAvailable(t)
+	for _, tc := range []struct {
+		name               string
+		prevReplicas       int
+		prevWrite          int
+		set                []string
+		wantFailureMention string // "" means the render must succeed
+	}{
+		{"add in one step", 3, 3, []string{"split.ingester.replicas=4"}, "writeReplicas"},
+		{"add stage 1: pods and querier", 3, 3, []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=3"}, ""},
+		{"add stage 2: gateway", 4, 3, []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=4"}, ""},
+		{"remove in one step", 4, 4, []string{"split.ingester.replicas=3"}, "writeReplicas"},
+		{"remove stage 1: gateway", 4, 4, []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=3"}, ""},
+		{"remove stage 3: querier", 4, 3, []string{"split.ingester.replicas=3", "split.ingester.writeReplicas=3"}, ""},
+		{"no change", 3, 3, nil, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := []string{"template", "obs", backendChart, "--set", "topology=split",
+				"--set", fmt.Sprintf("split.ingester.previous.replicas=%d", tc.prevReplicas),
+				"--set", fmt.Sprintf("split.ingester.previous.writeReplicas=%d", tc.prevWrite)}
+			for _, s := range tc.set {
+				args = append(args, "--set", s)
+			}
+			out, err := exec.Command("helm", args...).CombinedOutput()
+			switch {
+			case tc.wantFailureMention == "" && err != nil:
+				t.Errorf("render failed, want success: %v\n%.400s", err, out)
+			case tc.wantFailureMention != "" && (err == nil || !strings.Contains(string(out), tc.wantFailureMention)):
+				t.Errorf("rendered (err %v), want a failure naming %s\n%.400s", err, tc.wantFailureMention, out)
+			}
+		})
+	}
+}
