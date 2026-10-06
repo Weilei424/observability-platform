@@ -628,6 +628,10 @@ var ErrInvalidSeriesChunks = errors.New("blockstore: invalid series chunks")
 // Returns (false, nil) immediately if no sealed chunks exist. Returns (true, nil)
 // on success. On write failure the memory store is unchanged. Concurrent calls
 // are serialized.
+// FlushBlockContext is FlushBlock; a local flush has no peer to wait on, so ctx
+// is unused. It lets WALStore drain either head the same way.
+func (bs *BlockStore) FlushBlockContext(context.Context) (bool, error) { return bs.FlushBlock() }
+
 func (bs *BlockStore) FlushBlock() (bool, error) {
 	bs.flushMu.Lock()
 	defer bs.flushMu.Unlock()
