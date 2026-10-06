@@ -10,12 +10,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
 	"github.com/masonwheeler/observability-platform/internal/storage/block"
 	"github.com/masonwheeler/observability-platform/internal/storage/fsutil"
+	"github.com/masonwheeler/observability-platform/internal/syncx"
 )
 
 const (
@@ -50,7 +50,7 @@ type HeadStore struct {
 	floorPath  string
 	batchBytes int
 	timeout    time.Duration
-	flushMu    sync.Mutex
+	flushMu    syncx.Mutex
 }
 
 var _ walHead = (*HeadStore)(nil)
@@ -134,9 +134,12 @@ func (h *HeadStore) FlushBlock() (bool, error) {
 }
 
 // FlushBlockContext is FlushBlock bounded by ctx as well as the per-batch
-// timeout: a drain gives the whole flush one deadline.
+// timeout: a drain gives the whole flush one deadline, and that includes the
+// wait behind a maintenance flush already in progress.
 func (h *HeadStore) FlushBlockContext(ctx context.Context) (bool, error) {
-	h.flushMu.Lock()
+	if err := h.flushMu.LockContext(ctx); err != nil {
+		return false, fmt.Errorf("metrics: waiting for a flush in progress: %w", err)
+	}
 	defer h.flushMu.Unlock()
 
 	snapshot := h.mem.SealedChunksSnapshot()
