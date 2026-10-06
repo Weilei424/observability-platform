@@ -182,6 +182,27 @@ rejection. It does not check that it owns the keys. A `4xx` is a protocol bug an
 gateway answers `500` for it; a transport error, a deadline, or a `5xx` is the
 ingester being unavailable and the gateway answers `503`.
 
+## Drain — ingester only
+
+```http
+POST /internal/v1/drain
+```
+
+Flushes the ingester's whole head into the store — every metrics chunk,
+including the open ones a normal flush leaves, and every buffered log line —
+within 40 seconds. It answers `200` `{"drained":true}` only when everything
+reached the store and the head was empty afterwards, and `503`
+`{"error":"drain incomplete: …"}` otherwise: the store unreachable, the deadline
+passed, or writes still arriving. Removing an ingester waits for this `200`
+after the gateway stops writing to it and before the querier stops reading it
+([../runbooks/split-demo.md](../runbooks/split-demo.md)). An ingester also runs
+one such drain, under the same 40 s bound, as the last step of a graceful stop.
+
+| Status | Meaning |
+|---|---|
+| `200` | the whole head is in the store |
+| `503` | the drain did not complete; what is left stays in the WAL |
+
 ## Block maintenance — store only, driven by the compactor
 
 ```http
