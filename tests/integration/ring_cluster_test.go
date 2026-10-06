@@ -240,8 +240,12 @@ func TestRingClusterStagedMembershipChangeNeverHidesWrites(t *testing.T) {
 	restartWithMembers(c.gateway, three)
 	write("gateway_three", 30)
 	readAll("remove stage 1")
-	// Remove, stage 2: the ingester stops; its final flush reaches the store.
-	// The querier still lists it, so reads fail closed rather than miss data.
+	// Remove, stage 2: drain it and wait for the acknowledgment — a 200 means
+	// its whole head reached the store — then stop it. The querier still lists
+	// it, so reads fail closed rather than miss data.
+	if code, body := postDrain(t, added); code != http.StatusOK {
+		t.Fatalf("remove stage 2: drain = %d %s, want 200", code, body)
+	}
 	c.ingesterByURL(t, added).stop()
 	if _, code, errType := c.instant(t, written[0], base); code != http.StatusServiceUnavailable || errType != "unavailable" {
 		t.Fatalf("remove stage 2: read = %d %q, want 503 unavailable while a listed ingester is down", code, errType)
@@ -250,4 +254,46 @@ func TestRingClusterStagedMembershipChangeNeverHidesWrites(t *testing.T) {
 	restartWithMembers(c.querier, three)
 	c.ingesterURLs = three
 	readAll("remove stage 3")
+}
+
+// postDrain calls an ingester's drain route and returns the status and body.
+func postDrain(t *testing.T, ingester string) (int, string) {
+	t.Helper()
+	resp, err := httpClient.Post(ingester+"/internal/v1/drain", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	return resp.StatusCode, string(body)
+}
+
+// The drain acknowledges only what reached the store: with the store down it
+// answers 503 and the data stays readable from the ingester; once the store is
+// back it answers 200, and the data is in the store.
+func TestRingClusterDrainAcknowledgesOnlyWhatReachedTheStore(t *testing.T) {
+	c := startClusterN(t, 1)
+	base := time.Now().UnixMilli()
+	c.ingest(t, "split_metric", base, 4)
+	c.pushLog(t, "drain-svc", base*1e6, "drained line")
+
+	c.store.stop()
+	if code, body := postDrain(t, c.ingesterURLs[0]); code != http.StatusServiceUnavailable {
+		t.Fatalf("drain with the store down = %d %s, want 503", code, body)
+	}
+	c.store.start()
+	if v, code, _ := c.instant(t, "split_metric", base); v != "4" {
+		t.Fatalf("after a failed drain: read = %q (%d), want 4 still readable", v, code)
+	}
+	if code, body := postDrain(t, c.ingesterURLs[0]); code != http.StatusOK {
+		t.Fatalf("drain with the store back = %d %s, want 200", code, body)
+	}
+	// metricSelectFrom reads split_metric straight from the store.
+	if got := metricSelectFrom(t, "store", c.storeURL, base, base); len(got) != 1 || got[0].Value != 4 {
+		t.Fatalf("store holds %+v after a 200 drain, want the one sample", got)
+	}
+	_, entries, _ := c.lokiQueryRange(t, `{service="drain-svc"}`, base*1e6-1, base*1e6+1)
+	if len(entries) != 1 {
+		t.Fatalf("drained line read back %d times, want once", len(entries))
+	}
 }
