@@ -1,17 +1,21 @@
 package integration_test
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/masonwheeler/observability-platform/internal/logs"
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/ring"
+	"github.com/masonwheeler/observability-platform/internal/rpc"
+	"github.com/masonwheeler/observability-platform/internal/storage/index"
 )
 
 // seriesKey is the ring key of the series c.ingest writes for name: __name__
@@ -296,4 +300,117 @@ func TestRingClusterDrainAcknowledgesOnlyWhatReachedTheStore(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("drained line read back %d times, want once", len(entries))
 	}
+}
+
+// A drain's 200 is a write barrier: writes keep arriving while it runs, and
+// every one the cluster acknowledged with a 204 is in the store once the
+// drain answers 200, while every write after it is refused with a 503. Without
+// the barrier, a write landing after the metrics flush but before the answer
+// would sit only in the ingester's WAL behind the 200.
+func TestRingClusterDrainIsAWriteBarrier(t *testing.T) {
+	c := startClusterN(t, 1)
+	base := time.Now().UnixMilli()
+
+	post := func(path, body string) int {
+		resp, err := httpClient.Post(c.gatewayURL+path, "application/json", strings.NewReader(body))
+		if err != nil {
+			return 0
+		}
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return resp.StatusCode
+	}
+	type result struct {
+		acked   []int64 // timestamps answered 204
+		refused int     // answered 503 after the drain's 200
+		other   []int   // anything else
+	}
+	drained := make(chan struct{})
+	var started sync.WaitGroup
+	write := func(send func(i int64) int, out *result, done *sync.WaitGroup) {
+		defer done.Done()
+		afterDrain := 0
+		for i := int64(0); afterDrain < 20; i++ {
+			select {
+			case <-drained:
+				afterDrain++
+			default:
+			}
+			drainedBefore := afterDrain > 0
+			switch code := send(i); {
+			case code == http.StatusNoContent:
+				if drainedBefore {
+					out.other = append(out.other, code) // acknowledged after the 200
+				}
+				out.acked = append(out.acked, i)
+				if len(out.acked) == 20 {
+					started.Done()
+				}
+			case code == http.StatusServiceUnavailable && drainedBefore:
+				out.refused++
+			case code == http.StatusServiceUnavailable:
+				// refused while the drain was running: the barrier is up
+			default:
+				out.other = append(out.other, code)
+			}
+		}
+	}
+	var m, l result
+	var done sync.WaitGroup
+	started.Add(2)
+	done.Add(2)
+	go write(func(i int64) int {
+		return post("/api/v1/ingest/metrics", fmt.Sprintf(`{"metrics":[{"name":"split_metric","labels":{"run":"split"},"timestamp_ms":%d,"value":%d}]}`, base+i, i))
+	}, &m, &done)
+	go write(func(i int64) int {
+		return post("/loki/api/v1/push", fmt.Sprintf(`{"streams":[{"stream":{"service":"barrier"},"values":[["%d","line %d"]]}]}`, (base+i)*1e6, i))
+	}, &l, &done)
+	started.Wait() // both writers are well under way
+
+	code, body := postDrain(t, c.ingesterURLs[0])
+	close(drained)
+	done.Wait()
+	if code != http.StatusOK {
+		t.Fatalf("drain under concurrent writes = %d %s, want 200", code, body)
+	}
+	for name, r := range map[string]result{"metrics": m, "logs": l} {
+		if len(r.other) != 0 {
+			t.Errorf("%s: unexpected answers %v (a 204 here was acknowledged after the drain's 200)", name, r.other)
+		}
+		if r.refused != 20 {
+			t.Errorf("%s: %d of 20 writes after the drain's 200 were refused with 503", name, r.refused)
+		}
+	}
+
+	// Every acknowledged write is in the store itself, not only in the
+	// ingester's head or WAL.
+	inStore := map[int64]bool{}
+	for _, s := range metricSelectFrom(t, "store", c.storeURL, base, base+1<<20) {
+		inStore[s.TimestampMs-base] = true
+	}
+	for _, i := range m.acked {
+		if !inStore[i] {
+			t.Errorf("acknowledged sample %d is not in the store after the drain's 200", i)
+		}
+	}
+	cl, err := rpc.NewClient("store", c.storeURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sds, err := rpc.NewLogsSource(cl).SelectStreams(context.Background(), []index.Pair{{Name: "service", Value: "barrier"}}, base*1e6, (base+1<<20)*1e6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	linesInStore := map[string]bool{}
+	for _, sd := range sds {
+		for _, e := range sd.Entries {
+			linesInStore[e.Line] = true
+		}
+	}
+	for _, i := range l.acked {
+		if !linesInStore[fmt.Sprintf("line %d", i)] {
+			t.Errorf("acknowledged line %d is not in the store after the drain's 200", i)
+		}
+	}
+	t.Logf("acknowledged before the barrier: %d samples, %d lines", len(m.acked), len(l.acked))
 }
