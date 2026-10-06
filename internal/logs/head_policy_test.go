@@ -504,3 +504,39 @@ func TestHeadFlushContextHonorsItsDeadline(t *testing.T) {
 		t.Fatal("Empty() = false after a successful flush")
 	}
 }
+
+// stallingSink holds every call until release is closed, whatever its context
+// says: a threshold flush, run with no deadline of its own, that keeps the
+// head lock.
+type stallingSink struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *stallingSink) IngestStreams(context.Context, []StreamData) error {
+	s.once.Do(func() { close(s.entered) })
+	<-s.release
+	return errors.New("released")
+}
+
+// A drain's deadline covers the wait for the head lock, which an append's
+// threshold flush holds for as long as its own flush takes.
+func TestHeadFlushContextHonorsItsDeadlineWhileAnAppendFlushes(t *testing.T) {
+	sink := &stallingSink{entered: make(chan struct{}), release: make(chan struct{})}
+	h, _ := openPolicyHead(t, sink, HeadOptions{TolerateFlushErrors: true, FlushTimeout: time.Hour}, 1)
+	appended := make(chan error, 1)
+	go func() { appended <- h.Append(mustLabels(t, map[string]string{"service": "api"}), 1, "a") }()
+	<-sink.entered
+	defer func() { close(sink.release); <-appended; _ = h.CloseWithoutFlush() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if err := h.FlushContext(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("FlushContext behind an append's flush: err = %v, want DeadlineExceeded", err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("FlushContext waited %v past its 50ms deadline", d)
+	}
+}
