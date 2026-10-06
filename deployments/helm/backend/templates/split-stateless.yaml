@@ -20,6 +20,11 @@ spec:
         {{- include "backend.componentLabels" (list $root $component) | nindent 8 }}
       annotations:
         checksum/config: {{ include (print $root.Template.BasePath "/split-configmaps.yaml") $root | sha256sum }}
+        {{- if eq $component "gateway" }}
+        {{ include "backend.ingesterCountAnnotation" $root }}: {{ include "backend.ingesterWriteCount" $root | quote }}
+        {{- else if eq $component "querier" }}
+        {{ include "backend.ingesterCountAnnotation" $root }}: {{ $root.Values.split.ingester.replicas | int | toString | quote }}
+        {{- end }}
     spec:
       {{- include "backend.podSecurityContext" $root | nindent 6 }}
       containers:
