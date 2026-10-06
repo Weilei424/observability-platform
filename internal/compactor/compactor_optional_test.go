@@ -61,3 +61,21 @@ func TestCompactor_NilFlusherOnlyCompactsAndRetains(t *testing.T) {
 type fakeCard struct{}
 
 func (fakeCard) Cardinality() (int, int, int) { return 0, 0, 0 }
+
+// The ingester drains its whole head on the way out instead, so its loop skips
+// the final flush: one bounded drain, not a flush plus a drain stacking up
+// against the pod's grace period.
+func TestCompactor_SkipFinalFlush(t *testing.T) {
+	for _, skip := range []bool{false, true} {
+		f := &countingFlusher{}
+		cfg := testConfig()
+		cfg.SkipFinalFlush = skip
+		c := compactor.New(f, nil, nil, time.Now, cfg, quietMetrics(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		c.Run(ctx)
+		if want := map[bool]int{false: 1, true: 0}[skip]; f.flushes != want {
+			t.Errorf("SkipFinalFlush=%v: final flushes = %d, want %d", skip, f.flushes, want)
+		}
+	}
+}
