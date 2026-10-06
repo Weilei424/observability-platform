@@ -66,9 +66,10 @@
               "minimum": 1
             },
             "previous": {
-              "description": "For previews only (helm template cannot look up the live release): the replicas and writeReplicas the release currently renders. A real upgrade reads them from the live gateway and querier ConfigMaps.",
+              "description": "For previews only (helm template cannot look up the live release): the replicas and writeReplicas the release currently runs. A real upgrade refuses it and reads them from the running gateway and querier Deployments.",
               "type": "object",
               "additionalProperties": false,
+              "required": ["replicas", "writeReplicas"],
               "properties": {
                 "replicas": { "type": "integer", "minimum": 1 },
                 "writeReplicas": { "type": "integer", "minimum": 1 }
