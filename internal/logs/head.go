@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
-	"sync"
 	"time"
 	"unicode/utf8"
 
 	"github.com/masonwheeler/observability-platform/internal/storage/fsutil"
 	"github.com/masonwheeler/observability-platform/internal/storage/index"
 	"github.com/masonwheeler/observability-platform/internal/storage/logwal"
+	"github.com/masonwheeler/observability-platform/internal/syncx"
 )
 
 const (
@@ -66,7 +66,7 @@ type HeadOptions struct {
 // entries the sink already has — never a moment in which an entry is readable
 // nowhere.
 type Head struct {
-	mu          sync.Mutex
+	mu          syncx.Mutex
 	head        map[StreamID]*memoryStream
 	wal         logWAL
 	sink        ChunkSink
@@ -209,9 +209,13 @@ func (h *Head) Flush() error {
 }
 
 // FlushContext is Flush with the whole flush bounded by ctx as well as each
-// sink call's FlushTimeout: the ingester's drain gives it one deadline.
+// sink call's FlushTimeout: the ingester's drain gives it one deadline, and
+// that includes the wait for the head lock, which an append's threshold
+// flush can hold for a whole flush.
 func (h *Head) FlushContext(ctx context.Context) error {
-	h.mu.Lock()
+	if err := h.mu.LockContext(ctx); err != nil {
+		return fmt.Errorf("logs: waiting for the head lock: %w", err)
+	}
 	defer h.mu.Unlock()
 	flushed, err := h.flushLocked(ctx)
 	h.report(flushed, err)
