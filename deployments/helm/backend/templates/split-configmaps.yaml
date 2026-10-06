@@ -6,31 +6,15 @@
 {{- if or (lt $writeCount 1) (gt $writeCount (int .Values.split.ingester.replicas)) }}
 {{- fail (printf "split.ingester.writeReplicas must be between 1 and split.ingester.replicas (%d), got %d: the gateway may only write to ingesters the querier reads" (int .Values.split.ingester.replicas) $writeCount) }}
 {{- end }}
-{{- /*
-The gateway and querier roll independently, so an old pod of one runs beside a
-new pod of the other. Stay safe across that overlap: a new gateway may write
-only to ingesters the old querier reads, and a new querier must still read
-every ingester the old gateway writes to. The previous counts come from the
-live ConfigMaps; split.ingester.previous stands in for them in a preview.
-*/}}
-{{- $prev := dict }}
-{{- with .Values.split.ingester.previous }}
-{{- $prev = dict "replicas" (int .replicas) "writeReplicas" (int .writeReplicas) }}
-{{- else }}
-{{- $gw := lookup "v1" "ConfigMap" .Release.Namespace (printf "%s-config" (include "backend.componentName" (list . "gateway"))) }}
-{{- $q := lookup "v1" "ConfigMap" .Release.Namespace (printf "%s-config" (include "backend.componentName" (list . "querier"))) }}
-{{- if and $gw $q $gw.data $q.data $gw.data.OBS_INGESTER_URL $q.data.OBS_INGESTER_URL }}
-{{- $prev = dict "replicas" (len (splitList "," $q.data.OBS_INGESTER_URL)) "writeReplicas" (len (splitList "," $gw.data.OBS_INGESTER_URL)) }}
-{{- end }}
-{{- end }}
-{{- if $prev }}
-{{- if gt $writeCount (int $prev.replicas) }}
-{{- fail (printf "unstaged ring change: the gateway would write to %d ingesters while the running querier reads only %d. Add an ingester in two upgrades: first split.ingester.replicas=%d with split.ingester.writeReplicas=%d, then raise writeReplicas" $writeCount (int $prev.replicas) (int .Values.split.ingester.replicas) (int $prev.replicas)) }}
-{{- end }}
-{{- if lt (int .Values.split.ingester.replicas) (int $prev.writeReplicas) }}
-{{- fail (printf "unstaged ring change: the querier would read %d ingesters while the running gateway writes to %d. Remove an ingester in stages: first lower split.ingester.writeReplicas to %d, drain the ingester (POST /internal/v1/drain answers 200) and scale it down, then lower replicas" (int .Values.split.ingester.replicas) (int $prev.writeReplicas) (int .Values.split.ingester.replicas)) }}
-{{- end }}
-{{- end }}
+{{- /* The ring staging check (backend.ringStagingCheck) over the live objects. */}}
+{{- $gwName := include "backend.componentName" (list . "gateway") }}
+{{- $qName := include "backend.componentName" (list . "querier") }}
+{{- $live := dict
+  "gateway" (lookup "apps/v1" "Deployment" .Release.Namespace $gwName)
+  "querier" (lookup "apps/v1" "Deployment" .Release.Namespace $qName)
+  "gatewayConfig" (lookup "v1" "ConfigMap" .Release.Namespace (printf "%s-config" $gwName))
+  "querierConfig" (lookup "v1" "ConfigMap" .Release.Namespace (printf "%s-config" $qName)) }}
+{{- include "backend.ringStagingCheck" (list . $live) }}
 {{- if gt (int .Values.split.store.replicas) 1 }}
 {{- fail "split.store.replicas must be 1 until Phase 6.4: a second store would hold blocks no querier reads" }}
 {{- end }}
