@@ -173,7 +173,7 @@ func (h *Head) thresholdFlushLocked() error {
 	if h.opts.TolerateFlushErrors && h.opts.Now().Before(h.backoffUntil) {
 		return nil
 	}
-	flushed, err := h.flushLocked()
+	flushed, err := h.flushLocked(context.Background())
 	h.report(flushed, err)
 	if err != nil && h.opts.TolerateFlushErrors {
 		h.backoffUntil = h.opts.Now().Add(h.opts.FlushBackoff)
@@ -205,11 +205,24 @@ func (h *Head) report(flushed bool, err error) {
 // attempts the sink even during a tolerant head's backoff window, and a
 // failure here never arms that backoff — only a failed threshold flush does.
 func (h *Head) Flush() error {
+	return h.FlushContext(context.Background())
+}
+
+// FlushContext is Flush with the whole flush bounded by ctx as well as each
+// sink call's FlushTimeout: the ingester's drain gives it one deadline.
+func (h *Head) FlushContext(ctx context.Context) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	flushed, err := h.flushLocked()
+	flushed, err := h.flushLocked(ctx)
 	h.report(flushed, err)
 	return err
+}
+
+// Empty reports whether the head holds no unflushed lines.
+func (h *Head) Empty() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.head) == 0
 }
 
 // Close flushes the head and closes the WAL, returning both errors if both
@@ -220,25 +233,34 @@ func (h *Head) Flush() error {
 // records already acknowledged to clients.
 func (h *Head) Close() error {
 	h.mu.Lock()
-	flushed, flushErr := h.flushLocked()
+	flushed, flushErr := h.flushLocked(context.Background())
 	h.report(flushed, flushErr)
 	h.mu.Unlock()
 	return errors.Join(flushErr, h.wal.Close())
 }
 
+// CloseWithoutFlush closes the WAL without flushing the head: for a caller that
+// has already made its flush attempt (the ingester's bounded drain). Whatever
+// is still in the head is durable in the WAL and replays on the next start.
+func (h *Head) CloseWithoutFlush() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.wal.Close()
+}
+
 // flushLocked sends every head stream to the sink, checkpoints the WAL, then
 // resets the head, reporting whether there was anything to flush. The caller
 // holds h.mu.
-func (h *Head) flushLocked() (bool, error) {
+func (h *Head) flushLocked(ctx context.Context) (bool, error) {
 	if len(h.head) == 0 {
 		return false, nil
 	}
 	for _, batch := range batchStreams(h.snapshotLocked(), h.opts.BatchBytes) {
-		ctx, cancel := context.Background(), context.CancelFunc(func() {})
+		batchCtx, cancel := ctx, context.CancelFunc(func() {})
 		if h.opts.FlushTimeout > 0 {
-			ctx, cancel = context.WithTimeout(context.Background(), h.opts.FlushTimeout)
+			batchCtx, cancel = context.WithTimeout(ctx, h.opts.FlushTimeout)
 		}
-		err := h.sink.IngestStreams(ctx, batch)
+		err := h.sink.IngestStreams(batchCtx, batch)
 		cancel()
 		if err != nil {
 			return true, err
