@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"time"
@@ -17,6 +19,11 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/storage/fsutil"
 	"github.com/masonwheeler/observability-platform/internal/storage/wal"
 )
+
+// ingesterDrainTimeout bounds one drain of the whole head, on the drain route
+// and at shutdown. With the HTTP server's 10s drain before it, a stop stays
+// inside the 60s grace period Compose and the Helm chart give an ingester.
+const ingesterDrainTimeout = 40 * time.Second
 
 // buildIngester assembles the ingester: the metrics WAL and head, the logs WAL
 // and head, the two write routes, the internal head reads, and a flush-only
@@ -86,20 +93,30 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 	// The ingester's logs head tolerates flush errors so a push never fails just
 	// because the store is unreachable -- the entry is already durable in the
 	// WAL. That makes this hook the only place a failed flush is ever reported;
-	// a successful flush needs no line. lastFlushErr records exactly the error
-	// this hook last logged, so the logs closer below (which fires on the final
-	// flush Close() performs on its way out) can tell "the same failure the hook
-	// just reported" apart from a genuine WAL-close error and never log the
-	// former a second time.
+	// a successful flush needs no line. The shutdown drain below relies on it
+	// too: it leaves a failed logs flush to this hook rather than log it twice.
 	flushLog := observability.Component(log, "flush")
-	var lastFlushErr error
 	logHead.SetFlushHook(func(err error) {
 		inst.LogFlush.Observe(err)
-		lastFlushErr = err
 		if err != nil {
 			flushLog.Error("logs flush failed", slog.String("error", err.Error()))
 		}
 	})
+	// drain flushes the whole head — metrics, open chunks included, then logs —
+	// within ctx, and succeeds only if both heads are empty afterwards. The
+	// drain route runs it before an ingester is removed; shutdown runs it last.
+	drain := func(ctx context.Context) error {
+		if err := writes.Drain(ctx); err != nil {
+			return fmt.Errorf("metrics: %w", err)
+		}
+		if err := logHead.FlushContext(ctx); err != nil {
+			return fmt.Errorf("logs: %w", err)
+		}
+		if !logHead.Empty() {
+			return errors.New("logs: head not empty after the drain: writes are still arriving")
+		}
+		return nil
+	}
 	srv := api.New(api.Deps{
 		Config:      cfg,
 		Logger:      log,
@@ -110,11 +127,14 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 		HTTP:        inst.HTTP,
 		Ingest:      inst.Ingest,
 		Internal: func(r chi.Router) {
+			rpc.MountDrain(r, drain, ingesterDrainTimeout)
 			rpc.MountReads(r, head, logs.AsSource(logHead))
 			rpc.MountWrites(r, writes, logHead, inst.Ingest)
 		},
 	})
-	flush := compactor.New(writes, nil, writes, time.Now, maintenanceConfig(cfg),
+	mcfg := maintenanceConfig(cfg)
+	mcfg.SkipFinalFlush = true // the drain below flushes the whole head instead
+	flush := compactor.New(writes, nil, writes, time.Now, mcfg,
 		inst.Maintenance, flushLog)
 
 	return &App{
@@ -122,27 +142,32 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 		Handler: srv,
 		loops:   []func(ctx context.Context){flush.Run},
 		closers: []closer{
-			// Drain before the WAL closes: the maintenance loop's final flush
-			// took only sealed chunks, and an ingester removed from the ring
-			// must not leave its open chunks in a WAL no reader will see. On
-			// failure the data is still in the WAL and replays on the next start.
-			{component: "flush", msg: "drain failed: unflushed samples stay in this ingester's WAL until it restarts", close: writes.Drain},
-			{component: "wal", msg: "wal close error", close: w.Close},
-			// Close's final flush runs the hook above synchronously before Close
-			// returns, so if the only error Close reports is the one the hook just
-			// logged (no additional WAL-close failure joined onto it), swallow it
-			// here rather than logging the same failure a second time under a
-			// different message. errors.Join's Error() concatenates each non-nil
-			// error's own message with "\n", so a join of exactly one error reads
-			// back identical to that error's own message; a second, distinct
-			// WAL-close error appended changes the text and is still logged.
-			{component: "logs", msg: "logs head close error: buffered logs may not have reached the store", close: func() error {
-				err := logHead.Close()
-				if err != nil && lastFlushErr != nil && err.Error() == lastFlushErr.Error() {
-					return nil
+			// One bounded drain before the WALs close, in place of the loop's
+			// final flush: an ingester removed from the ring must not leave its
+			// open chunks or buffered lines in a WAL no reader will see. Both
+			// heads are attempted. A failed logs flush is already logged once by
+			// the flush hook above, so this reports only what the hook cannot:
+			// a metrics failure, or lines still arriving. On failure the data
+			// is still in the WAL and replays on the next start.
+			{component: "flush", msg: "drain failed: unflushed data stays in this ingester's WAL until it restarts", close: func() error {
+				ctx, cancel := context.WithTimeout(context.Background(), ingesterDrainTimeout)
+				defer cancel()
+				metricsErr := writes.Drain(ctx)
+				logsErr := logHead.FlushContext(ctx)
+				if metricsErr != nil {
+					return fmt.Errorf("metrics: %w", metricsErr)
 				}
-				return err
+				if logsErr == nil && !logHead.Empty() {
+					return errors.New("logs: head not empty after the drain: writes are still arriving")
+				}
+				return nil
 			}},
+			{component: "wal", msg: "wal close error", close: w.Close},
+			// The drain above made the one bounded attempt to flush the logs
+			// head; closing without another flush keeps a store outage from
+			// being retried (and reported) a second time past the deadline.
+			// Whatever it could not flush stays in the logs WAL.
+			{component: "logs", msg: "logs WAL close error", close: logHead.CloseWithoutFlush},
 		},
 		log: log,
 	}, nil
