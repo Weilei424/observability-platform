@@ -89,8 +89,10 @@ These are properties of the whole system, not of the query languages.
   to an ingester the querier does not read, those writes are never returned. A
   membership change is therefore staged: the querier gains an ingester before
   the gateway, and the gateway loses it before the querier
-  ([../runbooks/split-demo.md](../runbooks/split-demo.md)). Helm enforces the
-  order with `split.ingester.writeReplicas`; in Compose the two lists are
+  ([../runbooks/split-demo.md](../runbooks/split-demo.md)). Helm stages it with
+  `split.ingester.writeReplicas` and, on an upgrade, reads the live lists and
+  refuses an unstaged change; `helm template` cannot read them, so a preview
+  checks only what `split.ingester.previous` says. In Compose the two lists are
   edited by hand, in that order. Both log `ring ready` with `ring=<hash>` of
   the sorted member list at startup: once a change is complete, the two hashes
   must be equal.
@@ -101,12 +103,13 @@ These are properties of the whole system, not of the query languages.
   member, so any unreachable ingester answers `503`. A write answers `503` only
   when the batch has a key that ingester owns; other batches succeed. A `503`
   can leave some of a batch's groups written; retrying the whole batch is safe.
-- **Removing an ingester can leave data unread if its drain fails.** An
-  ingester's graceful stop seals and flushes its whole head into the store. If
-  the store is unreachable, the drain fails (logged at ERROR) and the unflushed
-  data stays in the ingester's WAL, not read until the ingester rejoins the
-  ring. Reads answer `503` while a stopped ingester is still on the querier's
-  list.
+- **Removing an ingester needs its drain acknowledged.** `POST
+  /internal/v1/drain` answers `200` only once the ingester's whole head is in
+  the store; skip that and stop it anyway, and anything a failed or cut-short
+  drain left stays in its WAL, not read once the querier drops it. A graceful
+  stop also drains, bounded to 40 s so it fits the 60 s grace period, but its
+  outcome is only a log line. Reads answer `503` while a stopped ingester is
+  still on the querier's list.
 - **Upgrading to 6.2 has an overwrite window.** A pre-6.2 WAL record replays with a
   fresh generation, so on a restart while pre-6.2 segments are still past the
   checkpoint, a pre-upgrade sample can outrank a post-upgrade overwrite at the same
