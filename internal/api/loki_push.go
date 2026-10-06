@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"unicode/utf8"
 
+	"github.com/masonwheeler/observability-platform/internal/drain"
 	"github.com/masonwheeler/observability-platform/internal/logs"
 	"github.com/masonwheeler/observability-platform/internal/observability"
 )
@@ -191,6 +192,14 @@ func (s *Server) handleLokiPush(w http.ResponseWriter, r *http.Request) {
 
 	for i, e := range entries {
 		if err := s.logIngester.Append(e.Labels, e.TimestampNs, e.Line); err != nil {
+			if errors.Is(err, drain.ErrDraining) {
+				// A draining ingester refuses the rest of the batch: 503, so the
+				// client retries it against the ring, not a server error.
+				s.ingest.LogLinesIngested.Add(float64(i))
+				s.ingest.LogLinesRejected.WithLabelValues(observability.ReasonAppend).Add(float64(len(entries) - i))
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+				return
+			}
 			observability.Component(observability.FromContext(r.Context()), "logs_push").Error(
 				"log ingester append failed", "err", err)
 			// entries[:i] already landed; the push handler returns on the first
