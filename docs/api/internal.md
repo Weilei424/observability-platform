@@ -188,20 +188,32 @@ ingester being unavailable and the gateway answers `503`.
 POST /internal/v1/drain
 ```
 
-Flushes the ingester's whole head into the store — every metrics chunk,
-including the open ones a normal flush leaves, and every buffered log line —
-within 40 seconds. It answers `200` `{"drained":true}` only when everything
-reached the store and the head was empty afterwards, and `503`
-`{"error":"drain incomplete: …"}` otherwise: the store unreachable, the deadline
-passed, or writes still arriving. Removing an ingester waits for this `200`
-after the gateway stops writing to it and before the querier stops reading it
+First a write barrier: the ingester stops taking writes, on every write route
+— public and internal, metrics and logs — and waits for the ones already
+accepted to finish. Then it flushes its whole head into the store — every
+metrics chunk, including the open ones a normal flush leaves, and every
+buffered log line. All of it, including any wait for a flush already in
+progress, happens within 40 seconds. It answers `200` `{"drained":true}` only
+when everything reached the store and the head was empty afterwards, and `503`
+`{"error":"drain incomplete: …"}` otherwise: the store unreachable or the
+deadline passed. A `200` therefore covers every write the ingester ever
+acknowledged. Removing an ingester waits for this `200` after the gateway stops
+writing to it and before the querier stops reading it
 ([../runbooks/split-demo.md](../runbooks/split-demo.md)). An ingester also runs
-one such drain, under the same 40 s bound, as the last step of a graceful stop.
+one such drain as the last step of a graceful stop, within the process's
+shutdown budget.
+
+The barrier is permanent until the ingester restarts, even when the drain
+answers `503`: retry the drain until it answers `200`. Every write after it is
+refused with `503` `{"error":"ingester is draining: it takes no new writes"}`,
+which the gateway reports as that ingester being unavailable. Draining an
+ingester the gateway still writes to therefore fails the writes it owns until
+it restarts.
 
 | Status | Meaning |
 |---|---|
-| `200` | the whole head is in the store |
-| `503` | the drain did not complete; what is left stays in the WAL |
+| `200` | every write this ingester acknowledged is in the store |
+| `503` | the drain did not complete; what is left stays in the WAL, and writes stay refused |
 
 ## Block maintenance — store only, driven by the compactor
 
