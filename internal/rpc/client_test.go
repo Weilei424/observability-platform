@@ -360,3 +360,27 @@ func TestClientRefusesAnUnexpectedSuccessStatus(t *testing.T) {
 	protocolErr("metrics push answered 200", ok.PushSamples(ctx, []metrics.PendingSample{{Labels: m, TimestampMs: 1, Value: 1}}))
 	protocolErr("logs push answered 200", ok.PushEntries(ctx, []logs.PendingEntry{{Labels: s, TimestampNs: 1, Line: "l"}}))
 }
+
+func TestClientRequestTimeoutIsAnOutage(t *testing.T) {
+	stop := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-stop:
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(stop) })
+	c, err := rpc.NewClient("ingester", srv.URL, rpc.WithRequestTimeout(100*time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	_, err = rpc.NewMetricsSource(c).SelectLabelNames(context.Background())
+	if !errors.Is(err, rpc.ErrUnavailable) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want ErrUnavailable wrapping DeadlineExceeded", err)
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("took %v with a 100ms timeout", d)
+	}
+}
