@@ -33,16 +33,29 @@ type Client struct {
 	peer string
 	base *url.URL
 	http *http.Client
+	// timeout bounds each request when positive; zero leaves a request to its
+	// own context.
+	timeout time.Duration
+}
+
+// ClientOption configures a Client.
+type ClientOption func(*Client)
+
+// WithRequestTimeout bounds every request to d, on top of the caller's own
+// context. A request that outlives it fails as ErrUnavailable, the same as any
+// peer that fails to answer in time.
+func WithRequestTimeout(d time.Duration) ClientOption {
+	return func(c *Client) { c.timeout = d }
 }
 
 // NewClient returns a client for the peer at base, a base http(s) URL that
 // config has already validated. peer names the component in errors.
-func NewClient(peer, base string) (*Client, error) {
+func NewClient(peer, base string, opts ...ClientOption) (*Client, error) {
 	u, err := url.Parse(base)
 	if err != nil {
 		return nil, fmt.Errorf("rpc: %s URL %q: %w", peer, base, err)
 	}
-	return &Client{
+	c := &Client{
 		peer: peer,
 		base: u,
 		http: &http.Client{Transport: &http.Transport{
@@ -51,7 +64,11 @@ func NewClient(peer, base string) (*Client, error) {
 			IdleConnTimeout:     90 * time.Second,
 			TLSHandshakeTimeout: DialTimeout,
 		}},
-	}, nil
+	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c, nil
 }
 
 // do sends in (JSON, when non-nil) to /internal/v1/<path> and decodes the
@@ -76,6 +93,11 @@ func (c *Client) doNoContent(ctx context.Context, method, path string, in any) e
 }
 
 func (c *Client) call(ctx context.Context, method, path string, query url.Values, in, out any, want int) error {
+	if c.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.timeout)
+		defer cancel()
+	}
 	var body io.Reader
 	if in != nil {
 		// marshalJSON, not json.Marshal: it is the one encoding path for every
