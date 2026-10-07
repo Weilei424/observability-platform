@@ -2,12 +2,17 @@ package e2e_test
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
+
+	yaml "go.yaml.in/yaml/v3"
 )
 
 // helm template cannot look anything up, so these tests render a copy of the
@@ -142,13 +147,99 @@ func TestSplitPodTemplatesRecordTheirIngesterCount(t *testing.T) {
 }
 
 // A preview's stand-in for the live counts must give both of them: half of
-// it would leave the check comparing against a count nobody gave.
+// it would leave the check comparing against a count nobody gave. The
+// assertion names the schema path and the missing field rather than Helm's
+// prose, which differs between Helm 3 ("split.ingester.previous: writeReplicas
+// is required") and Helm 4 ("at '/split/ingester/previous': missing property
+// 'writeReplicas'").
 func TestSplitPreviousNeedsBothCounts(t *testing.T) {
 	helmAvailable(t)
-	for _, set := range []string{"split.ingester.previous.replicas=3", "split.ingester.previous.writeReplicas=3"} {
-		out, err := exec.Command("helm", "template", "obs", backendChart, "--set", "topology=split", "--set", set).CombinedOutput()
-		if err == nil || !strings.Contains(string(out), "is required") {
-			t.Errorf("--set %s alone rendered (err %v), want a schema failure\n%.400s", set, err, out)
+	for _, tc := range []struct{ set, missing string }{
+		{"split.ingester.previous.replicas=3", "writeReplicas"},
+		{"split.ingester.previous.writeReplicas=3", "replicas"},
+	} {
+		out, err := exec.Command("helm", "template", "obs", backendChart, "--set", "topology=split", "--set", tc.set).CombinedOutput()
+		missing := regexp.MustCompile(`(split\.ingester\.previous|/split/ingester/previous)\b.*\b` + tc.missing + `\b`)
+		if err == nil || !strings.Contains(string(out), "values don't meet the specifications of the schema") || !missing.Match(out) {
+			t.Errorf("--set %s alone rendered (err %v), want a schema failure naming split.ingester.previous and its missing %s\n%.400s", tc.set, err, tc.missing, out)
 		}
+	}
+}
+
+// podTemplates renders the split chart and returns each workload's pod
+// template, marshalled, by workload name: a changed template is a rollout.
+func podTemplates(t *testing.T, sets ...string) map[string]string {
+	t.Helper()
+	args := []string{"template", "obs", backendChart, "--set", "topology=split"}
+	for _, s := range sets {
+		args = append(args, "--set", s)
+	}
+	out, err := exec.Command("helm", args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("render %v: %v\n%s", sets, err, out)
+	}
+	templates := map[string]string{}
+	dec := yaml.NewDecoder(strings.NewReader(string(out)))
+	for {
+		var obj struct {
+			Kind     string `yaml:"kind"`
+			Metadata struct {
+				Name string `yaml:"name"`
+			} `yaml:"metadata"`
+			Spec struct {
+				Template any `yaml:"template"`
+			} `yaml:"spec"`
+		}
+		if err := dec.Decode(&obj); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			t.Fatalf("decode: %v", err)
+		}
+		if obj.Kind != "Deployment" && obj.Kind != "StatefulSet" {
+			continue
+		}
+		b, err := json.Marshal(obj.Spec.Template)
+		if err != nil {
+			t.Fatal(err)
+		}
+		templates[obj.Metadata.Name] = string(b)
+	}
+	if len(templates) != 5 {
+		t.Fatalf("rendered %d split workloads, want 5", len(templates))
+	}
+	return templates
+}
+
+// A ring stage restarts only the component whose ingester list it changes:
+// scaling the ingester StatefulSet must not roll its existing pods, and the
+// store and compactor never roll for a ring change. Restarting them would
+// open read-wide 503 windows at every stage.
+func TestRingStagesRollOnlyTheComponentWhoseListChanges(t *testing.T) {
+	helmAvailable(t)
+	stages := []struct {
+		name  string
+		sets  []string
+		rolls string // the one workload whose pod template may change
+	}{
+		{"3/3", nil, ""},
+		{"add stage 1: 4/3", []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=3"}, "observability-querier"},
+		{"add stage 2: 4/4", []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=4"}, "observability-backend"},
+		{"remove stage 1: 4/3", []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=3"}, "observability-backend"},
+		{"remove stage 3: 3/3", []string{"split.ingester.replicas=3", "split.ingester.writeReplicas=3"}, "observability-querier"},
+	}
+	prev := podTemplates(t, stages[0].sets...)
+	for _, st := range stages[1:] {
+		cur := podTemplates(t, st.sets...)
+		for name, tmpl := range cur {
+			changed := tmpl != prev[name]
+			if name == st.rolls && !changed {
+				t.Errorf("%s: %s's pod template did not change, so its pods keep the old ingester list", st.name, name)
+			}
+			if name != st.rolls && changed {
+				t.Errorf("%s: %s's pod template changed, which restarts it for a ring change that is not its own", st.name, name)
+			}
+		}
+		prev = cur
 	}
 }
