@@ -24,13 +24,12 @@ spec:
       labels:
         {{- include "backend.componentLabels" (list $root $component) | nindent 8 }}
       annotations:
-        checksum/config: {{ include (print $root.Template.BasePath "/split-configmaps.yaml") $root | sha256sum }}
+        checksum/config: {{ include "backend.splitConfigMap" (list $root $component) | sha256sum }}
     spec:
       # The default 30s grace period is too short: the ingester's graceful
-      # shutdown can take about 40s against a slow store (a 30s metrics flush
-      # plus a 10s logs flush), and Kubernetes would SIGKILL it mid-flush. The
-      # Compose split already gives it 60s (stop_grace_period); this adds
-      # headroom on top.
+      # shutdown can take up to its 50s shutdown budget against a slow store (a
+      # 10s HTTP drain, then a drain of its head), and Kubernetes would SIGKILL
+      # it mid-flush. The Compose split gives it 60s (stop_grace_period) too.
       terminationGracePeriodSeconds: 60
       {{- include "backend.podSecurityContext" $root | nindent 6 }}
       containers:
