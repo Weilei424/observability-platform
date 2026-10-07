@@ -16,7 +16,7 @@ and rescheduled — not to replace Compose as the everyday path.
 - A Kubernetes cluster. [`kind`](https://kind.sigs.k8s.io/) is what CI uses and is the
   easiest local option; any cluster you can point `kubectl` at works.
 - `kubectl`
-- `helm` (v3)
+- `helm` (v3; CI pins v3.18.0)
 - `docker`, to build the images `kind load` will push into the cluster
 
 ## Create a cluster
