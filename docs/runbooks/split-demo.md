@@ -150,9 +150,12 @@ StatefulSet; the querier reads every replica, by the pods' DNS names under the
 headless Service (`<ingester>-<i>.<ingester>-headless`).
 `split.ingester.writeReplicas` (default: all replicas; between 1 and
 `replicas`) is how many of them, from ordinal 0, the gateway writes to, so the
-gateway's list is always a prefix of the querier's. Both Deployments carry a
-`checksum/config` annotation, so a changed list rolls them by itself, old and
-new pods of each running side by side for a while. On an upgrade the chart
+gateway's list is always a prefix of the querier's. Each workload carries a
+`checksum/config` annotation over its own ConfigMap only, so a stage rolls just
+the Deployment whose list it changes — the querier when `replicas` changes, the
+gateway when `writeReplicas` does — with its old and new pods running side by
+side for a while. Existing ingester pods, the store, and the compactor do not
+restart. On an upgrade the chart
 reads the ingester counts the running gateway and querier pods loaded (an
 annotation on each Deployment's pod template) and refuses a change that is not
 staged — a new gateway writing to an ingester the old querier does not read,
