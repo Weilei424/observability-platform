@@ -3,6 +3,7 @@ package ring
 import (
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -167,5 +168,73 @@ func TestMembersIsASortedCopy(t *testing.T) {
 	got[0] = "mutated"
 	if r.Members()[0] != "http://a:1" {
 		t.Error("Members() returned the ring's own slice")
+	}
+}
+
+func TestReplicasAreDistinctAndStartAtTheOwner(t *testing.T) {
+	r := mustNew(t, []string{"http://a:1", "http://b:1", "http://c:1", "http://d:1", "http://e:1"})
+	for key := uint64(0); key < 2000; key++ {
+		got, err := r.Replicas(key, 3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 3 || got[0] != r.Owner(key) {
+			t.Fatalf("Replicas(%d, 3) = %v, want 3 starting at owner %s", key, got, r.Owner(key))
+		}
+		if got[0] == got[1] || got[1] == got[2] || got[0] == got[2] {
+			t.Fatalf("Replicas(%d, 3) = %v has a repeat", key, got)
+		}
+	}
+}
+
+func TestReplicasOfOneIsTheOwner(t *testing.T) {
+	r := mustNew(t, []string{"http://a:1", "http://b:1", "http://c:1"})
+	for key := uint64(0); key < 500; key++ {
+		got, _ := r.Replicas(key, 1)
+		if len(got) != 1 || got[0] != r.Owner(key) {
+			t.Fatalf("Replicas(%d, 1) = %v, want [%s]", key, got, r.Owner(key))
+		}
+	}
+}
+
+func TestReplicasOfEveryMemberIsAllOfThem(t *testing.T) {
+	m := []string{"http://a:1", "http://b:1", "http://c:1"}
+	r := mustNew(t, m)
+	got, _ := r.Replicas(42, 3)
+	slices.Sort(got)
+	if !slices.Equal(got, m) {
+		t.Fatalf("Replicas(42, 3) = %v, want every member", got)
+	}
+}
+
+func TestReplicasRefusesMoreThanTheMembers(t *testing.T) {
+	r := mustNew(t, []string{"http://a:1", "http://b:1"})
+	if _, err := r.Replicas(1, 3); err == nil {
+		t.Fatal("Replicas(1, 3) on two members returned no error")
+	}
+	if _, err := r.Replicas(1, 0); err == nil {
+		t.Fatal("Replicas(1, 0) returned no error")
+	}
+}
+
+func TestGoldenReplicas(t *testing.T) {
+	r := mustNew(t, members(3))
+	for _, c := range []struct {
+		key  uint64
+		want []string
+	}{
+		{0, []string{"http://ingester-1:8080", "http://ingester-0:8080", "http://ingester-2:8080"}},
+		{1, []string{"http://ingester-2:8080", "http://ingester-0:8080", "http://ingester-1:8080"}},
+		{0x2a, []string{"http://ingester-1:8080", "http://ingester-0:8080", "http://ingester-2:8080"}},
+		{1 << 40, []string{"http://ingester-1:8080", "http://ingester-0:8080", "http://ingester-2:8080"}},
+		{math.MaxUint64, []string{"http://ingester-1:8080", "http://ingester-2:8080", "http://ingester-0:8080"}},
+	} {
+		got, err := r.Replicas(c.key, 3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(got, c.want) {
+			t.Errorf("Replicas(%#x, 3) = %q, want %q", c.key, got, c.want)
+		}
 	}
 }
