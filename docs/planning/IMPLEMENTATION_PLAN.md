@@ -575,16 +575,21 @@ closes the gap. It is a query-engine feature, so it was deliberately kept out of
 **Goal:** Add simple replication for write durability in distributed mode.
 
 **Scope:**
-- Configurable replication factor.
-- Write to N ingesters.
-- Define quorum behavior.
-- Surface partial write failures clearly.
-- Add failure tests with fake/unavailable ingesters.
+- Configurable replication factor (`OBS_REPLICATION_FACTOR`), placed by the ring: the next RF distinct members clockwise.
+- Write to N ingesters with a per-key majority quorum; the gateway answers as soon as quorum is met or impossible.
+- Define quorum behavior, and surface partial write failures clearly (response body, metrics, dashboard).
+- Reads tolerate up to W−1 ingester outages, since every acknowledged write is on W replicas.
+- Request deadlines on routed writes and ingester reads (deferred from 6.2).
+- RF=3 on three ingesters in the Compose and Helm split topologies.
+- Add failure tests with fake/unavailable/hung ingesters.
 
 **DoD:**
 - Writes succeed when quorum is met.
 - Writes fail clearly when quorum is not met.
+- With RF=3, one ingester down fails neither writes nor reads.
 - Duplicate replicated samples do not corrupt query results.
+
+**Why the scope grew:** a quorum write that survives an outage is not much use if every read still fails during it, and a hung (rather than refused) replica would stall a quorum write without a deadline.
 
 ### Phase 6.4 — Query Fanout and Merge
 
@@ -594,7 +599,7 @@ closes the gap. It is a query-engine feature, so it was deliberately kept out of
 - Gateway/querier fans out query requests in parallel (6.2 reads every ingester sequentially), pruning ingesters a selector cannot touch.
 - Merge metrics query results by series/time.
 - Merge log query results by timestamp.
-- Deduplicate replicated data.
+- Deduplicate replicated data (already done by the 6.3 merge: highest generation per timestamp, `(ts, line)` for logs).
 
 **DoD:**
 - Querying through gateway returns complete results across shards.
