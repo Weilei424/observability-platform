@@ -29,6 +29,8 @@
           "$comment": "A real config key, but templates/configmap.yaml rejects it: the chart renders peer URLs from its own Services.",
           "type": ["string"]
         },
+        "OBS_REPLICATION_FACTOR": { "type": ["string", "integer"] },
+        "OBS_INGESTER_TIMEOUT": { "type": ["string"] },
         "OBS_DATA_DIR": { "type": ["string"] },
         "OBS_LOG_LEVEL": { "type": ["string"] },
         "OBS_WAL_SEGMENT_MAX_BYTES": { "type": ["string", "integer"] },
