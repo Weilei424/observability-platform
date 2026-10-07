@@ -109,6 +109,42 @@ stops reading it).
 {{- end -}}
 
 {{/*
+backend.splitConfigMap: one split component's ConfigMap, called as (list $root
+component). split-configmaps.yaml renders all five from it, and each
+workload's checksum/config hashes only its own, so a change to one
+component's settings -- a ring stage changing the gateway's or the querier's
+ingester list -- rolls that component alone, never the ingesters or the store.
+*/}}
+{{- define "backend.splitConfigMap" -}}
+{{- $root := index . 0 -}}
+{{- $component := index . 1 -}}
+{{- $peers := dict "gateway" (list "ingester" "querier") "ingester" (list "store") "querier" (list "ingester" "store") "store" (list) "compactor" (list "store") -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "backend.componentName" (list $root $component) }}-config
+  labels:
+    {{- include "backend.componentLabels" (list $root $component) | nindent 4 }}
+data:
+  # The chart owns the target and the peer URLs (config.OBS_* refuses them),
+  # rendering each peer from the Service that component's objects create.
+  OBS_TARGET: {{ $component | quote }}
+  OBS_HTTP_ADDR: {{ printf ":%d" ($root.Values.service.port | int) | quote }}
+  {{- range $peer := index $peers $component }}
+  {{- if and (eq $peer "ingester") (eq $component "gateway") }}
+  OBS_INGESTER_URL: {{ include "backend.ingesterURLs" (list $root (include "backend.ingesterWriteCount" $root)) | quote }}
+  {{- else if eq $peer "ingester" }}
+  OBS_INGESTER_URL: {{ include "backend.ingesterURLs" (list $root $root.Values.split.ingester.replicas) | quote }}
+  {{- else }}
+  OBS_{{ upper $peer }}_URL: {{ include "backend.peerURL" (list $root $peer) | quote }}
+  {{- end }}
+  {{- end }}
+  {{- range $key, $value := $root.Values.config }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+{{- end -}}
+
+{{/*
 backend.ingesterCountAnnotation: the pod-template annotation recording how many
 ingesters a gateway pod writes to or a querier pod reads. It is what the running
 pods loaded, which the staging check in split-configmaps.yaml compares against.
