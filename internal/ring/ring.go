@@ -82,6 +82,27 @@ func (r *Ring) lookup(h uint64) string {
 	return r.members[r.owners[i]]
 }
 
+// Replicas returns the n distinct members that hold key: its owner, then the
+// owners of the following tokens clockwise, skipping members already taken.
+// Replicas(key, 1) is [Owner(key)]. n must be between 1 and the member count.
+func (r *Ring) Replicas(key uint64, n int) ([]string, error) {
+	if n < 1 || n > len(r.members) {
+		return nil, fmt.Errorf("ring: %d replicas requested from %d members", n, len(r.members))
+	}
+	h := Mix64(key)
+	i := sort.Search(len(r.tokens), func(i int) bool { return r.tokens[i] >= h })
+	out := make([]string, 0, n)
+	taken := make([]bool, len(r.members))
+	for step := 0; len(out) < n && step < len(r.tokens); step++ {
+		owner := r.owners[(i+step)%len(r.tokens)]
+		if !taken[owner] {
+			taken[owner] = true
+			out = append(out, r.members[owner])
+		}
+	}
+	return out, nil
+}
+
 // Members returns the members, sorted. The slice is a copy.
 func (r *Ring) Members() []string { return slices.Clone(r.members) }
 
