@@ -33,9 +33,9 @@ func buildGateway(cfg *config.Config, log *slog.Logger) (*App, error) {
 		labels = append(labels, rpc.MemberLabel(m))
 	}
 	rm.Register(reg, labels, true)
-	router, err := rpc.NewRouter(members, func(member, outcome string) {
+	router, err := rpc.NewRouter(members, rpc.RouterOptions{ReplicationFactor: 1, ObserveMember: func(member, outcome string) {
 		rm.IngesterRequests.WithLabelValues(member, outcome).Inc()
-	})
+	}})
 	if err != nil {
 		err = fmt.Errorf("app: write router: %w", err)
 		mainLog.Error("failed to build write router", slog.String("error", err.Error()))
