@@ -63,6 +63,9 @@ type Config struct {
 	StoreURL     string
 	QuerierURL   string
 
+	ReplicationFactor int           // OBS_REPLICATION_FACTOR: replicas per series/stream; gateway and querier (Phase 6.3)
+	IngesterTimeout   time.Duration // OBS_INGESTER_TIMEOUT: bounds each routed write and ingester read
+
 	MaintenanceInterval  time.Duration
 	FlushInterval        time.Duration
 	FlushSealedChunks    int
@@ -72,6 +75,12 @@ type Config struct {
 	CompactionLevels     int
 	Retention            time.Duration
 }
+
+// DefaultIngesterTimeout is the default OBS_INGESTER_TIMEOUT.
+const DefaultIngesterTimeout = 10 * time.Second
+
+// Quorum is how many of rf replicas must acknowledge a write: a majority.
+func Quorum(rf int) int { return rf/2 + 1 }
 
 func Load() (*Config, error) {
 	v := viper.New()
@@ -94,6 +103,8 @@ func Load() (*Config, error) {
 	v.SetDefault("ingester_url", "")
 	v.SetDefault("store_url", "")
 	v.SetDefault("querier_url", "")
+	v.SetDefault("replication_factor", 1)
+	v.SetDefault("ingester_timeout", DefaultIngesterTimeout.String())
 
 	v.SetConfigName("config")
 	v.SetConfigType("yaml")
@@ -133,6 +144,10 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	ingesterTimeout, err := parseDuration(v.GetString("ingester_timeout"), "OBS_INGESTER_TIMEOUT")
+	if err != nil {
+		return nil, err
+	}
 
 	cfg := &Config{
 		HTTPAddr:                v.GetString("http_addr"),
@@ -145,6 +160,8 @@ func Load() (*Config, error) {
 		IngesterURL:             v.GetString("ingester_url"),
 		StoreURL:                v.GetString("store_url"),
 		QuerierURL:              v.GetString("querier_url"),
+		ReplicationFactor:       v.GetInt("replication_factor"),
+		IngesterTimeout:         ingesterTimeout,
 		MaintenanceInterval:     maintenanceInterval,
 		FlushInterval:           flushInterval,
 		FlushSealedChunks:       v.GetInt("flush_sealed_chunks"),
@@ -186,6 +203,12 @@ func Load() (*Config, error) {
 	}
 	if cfg.LogsFlushThresholdBytes <= 0 {
 		return nil, fmt.Errorf("config: logs_flush_threshold_bytes must be > 0")
+	}
+	if cfg.ReplicationFactor < 1 {
+		return nil, fmt.Errorf("config: OBS_REPLICATION_FACTOR must be >= 1")
+	}
+	if cfg.IngesterTimeout < 100*time.Millisecond {
+		return nil, fmt.Errorf("config: OBS_INGESTER_TIMEOUT must be >= 100ms")
 	}
 
 	if err := cfg.validateTopology(); err != nil {
@@ -271,6 +294,9 @@ func (c *Config) validateTopology() error {
 			}
 			*fields[p] = normalized
 		}
+	}
+	if (c.Target == TargetGateway || c.Target == TargetQuerier) && c.ReplicationFactor > len(c.IngesterURLs) {
+		return fmt.Errorf("config: OBS_REPLICATION_FACTOR %d is larger than the %d ingesters in OBS_INGESTER_URL", c.ReplicationFactor, len(c.IngesterURLs))
 	}
 	return nil
 }
