@@ -22,31 +22,8 @@
 {{- fail "split.compactor.replicas must be 1: two compactors would plan and run the same compactions" }}
 {{- end }}
 {{- $root := . }}
-{{- $peers := dict "gateway" (list "ingester" "querier") "ingester" (list "store") "querier" (list "ingester" "store") "store" (list) "compactor" (list "store") }}
 {{- range $component := list "gateway" "ingester" "querier" "store" "compactor" }}
 ---
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {{ include "backend.componentName" (list $root $component) }}-config
-  labels:
-    {{- include "backend.componentLabels" (list $root $component) | nindent 4 }}
-data:
-  # The chart owns the target and the peer URLs (config.OBS_* refuses them),
-  # rendering each peer from the Service that component's objects create.
-  OBS_TARGET: {{ $component | quote }}
-  OBS_HTTP_ADDR: {{ printf ":%d" ($root.Values.service.port | int) | quote }}
-  {{- range $peer := index $peers $component }}
-  {{- if and (eq $peer "ingester") (eq $component "gateway") }}
-  OBS_INGESTER_URL: {{ include "backend.ingesterURLs" (list $root (include "backend.ingesterWriteCount" $root)) | quote }}
-  {{- else if eq $peer "ingester" }}
-  OBS_INGESTER_URL: {{ include "backend.ingesterURLs" (list $root $root.Values.split.ingester.replicas) | quote }}
-  {{- else }}
-  OBS_{{ upper $peer }}_URL: {{ include "backend.peerURL" (list $root $peer) | quote }}
-  {{- end }}
-  {{- end }}
-  {{- range $key, $value := $root.Values.config }}
-  {{ $key }}: {{ $value | quote }}
-  {{- end }}
+{{ include "backend.splitConfigMap" (list $root $component) }}
 {{- end }}
 {{- end }}
