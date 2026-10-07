@@ -866,16 +866,33 @@ every ingester (6.4 keeps parallel fanout, pruning, and replica dedup), and reso
 - [x] Verify: kind split with three ingesters — CI job "Helm + Kubernetes E2E (kind, split)" passed on 2026-10-07 at `37da904` (https://github.com/Weilei424/observability-platform/actions/runs/37561984687/job/112601639972), including the live ring-staging refusals in `tests/e2e/kind_smoke.sh` (not run locally: cgroup v1 host)
 
 ### Phase 6.3 — Replication and Failure Handling
-- [ ] Add configurable replication factor
-- [ ] Write each series/stream record to N ingesters
-- [ ] Define quorum behavior
-- [ ] Surface partial write failures clearly
-- [ ] Deduplicate replicated samples/log lines
-- [ ] Failure test: one ingester unavailable but quorum succeeds
-- [ ] Failure test: quorum unavailable causes write failure
+Spec: `docs/superpowers/specs/2026-10-06-phase-6.3-replication-design.md` · Plan: `docs/superpowers/plans/2026-10-06-phase-6.3-replication.md`
 
-**Deferred from 6.2** — unscheduled
-- [ ] Request deadlines on the gateway's routed writes and the querier's ingester reads — a hung (not refused) ingester stalls its batches until the client gives up
+**Configuration and ring**
+- [ ] `OBS_REPLICATION_FACTOR` (default 1, at most the ingester list on the gateway and querier) and `OBS_INGESTER_TIMEOUT` (default 10s, at least 100ms); quorum `W = RF/2 + 1`
+- [ ] `ring.Replicas(key, n)` — the next n distinct members clockwise; `Replicas(key, 1)` is the owner, so RF=1 places as 6.2 does
+
+**Write path**
+- [ ] Write each series/stream record to RF ingesters: one push per member carrying every key it replicates, concurrently
+- [ ] Per-key quorum: `204` once every key has W acks; `503` (outage) or `500` (protocol error) once a key cannot; the rest finish in the background, bounded by the timeout
+- [ ] Surface partial write failures — `QuorumError` body (`write quorum not met: k of n series could not reach W of RF ingesters`), `obs_gateway_write_quorum_total{outcome=full|degraded|failed}`, per-replica `obs_gateway_ingester_requests_total`, a dashboard panel
+- [ ] Request deadlines on routed writes and ingester reads (moved from 6.2's deferred list) — a hung ingester counts as a failed replica
+
+**Read path**
+- [ ] The querier skips up to W−1 ingester outages (`MergeHeadsWith`); more, or any protocol error, fails the read; `obs_querier_ingester_reads_total{ingester,outcome}`; a warn line when a read relied on replication
+- [ ] Deduplicate replicated samples/log lines — single-copy answers for `sum`, `count`, `rate`, `count_over_time` and raw lines from heads, from the store after flush, and after compaction
+
+**Deployment**
+- [ ] Compose split runs RF=3 (one shared env anchor for the gateway and querier); smoke: replication check, one ingester down → writes `204` and reads complete, two down → `503`
+- [ ] Helm `split.replicationFactor` (default 3), rendered to the gateway and querier only, refused above `writeReplicas`; kind smoke: replication check, reads complete while each ingester restarts
+
+**Verification**
+- [ ] Failure test: one ingester unavailable but quorum succeeds (writes and reads)
+- [ ] Failure test: quorum unavailable causes write failure (and read failure)
+- [ ] Failure test: a hung ingester is bounded by the timeout
+- [ ] Unit: the overwrite skew window across replicas is pinned and documented
+- [ ] RF=1 keeps every 6.2 test green unchanged
+- [ ] Verify: `make smoke-compose-split`, `make smoke-compose`, and kind split in CI
 
 ### Phase 6.4 — Query Fanout and Merge
 - [ ] Implement metrics query fanout
