@@ -19,7 +19,7 @@ spec:
       labels:
         {{- include "backend.componentLabels" (list $root $component) | nindent 8 }}
       annotations:
-        checksum/config: {{ include (print $root.Template.BasePath "/split-configmaps.yaml") $root | sha256sum }}
+        checksum/config: {{ include "backend.splitConfigMap" (list $root $component) | sha256sum }}
         {{- if eq $component "gateway" }}
         {{ include "backend.ingesterCountAnnotation" $root }}: {{ include "backend.ingesterWriteCount" $root | quote }}
         {{- else if eq $component "querier" }}
