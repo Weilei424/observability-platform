@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 )
@@ -21,6 +22,9 @@ func (f downSource) SelectLabelValues(context.Context, string) ([]string, error)
 }
 
 var errOutage = errors.New("outage")
+
+// timeoutErr is what a per-request timeout looks like: an outage that also wraps DeadlineExceeded.
+var timeoutErr = fmt.Errorf("%w: %w", errOutage, context.DeadlineExceeded)
 
 func outage(err error) bool { return errors.Is(err, errOutage) }
 
@@ -83,10 +87,21 @@ func TestMergeHeadsWithToleratesLabelReadsToo(t *testing.T) {
 func TestMergeHeadsWithNeverSkipsCancellationOrAllHeadsDown(t *testing.T) {
 	good := headWith(t, "m", 1, 1)
 	always := func(error) bool { return true }
-	for _, e := range []error{context.Canceled, fmt.Errorf("wrapped: %w", context.DeadlineExceeded)} {
-		_, err := metrics.MergeHeadsWith(metrics.HeadsOptions{Tolerate: 2, Skippable: always}, downSource{e}, good).Select(context.Background(), allParams)
-		if !errors.Is(err, e) {
-			t.Errorf("%v was skipped: err = %v", e, err)
+	// context.Canceled is never skipped, even with a live caller context.
+	if _, err := metrics.MergeHeadsWith(metrics.HeadsOptions{Tolerate: 2, Skippable: always}, downSource{context.Canceled}, good).Select(context.Background(), allParams); !errors.Is(err, context.Canceled) {
+		t.Errorf("Canceled was skipped: err = %v", err)
+	}
+	// A done caller context disables skipping.
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	expired, cancel2 := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel2()
+	for _, ctx := range []context.Context{cancelled, expired} {
+		if _, err := metrics.MergeHeadsWith(metrics.HeadsOptions{Tolerate: 2, Skippable: outage}, downSource{timeoutErr}, good).Select(ctx, allParams); !errors.Is(err, errOutage) {
+			t.Errorf("skipped with a done caller context: err = %v", err)
+		}
+		if _, err := metrics.MergeHeadsWith(metrics.HeadsOptions{Tolerate: 2, Skippable: outage}, downSource{timeoutErr}, good).SelectLabelNames(ctx); !errors.Is(err, errOutage) {
+			t.Errorf("label read skipped with a done caller context: err = %v", err)
 		}
 	}
 	if _, err := metrics.MergeHeadsWith(metrics.HeadsOptions{Tolerate: 2, Skippable: outage}, downSource{errOutage}, downSource{errOutage}).Select(context.Background(), allParams); !errors.Is(err, errOutage) {
@@ -115,5 +130,69 @@ func TestMergeHeadsWithMatchesMergeHeadsWhenNothingFails(t *testing.T) {
 	got, err := metrics.MergeHeadsWith(metrics.HeadsOptions{Tolerate: 1, Skippable: outage}, a, b, c).Select(context.Background(), allParams)
 	if err != nil || fmt.Sprintf("%+v", got) != fmt.Sprintf("%+v", want) {
 		t.Fatalf("got %+v (%v), want %+v", got, err, want)
+	}
+}
+
+// Overwrite generations come from each ingester's own wall clock, and the merge
+// keeps the highest generation across replicas. When a replica misses an
+// overwrite (here B: v2 reached only a quorum, A and C) and its clock runs
+// ahead, its stale v1 can outrank v2: an overwrite is only reliable when it
+// follows the original by more than the clock skew.
+func TestMergeHeadsOverwriteSkewWindow(t *testing.T) {
+	const ms = int64(1000) // generation clock unit is microseconds
+	run := func(gapMs int64) float64 {
+		t.Helper()
+		l, err := metrics.NewLabels(map[string]string{"__name__": "m"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		now := [3]int64{1_000_000, 1_000_000 + 5*ms, 1_000_000} // A, C on time; B is 5ms ahead
+		var stores []*metrics.MemoryStore
+		var heads []metrics.Source
+		for i := range now {
+			s := metrics.NewMemoryStore()
+			s.SetGenerationClock(func() int64 { return now[i] })
+			stores = append(stores, s)
+			heads = append(heads, s)
+		}
+		write := func(v float64, to ...int) {
+			for _, i := range to {
+				if err := stores[i].Append(l, 1000, v); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		write(1, 0, 1, 2)
+		for i := range now {
+			now[i] += gapMs * ms
+		}
+		write(2, 0, 2) // B missed the overwrite
+		sds, err := metrics.MergeHeads(heads...).Select(context.Background(), allParams)
+		if err != nil || len(sds) != 1 || len(sds[0].Samples) != 1 {
+			t.Fatalf("select: %v %+v", err, sds)
+		}
+		return sds[0].Samples[0].Value
+	}
+	if v := run(1); v != 1 {
+		t.Errorf("overwrite 1ms later with 5ms skew = %v, want the stale 1 (documented limitation)", v)
+	}
+	if v := run(10); v != 2 {
+		t.Errorf("overwrite 10ms later with 5ms skew = %v, want 2", v)
+	}
+}
+
+func TestMergeHeadsWithSkipsPerRequestTimeoutWhileCallerIsLive(t *testing.T) {
+	good := headWith(t, "m", 1000, 1)
+	opts := metrics.HeadsOptions{Tolerate: 1, Skippable: outage}
+	src := metrics.MergeHeadsWith(opts, downSource{timeoutErr}, good)
+	sds, err := src.Select(context.Background(), allParams)
+	if err != nil || len(sds) != 1 {
+		t.Fatalf("hung head not skipped: %v %+v", err, sds)
+	}
+	if _, err := src.SelectLabelNames(context.Background()); err != nil {
+		t.Fatalf("label names: %v", err)
+	}
+	if _, err := src.SelectLabelValues(context.Background(), "__name__"); err != nil {
+		t.Fatalf("label values: %v", err)
 	}
 }
