@@ -611,7 +611,7 @@
     },
     {
       "datasource": { "type": "prometheus", "uid": "obs-internals" },
-      "description": "The querier's reads of each ingester, by outcome. An ingester whose error or timeout outcomes climb is the one reads are skipping; queries stay complete while the rest answer.",
+      "description": "The querier's reads of each ingester, by outcome. unavailable (refused, a 5xx, or no answer within OBS_INGESTER_TIMEOUT) is the only outcome a read skips, up to quorum - 1 ingesters, so queries stay complete while the rest answer; an ingester whose unavailable rate climbs is the one reads are skipping. error is a protocol error: it is never skipped and fails the read with 500. A read the caller cancels is not counted.",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
