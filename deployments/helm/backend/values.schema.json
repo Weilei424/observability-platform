@@ -54,6 +54,11 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "replicationFactor": {
+          "description": "How many distinct ingesters each write goes to; at most the ingesters the gateway writes to (split.ingester.writeReplicas, else replicas). Delivered to the gateway and querier only.",
+          "type": "integer",
+          "minimum": 1
+        },
         "gateway": { "$ref": "#/$defs/statelessComponent" },
         "querier": { "$ref": "#/$defs/statelessComponent" },
         "compactor": { "$ref": "#/$defs/statelessComponent" },
