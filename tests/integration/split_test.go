@@ -248,7 +248,11 @@ func restartWithMembers(p *process, urls []string) {
 	httpClient.CloseIdleConnections()
 }
 
-func startClusterN(t *testing.T, n int) *cluster {
+func startClusterN(t *testing.T, n int) *cluster { return startClusterRF(t, n, 1) }
+
+// startClusterRF is startClusterN with the gateway and querier replicating
+// every series and stream to rf ingesters.
+func startClusterRF(t *testing.T, n, rf int) *cluster {
 	t.Helper()
 	addr := map[config.Target]string{}
 	for _, target := range []config.Target{config.TargetGateway, config.TargetQuerier, config.TargetStore, config.TargetCompactor} {
@@ -284,10 +288,12 @@ func startClusterN(t *testing.T, n int) *cluster {
 	c.gateway = mk(config.TargetGateway, func(x *config.Config) {
 		x.IngesterURL, x.QuerierURL = strings.Join(c.ingesterURLs, ","), peer(config.TargetQuerier)
 		x.IngesterURLs = slices.Clone(c.ingesterURLs)
+		x.ReplicationFactor, x.IngesterTimeout = rf, 2*time.Second
 	})
 	c.querier = mk(config.TargetQuerier, func(x *config.Config) {
 		x.IngesterURL, x.StoreURL = strings.Join(c.ingesterURLs, ","), peer(config.TargetStore)
 		x.IngesterURLs = slices.Clone(c.ingesterURLs)
+		x.ReplicationFactor, x.IngesterTimeout = rf, 2*time.Second
 	})
 	c.store = mk(config.TargetStore, func(*config.Config) {})
 	c.compactor = mk(config.TargetCompactor, func(x *config.Config) { x.StoreURL = peer(config.TargetStore) })
