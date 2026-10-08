@@ -139,6 +139,9 @@ data:
   OBS_{{ upper $peer }}_URL: {{ include "backend.peerURL" (list $root $peer) | quote }}
   {{- end }}
   {{- end }}
+  {{- if or (eq $component "gateway") (eq $component "querier") }}
+  OBS_REPLICATION_FACTOR: {{ $root.Values.split.replicationFactor | int | toString | quote }}
+  {{- end }}
   {{- range $key, $value := $root.Values.config }}
   {{ $key }}: {{ $value | quote }}
   {{- end }}
