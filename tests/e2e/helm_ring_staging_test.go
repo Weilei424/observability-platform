@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -220,23 +221,26 @@ func TestRingStagesRollOnlyTheComponentWhoseListChanges(t *testing.T) {
 	stages := []struct {
 		name  string
 		sets  []string
-		rolls string // the one workload whose pod template may change
+		rolls []string // the workloads whose pod template may change
 	}{
-		{"3/3", nil, ""},
-		{"add stage 1: 4/3", []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=3"}, "observability-querier"},
-		{"add stage 2: 4/4", []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=4"}, "observability-backend"},
-		{"remove stage 1: 4/3", []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=3"}, "observability-backend"},
-		{"remove stage 3: 3/3", []string{"split.ingester.replicas=3", "split.ingester.writeReplicas=3"}, "observability-querier"},
+		{"3/3", nil, nil},
+		{"add stage 1: 4/3", []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=3"}, []string{"observability-querier"}},
+		{"add stage 2: 4/4", []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=4"}, []string{"observability-backend"}},
+		{"remove stage 1: 4/3", []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=3"}, []string{"observability-backend"}},
+		{"remove stage 3: 3/3", []string{"split.ingester.replicas=3", "split.ingester.writeReplicas=3"}, []string{"observability-querier"}},
+		{"4/4 at the default RF 3 (baseline for the next stage)", []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=4"}, []string{"observability-backend", "observability-querier"}},
+		{"replication factor 3 -> 2 on 4/4", []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=4", "split.replicationFactor=2"}, []string{"observability-backend", "observability-querier"}},
 	}
 	prev := podTemplates(t, stages[0].sets...)
 	for _, st := range stages[1:] {
 		cur := podTemplates(t, st.sets...)
 		for name, tmpl := range cur {
 			changed := tmpl != prev[name]
-			if name == st.rolls && !changed {
+			rolls := slices.Contains(st.rolls, name)
+			if rolls && !changed {
 				t.Errorf("%s: %s's pod template did not change, so its pods keep the old ingester list", st.name, name)
 			}
-			if name != st.rolls && changed {
+			if !rolls && changed {
 				t.Errorf("%s: %s's pod template changed, which restarts it for a ring change that is not its own", st.name, name)
 			}
 		}
