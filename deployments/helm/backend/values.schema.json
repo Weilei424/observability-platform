@@ -60,7 +60,19 @@
           "minimum": 1
         },
         "gateway": { "$ref": "#/$defs/statelessComponent" },
-        "querier": { "$ref": "#/$defs/statelessComponent" },
+        "querier": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "replicas": { "type": "integer", "minimum": 1 },
+            "replicationFactor": {
+              "description": "The querier's replication factor, for staging an RF change; unset (or null, which a --reuse-values upgrade uses to drop it) means split.replicationFactor. Its quorum (RF/2 + 1) must not exceed the gateway's: raise an RF gateway first, lower it querier first (deployments/helm/README.md).",
+              "type": ["integer", "null"],
+              "minimum": 1
+            },
+            "resources": { "type": "object" }
+          }
+        },
         "compactor": { "$ref": "#/$defs/statelessComponent" },
         "ingester": {
           "type": "object",
