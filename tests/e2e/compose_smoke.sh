@@ -772,32 +772,34 @@ scrape_ok() {
 # which is why the panel queries below exist.
 wait_for "Prometheus reports every scrape target up" 90 scrape_ok
 
-# Spec 10.1: the ring spreads the producers' writes over all three ingesters.
-# The ingester image is distroless (no shell or wget), so read each one's
-# counter through the self-observability Prometheus that scrapes it. Polled
-# because the first scrape after a write can lag by one interval.
+# Spec 10.1: at RF=3 on three ingesters every sample is written to every
+# ingester, so their counters must agree. The ingester image is distroless (no
+# shell or wget), so read each one's counter through the self-observability
+# Prometheus that scrapes it. Polled because the first scrape after a write can
+# lag by one interval, and the three scrapes are not simultaneous (each value
+# can be up to a 15s scrape interval stale while the producers keep writing;
+# a run measured 2328/2532/2729): the 80% tolerance absorbs that skew, and
+# still tells replication (all equal) from a ring split (each about a third).
 if [ "$TOPOLOGY" = split ]; then
-    ingester_ingested() { # <service> -> sample count on stdout, nonzero exit if none yet
-        local n
-        n="$(curl -s "${CURL_TIMEOUTS[@]}" -G "$PROMETHEUS/api/v1/query" \
+    ingester_ingested() { # <service> -> sample count on stdout
+        curl -s "${CURL_TIMEOUTS[@]}" -G "$PROMETHEUS/api/v1/query" \
             --data-urlencode "query=sum(obs_samples_ingested_total{instance=\"$1:8080\"})" 2>/dev/null \
-            | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null)"
-        echo "${n:-0}"
-        awk -v c="${n:-0}" 'BEGIN { exit !(c > 0) }'
+            | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null
     }
-    for svc in ingester-1 ingester-2 ingester-3; do
-        COUNT=0
-        spread_start=$SECONDS
-        while [ $((SECONDS - spread_start)) -lt 45 ]; do
-            COUNT="$(ingester_ingested "$svc")" && break
-            sleep 3
-        done
-        if awk -v c="${COUNT:-0}" 'BEGIN { exit !(c > 0) }'; then
-            log_pass "$svc ingested ${COUNT} samples through the ring"
-        else
-            log_fail "$svc ingested no samples; the ring is not routing to it"
-        fi
-    done
+    replicated_everywhere() { # sets COUNTS "a b c"; true when each is >0 and >=80% of the largest
+        local a b c
+        a="$(ingester_ingested ingester-1)"; b="$(ingester_ingested ingester-2)"; c="$(ingester_ingested ingester-3)"
+        COUNTS="${a:-0} ${b:-0} ${c:-0}"
+        awk -v a="${a:-0}" -v b="${b:-0}" -v c="${c:-0}" 'BEGIN {
+            m = a; if (b > m) m = b; if (c > m) m = c
+            exit !(m > 0 && a >= 0.8 * m && b >= 0.8 * m && c >= 0.8 * m)
+        }'
+    }
+    COUNTS=""
+    if wait_for "every ingester holds every sample at RF=3" 60 replicated_everywhere; then :
+    else
+        echo "    per-ingester obs_samples_ingested_total (1 2 3): $COUNTS"
+    fi
 fi
 
 # The real assertion: samples actually reached Prometheus and Grafana can read
@@ -1035,14 +1037,10 @@ if [ "$TOPOLOGY" = split ]; then
         echo "    the outage-time write's value is absent once the store recovered; last body: $BODY"
     fi
 
-    # Spec 10.1: with one ingester stopped, a batch it owns answers 503, reads
-    # answer 503, and both recover when it returns. The batch carries 50 series so
-    # at least one is owned by the stopped ingester (each owns about a third).
-    if dc stop ingester-2 >/dev/null 2>&1; then
-        log_pass "ingester-2 stopped"
-    else
-        log_fail "ingester-2 stop failed"
-    fi
+    # Spec 10.1: at RF=3 on three ingesters the write quorum is 2. With one
+    # ingester stopped writes still answer 204 and reads still complete; with a
+    # second stopped neither can (503), and both recover when they return. The
+    # batch carries 50 series so the check does not hinge on one key.
     RING_MS=$(( $(date +%s) * 1000 ))
     RING_METRICS=""
     for i in $(seq 0 49); do
@@ -1050,7 +1048,7 @@ if [ "$TOPOLOGY" = split ]; then
     done
     RING_BATCH="{\"metrics\":[${RING_METRICS%,}]}"
     # No set -e here, but each curl is still guarded: a curl failure must become a
-    # reported FAIL, never leave ingester-2 stopped.
+    # reported FAIL, never leave an ingester stopped.
     ring_write_status() {
         curl -s "${CURL_TIMEOUTS[@]}" -o "$RING_BODY" -w '%{http_code}' -X POST "$BACKEND/api/v1/ingest/metrics" \
             -H "Content-Type: application/json" --data "$RING_BATCH" 2>/dev/null || echo 000
@@ -1059,27 +1057,75 @@ if [ "$TOPOLOGY" = split ]; then
         curl -s "${CURL_TIMEOUTS[@]}" -o "$RING_BODY" -w '%{http_code}' -G "$BACKEND/api/v1/query" --data-urlencode 'query=up' 2>/dev/null || echo 000
     }
     RING_BODY="$(mktemp)"
-    CODE=$(ring_write_status)
-    if [ "$CODE" = 503 ]; then
-        log_pass "a write touching the stopped ingester answers 503"
+
+    if dc stop ingester-2 >/dev/null 2>&1; then
+        log_pass "ingester-2 stopped"
     else
-        log_fail "a write touching the stopped ingester answered $CODE, want 503; body: $(head -c 200 "$RING_BODY")"
+        log_fail "ingester-2 stop failed"
+    fi
+    CODE=$(ring_write_status)
+    if [ "$CODE" = 204 ]; then
+        log_pass "a write with one ingester down still meets quorum (204)"
+    else
+        log_fail "a write with one ingester down answered $CODE, want 204; body: $(head -c 200 "$RING_BODY")"
+    fi
+    CODE=$(ring_read_status)
+    if [ "$CODE" = 200 ]; then
+        log_pass "a read with one ingester down completes (200)"
+    else
+        log_fail "a read with one ingester down answered $CODE, want 200; body: $(head -c 200 "$RING_BODY")"
+    fi
+    # The batch was acknowledged by the two live replicas, so it must read back.
+    ring_series_reads_back() {
+        # Straight at the gateway, not through Grafana: the point is the quorum read path.
+        BODY=$(curl -s "${CURL_TIMEOUTS[@]}" -G "$BACKEND/api/v1/query" --data-urlencode "query=ring_outage_0{run_id=\"$RUN_ID\"}" 2>/dev/null)
+        [ "$(printf '%s' "$BODY" | jq -r '.data.result | length' 2>/dev/null)" -ge 1 ] 2>/dev/null
+    }
+    BODY=""
+    if wait_for "ring_outage_0 reads back through the gateway with one ingester down" "$READY_TIMEOUT" ring_series_reads_back; then :
+    else
+        echo "    last body: $BODY"
+    fi
+    # Counters lag one scrape, so poll Prometheus rather than reading once.
+    degraded_counted() {
+        local v
+        v="$(curl -s "${CURL_TIMEOUTS[@]}" -G "$PROMETHEUS/api/v1/query" \
+            --data-urlencode 'query=sum(obs_gateway_write_quorum_total{outcome="degraded"})' 2>/dev/null \
+            | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null)"
+        awk -v c="${v:-0}" 'BEGIN { exit !(c > 0) }'
+    }
+    wait_for "the gateway counts the one-down write as degraded" 60 degraded_counted
+
+    if dc stop ingester-3 >/dev/null 2>&1; then
+        log_pass "ingester-3 stopped"
+    else
+        log_fail "ingester-3 stop failed"
+    fi
+    CODE=$(ring_write_status)
+    if [ "$CODE" = 503 ] && grep -qF 'write quorum not met' "$RING_BODY"; then
+        log_pass "a write with two ingesters down answers 503 write quorum not met"
+    else
+        log_fail "a write with two ingesters down answered $CODE, want 503 with 'write quorum not met'; body: $(head -c 200 "$RING_BODY")"
     fi
     CODE=$(ring_read_status)
     if [ "$CODE" = 503 ]; then
-        log_pass "a read with an ingester stopped answers 503"
+        log_pass "a read with two ingesters down answers 503"
     else
-        log_fail "a read with an ingester stopped answered $CODE, want 503; body: $(head -c 200 "$RING_BODY")"
+        log_fail "a read with two ingesters down answered $CODE, want 503; body: $(head -c 200 "$RING_BODY")"
     fi
-    if dc start ingester-2 >/dev/null 2>&1; then
-        log_pass "ingester-2 started again"
-    else
-        log_fail "ingester-2 start failed"
-    fi
+
+    # Always bring both back, whatever the checks above reported.
+    for svc in ingester-2 ingester-3; do
+        if dc start "$svc" >/dev/null 2>&1; then
+            log_pass "$svc started again"
+        else
+            log_fail "$svc start failed"
+        fi
+    done
     ring_write_recovered() { [ "$(ring_write_status)" = 204 ]; }
     ring_read_recovered() { [ "$(ring_read_status)" = 200 ]; }
     wait_for "the gateway accepts the batch again" "$READY_TIMEOUT" ring_write_recovered
-    wait_for "reads through the gateway recover once the ingester is back" "$READY_TIMEOUT" ring_read_recovered
+    wait_for "reads through the gateway recover once the ingesters are back" "$READY_TIMEOUT" ring_read_recovered
     rm -f "$RING_BODY"
     fi
 
