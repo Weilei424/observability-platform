@@ -42,7 +42,8 @@ docker compose -f deployments/docker/docker-compose.split.yml logs gateway queri
 It carries `members=3`, `ring=<8 hex chars>` (a hash of the sorted member
 list), `replication_factor=3`, and `quorum=2`. The two hashes must be equal: if
 they differ, the gateway writes to an ingester the querier does not read. The
-two `replication_factor` values must be equal too. Compose sets
+two `replication_factor` values must be equal too, except while an RF change is
+staged ([below](#add-or-remove-an-ingester)). Compose sets
 `OBS_REPLICATION_FACTOR: "3"` once, in the `x-ring-env` anchor the gateway and
 querier share, so every series and stream is written to all three ingesters and
 a write is acknowledged once two of them hold it. Each ingester's
@@ -76,9 +77,12 @@ and look for `"target":"ingester"` and the other targets beside `component`.
 
 With replication factor 3 on three ingesters, removing one first needs the
 factor lowered (the gateway and querier refuse a factor above their list) or a
-fourth ingester added. Raise the factor on the gateway first and on the querier
-only after the heads have flushed; lowering needs no wait. See
-[Replication](#failure-drill-stop-one-ingester).
+fourth ingester added. An RF change is staged like a membership change, so a
+read never skips more ingesters than a write's acknowledgements cover:
+**raise** it on the gateway first, and on the querier only once the heads have
+flushed (the maintenance flush interval, or a drain); **lower** it on the
+querier first, then on the gateway. See
+[Replication](../architecture/components.md#replication-63).
 
 Membership is static: the gateway and the querier read the ingester list once,
 at startup, so a change takes a restart of each. The ring moves only the keys
@@ -103,41 +107,62 @@ into the store, and answers `200` only once all of it is there
 restarts, the ingester refuses every write with `503`, so drain it only after
 the gateway has stopped writing to it. A graceful stop runs the same drain, but
 a stop's outcome is only a log line; the route's `200` is what you wait for. While a stopped ingester is still on
-the querier's list, reads answer `503` — they fail closed, never incomplete.
+the querier's list, a read at replication factor 2 or more skips it (its
+drained head is in the store), so reads stay complete unless a second ingester
+is also down; at factor 1 reads answer `503` — they fail closed, never
+incomplete.
 
 ### Compose
 
+The gateway and the querier take their ingester list and replication factor
+from one `x-ring-env` anchor in `deployments/docker/docker-compose.split.yml`,
+so the two cannot drift at rest. To stage a change, edit the anchor, then
+recreate **one service at a time** with `--no-deps`, in the order below. A
+plain `docker compose up -d` after editing the anchor recreates the gateway and
+the querier together, in no order, which is exactly the overlap the staging
+avoids.
+
 To add `ingester-4`:
 
-1. In `deployments/docker/docker-compose.split.yml`, add an `ingester-4`
-   service beside `ingester-3` (same `<<: *ingester` and `*ingester-env`, with
-   its own `obs-ingester-4-data` volume, declared under `volumes:`), and add it
-   to the producers' `depends_on`. Add an `ingester-4:8080` target with
-   `component: ingester` to `observability/prometheus/prometheus.split.yml`.
-2. Start it, then append `,http://ingester-4:8080` to the **querier's**
-   `OBS_INGESTER_URL` and recreate the querier:
+1. Add an `ingester-4` service beside `ingester-3` (same `<<: *ingester` and
+   `*ingester-env`, with its own `obs-ingester-4-data` volume, declared under
+   `volumes:`), and add it to the producers' `depends_on`. Add an
+   `ingester-4:8080` target with `component: ingester` to
+   `observability/prometheus/prometheus.split.yml`.
+2. Start it, then append `,http://ingester-4:8080` to the anchor's
+   `OBS_INGESTER_URL` and recreate the **querier** only:
 
    ```bash
    docker compose -f deployments/docker/docker-compose.split.yml up -d ingester-4
-   docker compose -f deployments/docker/docker-compose.split.yml up -d querier
+   docker compose -f deployments/docker/docker-compose.split.yml up -d --no-deps querier
    ```
 
-3. Append the same URL to the **gateway's** `OBS_INGESTER_URL` and recreate it:
+3. Recreate the **gateway**, which picks up the same list:
 
    ```bash
-   docker compose -f deployments/docker/docker-compose.split.yml up -d gateway
+   docker compose -f deployments/docker/docker-compose.split.yml up -d --no-deps gateway
    docker compose -f deployments/docker/docker-compose.split.yml restart prometheus
    ```
 
-The two lists are separate literals that Compose does not tie together. They
-differ between steps 2 and 3 on purpose; once both are done, check that the
-gateway's and the querier's `ring ready` lines say `members=4` with equal hashes.
+Between steps 2 and 3 the running gateway still holds the old list, on
+purpose. Once both are recreated, check that the gateway's and the querier's
+`ring ready` lines say `members=4` with equal hashes.
 
-To remove `ingester-3`:
+To remove `ingester-3` from the three-ingester ring at replication factor 3:
 
-1. Delete it from the **gateway's** `OBS_INGESTER_URL` and recreate the gateway
-   (`up -d gateway`). It stops receiving writes; the querier still reads it.
-2. Drain it. The internal API is not published, so call it from a container
+1. Lower the factor first, querier then gateway: set the anchor's
+   `OBS_REPLICATION_FACTOR` to `"2"` and
+
+   ```bash
+   docker compose -f deployments/docker/docker-compose.split.yml up -d --no-deps querier
+   docker compose -f deployments/docker/docker-compose.split.yml up -d --no-deps gateway
+   ```
+
+   Both `ring ready` lines now say `replication_factor=2` and `quorum=2`.
+2. Delete `http://ingester-3:8080` from the anchor's `OBS_INGESTER_URL` and
+   recreate the **gateway** only (`up -d --no-deps gateway`). It stops
+   writing to `ingester-3`; the querier still reads it.
+3. Drain it. The internal API is not published, so call it from a container
    on the Compose network, and repeat until it answers `200`:
 
    ```bash
@@ -147,14 +172,17 @@ To remove `ingester-3`:
 
    A `503` says why (most often the store is unreachable); nothing is lost —
    what it could not flush is still in its WAL.
-3. Stop it, then delete it from the **querier's** `OBS_INGESTER_URL` (and from
-   the Prometheus targets) and recreate the querier (`up -d querier`). Reads
-   answer `503` between the stop and the querier's restart.
+4. Stop it, then recreate the **querier** (and remove `ingester-3` from the
+   Prometheus targets). Between the two, the querier at factor 2 skips the
+   stopped ingester and reads stay complete.
 
    ```bash
    docker compose -f deployments/docker/docker-compose.split.yml stop ingester-3
-   docker compose -f deployments/docker/docker-compose.split.yml up -d querier
+   docker compose -f deployments/docker/docker-compose.split.yml up -d --no-deps querier
    ```
+
+5. Delete the `ingester-3` service and its `depends_on` entries from the file,
+   or the next `up -d` starts it again.
 
 ### Kubernetes (Helm)
 
@@ -184,12 +212,37 @@ A real upgrade refuses them.)
 series and stream; the chart renders it as `OBS_REPLICATION_FACTOR` on the
 gateway and querier only, so changing it rolls just those two
 (`config.OBS_REPLICATION_FACTOR` is chart-owned and refused). The chart refuses
-a factor above `writeReplicas`, the ingesters the gateway writes to. Raise it
-with the gateway first and the querier after the heads have flushed; lowering
-needs no wait. Because of that refusal, removing an ingester from a
-three-ingester ring at factor 3 needs the factor lowered first
-(`--set split.replicationFactor=2` with the other values unchanged) or a fourth
-ingester added; `helm upgrade` fails naming `split.replicationFactor` otherwise.
+a factor above `writeReplicas`, the ingesters the gateway writes to. Because
+of that refusal, removing an ingester from a three-ingester ring at factor 3
+needs the factor lowered first or a fourth ingester added; `helm upgrade` fails
+naming `split.replicationFactor` otherwise.
+
+An RF change is staged with `split.querier.replicationFactor` (unset, the
+querier runs `split.replicationFactor`). Each gateway and querier pod template
+records the factor it loaded (`observability-platform.dev/replication-factor`),
+and the chart refuses a querier quorum above the gateway's, a new gateway
+quorum below the running querier's, a new querier quorum above the running
+gateway's, and any RF change while either Deployment is still rolling out.
+Lower it querier first, then the gateway:
+
+```bash
+helm upgrade backend deployments/helm/backend -n obs --reuse-values \
+  --set split.querier.replicationFactor=2 --wait
+helm upgrade backend deployments/helm/backend -n obs --reuse-values \
+  --set split.replicationFactor=2 --set split.querier.replicationFactor=null --wait
+```
+
+Raise it gateway first, keeping the querier at the old factor, and let the
+heads flush (the maintenance flush interval, or a drain) before the querier
+follows — the chart cannot see the flush, so that wait is yours:
+
+```bash
+helm upgrade backend deployments/helm/backend -n obs --reuse-values \
+  --set split.replicationFactor=3 --set split.querier.replicationFactor=2 --wait
+# wait for the heads to flush
+helm upgrade backend deployments/helm/backend -n obs --reuse-values \
+  --set split.querier.replicationFactor=null --wait
+```
 
 To add a fourth ingester, first add the pod and the querier's read, then the
 gateway's writes:
@@ -219,7 +272,8 @@ helm upgrade backend deployments/helm/backend -n obs --reuse-values \
 
 Do not scale down before the drain answers `200`: a `503` means part of its
 head is only in its WAL, and once the querier stops reading it that data is
-hidden. Reads answer `503` between the scale and the last upgrade. A pod's PVC
+hidden. Between the scale and the last upgrade, a read at factor 2 or more
+skips the removed pod and stays complete; at factor 1 it answers `503`. A pod's PVC
 is kept after it is removed; scaling back up reattaches it.
 
 The Prometheus chart's `split.targets.ingester` is a list that must match the
@@ -314,9 +368,10 @@ make smoke-compose-split
 The same Grafana-level checks as `make smoke-compose`, plus the split-only
 ones: every ingester's ingested counter above zero after seeding, a flushed
 marker read back by value after an ingester restarts, a block on the store,
-`target` on every component's logs, the one-ingester outage drill (a write it
-owns answers `503`, and so does a read, until it returns), and the store-outage
-drill above.
+`target` on every component's logs, the replication check (every ingester's
+ingested counter within 80% of the largest, since at factor 3 each holds every
+sample), the ingester-outage drill (one ingester down: writes `204` and reads
+complete `200`; two down: both `503`), and the store-outage drill above.
 
 ## Kubernetes
 
@@ -348,9 +403,9 @@ make local-reset-split   # stop and DELETE every ingester volume and the store, 
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Queries answer `503 unavailable` | an ingester or the store is down | `docker compose -f deployments/docker/docker-compose.split.yml ps`, then start the one that is not running |
-| Queries answer `503 unavailable` right after an ingester was added or removed | the querier and gateway still hold the old list | recreate both with the same list and compare their `ring ready` hashes |
-| Writes answer `503` at the gateway | an ingester is down | `obs_gateway_ingester_requests_total{outcome="unavailable"}` names it by `host:port`; start it. Batches that do not touch its keys still succeed |
-| A sample was accepted but never shows up in a query | the gateway's and querier's ingester lists differ | compare the `ring=` hashes in their `ring ready` lines; fix the lists and recreate both |
+| Queries answer `503 unavailable` | the store is down, or more ingesters are down than the factor tolerates (two of three at factor 3) | `docker compose -f deployments/docker/docker-compose.split.yml ps`, then start the ones that are not running |
+| Queries answer `503 unavailable` right after an ingester was added or removed | the querier lists an ingester that is gone, beyond what the factor tolerates | recreate the querier (`--no-deps`) with the gateway's list and compare their `ring ready` hashes |
+| Writes answer `503` at the gateway with `write quorum not met` | more ingesters are down than the factor tolerates | `obs_gateway_ingester_requests_total{outcome="unavailable"}` names them by `host:port`, as does the gateway's `write quorum not met` warn line; start them. At factor 3 on three ingesters every key is on every ingester, so two down fail every batch |
+| A sample was accepted but never shows up in a query | the gateway's and querier's ingester lists differ, or the querier's quorum exceeds the gateway's | compare the `ring=` hashes and `quorum` values in their `ring ready` lines; fix the anchor and recreate them one at a time, in the staged order |
 | A component exits at startup naming a peer URL | its environment names a peer it does not use, or lacks one it needs | compare it with the Responsibilities table in [../architecture/components.md](../architecture/components.md) |
 | `make local-up-split` fails, or Grafana/Prometheus/the gateway won't bind their ports | the all-in-one demo (`make local-up`) is already running and holds 3000/8080/9090 | run one demo at a time: `make local-down` first |
