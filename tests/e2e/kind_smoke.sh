@@ -579,8 +579,11 @@ kill "$PF_PID" 2>/dev/null; PF_PID=""
 # only the UID can show that the replacement is a different process; without
 # that, a delete that never happened would leave every later check satisfied by
 # the original pod.
+# An optional third argument is a command (run via eval) executed right after
+# the delete returns, while the pod is still down; it needs marker_reads_back,
+# defined below, only by the time restart_pod is called.
 restart_pod() {
-    local sts="$1" pod="$1-${2:-0}" old_uid new_uid poll_start
+    local sts="$1" pod="$1-${2:-0}" after_delete="${3:-}" old_uid new_uid poll_start
     echo ""
     echo "-- Deleting pod $pod --"
     old_uid=$(kubectl get pod "$pod" -n "$NS" -o jsonpath='{.metadata.uid}' 2>/dev/null)
@@ -590,6 +593,7 @@ restart_pod() {
     else
         log_fail "deleting $pod failed — nothing below this actually tests a restart"
     fi
+    [ -z "$after_delete" ] || eval "$after_delete"
     if kubectl rollout status "statefulset/$sts" -n "$NS" --timeout="$ROLLOUT_TIMEOUT"; then
         log_pass "$sts rescheduled its pod"
     else
@@ -682,7 +686,9 @@ if [ "$TOPOLOGY" = split ]; then
         INGESTERS=1
     fi
     for i in $(seq 0 $((INGESTERS - 1))); do
-        restart_pod observability-ingester "$i"
+        # At RF=3 the other two ingesters hold every write, so the marker must
+        # read back through the gateway while this one is down.
+        restart_pod observability-ingester "$i" "marker_reads_back 'reads complete while ingester $i is down' k8s_e2e_marker"
     done
     marker_reads_back "data persists across every ingester's restart" k8s_e2e_marker
     marker_reads_back "the flushed series persists across every ingester's restart" k8s_e2e_flush_marker
@@ -813,34 +819,43 @@ while [ $((SECONDS - start)) -lt 90 ]; do
 done
 [ "$target_ok" -eq 1 ] || log_fail "in-cluster Prometheus never reported every scrape target up within 90s"
 
-# Split only: the ring spreads the producers' writes over all three ingesters.
-# The backend image is distroless (no shell or wget), so read each pod's
-# obs_samples_ingested_total through this same Prometheus, which scrapes every
-# pod by its DNS name (the instance label). Polled because the first scrape
-# after a write can lag by one interval. Mirrors compose_smoke.sh's check.
+# Split only: at the chart's default RF=3 on three ingesters every sample is
+# written to every ingester, so their counters must agree. The backend image is
+# distroless (no shell or wget), so read each pod's obs_samples_ingested_total
+# through this same Prometheus, which scrapes every pod by its DNS name (the
+# instance label). Polled because the first scrape after a write can lag by one
+# interval, and the three scrapes are not simultaneous (each value can be up to
+# a 15s scrape interval stale while the producers keep writing; a Compose run
+# measured 2328/2532/2729): the 80% tolerance absorbs that skew, and still
+# tells replication (all equal) from a ring split (each about a third).
+# Mirrors compose_smoke.sh's check.
 if [ "$TOPOLOGY" = split ]; then
-    ingester_ingested() { # <pod> -> sample count on stdout, nonzero exit if none yet
-        local n
-        n="$(curl -s --max-time 10 -G "http://localhost:19090/api/v1/query" \
+    ingester_ingested() { # <pod> -> sample count on stdout
+        curl -s --max-time 10 -G "http://localhost:19090/api/v1/query" \
             --data-urlencode "query=sum(obs_samples_ingested_total{instance=\"$1.observability-ingester-headless:8080\"})" 2>/dev/null \
-            | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null)"
-        echo "${n:-0}"
-        awk -v c="${n:-0}" 'BEGIN { exit !(c > 0) }'
+            | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null
     }
-    for i in 0 1 2; do
-        pod="observability-ingester-$i"
-        COUNT=0
-        spread_start=$SECONDS
-        while [ $((SECONDS - spread_start)) -lt 45 ]; do
-            COUNT="$(ingester_ingested "$pod")" && break
-            sleep 3
-        done
-        if awk -v c="${COUNT:-0}" 'BEGIN { exit !(c > 0) }'; then
-            log_pass "$pod ingested ${COUNT} samples through the ring"
-        else
-            log_fail "$pod ingested no samples; the ring is not routing to it"
-        fi
+    replicated_everywhere() { # sets COUNTS "a b c"; true when each is >0 and >=80% of the largest
+        local a b c
+        a="$(ingester_ingested observability-ingester-0)"; b="$(ingester_ingested observability-ingester-1)"; c="$(ingester_ingested observability-ingester-2)"
+        COUNTS="${a:-0} ${b:-0} ${c:-0}"
+        awk -v a="${a:-0}" -v b="${b:-0}" -v c="${c:-0}" 'BEGIN {
+            m = a; if (b > m) m = b; if (c > m) m = c
+            exit !(m > 0 && a >= 0.8 * m && b >= 0.8 * m && c >= 0.8 * m)
+        }'
+    }
+    COUNTS=""
+    repl_start=$SECONDS
+    repl_ok=0
+    while [ $((SECONDS - repl_start)) -lt 60 ]; do
+        if replicated_everywhere; then repl_ok=1; break; fi
+        sleep 3
     done
+    if [ "$repl_ok" -eq 1 ]; then
+        log_pass "every ingester holds every sample at RF=3 (ingested 0 1 2: $COUNTS)"
+    else
+        log_fail "ingesters do not hold the same samples at RF=3 (ingested 0 1 2: $COUNTS)"
+    fi
 fi
 kill "$PF_PID" 2>/dev/null; PF_PID=""
 
