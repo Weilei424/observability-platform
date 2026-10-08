@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 
@@ -55,7 +56,14 @@ func buildQuerier(cfg *config.Config, log *slog.Logger) (*App, error) {
 	logRing(mainLog, r, rf)
 	queryLog := observability.Component(log, "querier")
 	skippable := func(err error) bool { return errors.Is(err, rpc.ErrUnavailable) }
-	observe := func(i int, err error) { rm.IngesterReads.WithLabelValues(labels[i], rpc.OutcomeOf(err)).Inc() }
+	// A read the caller cancelled says nothing about the ingester, so it is
+	// not counted, as the gateway's ObserveMember skips a cancelled push.
+	observe := func(i int, err error) {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
+		rm.IngesterReads.WithLabelValues(labels[i], rpc.OutcomeOf(err)).Inc()
+	}
 	onSkip := func(skipped []int) {
 		names := make([]string, len(skipped))
 		for j, i := range skipped {
