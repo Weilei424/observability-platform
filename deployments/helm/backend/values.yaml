@@ -56,7 +56,8 @@ split:
   # How many distinct ingesters every write goes to (the gateway) and how many
   # copies a read dedups (the querier). Must not exceed the ingesters the
   # gateway writes to (ingester.writeReplicas, else ingester.replicas); the
-  # chart refuses it otherwise. Changing it rolls the gateway and the querier.
+  # chart refuses it otherwise. Changing it rolls the gateway and the querier;
+  # stage a change with querier.replicationFactor below, as the chart requires.
   replicationFactor: 3
   gateway:
     replicas: 1
@@ -65,6 +66,13 @@ split:
       limits: { memory: 256Mi }
   querier:
     replicas: 1
+    # Unset, the querier runs split.replicationFactor. Set it only to stage an
+    # RF change, so the querier's quorum never exceeds the gateway's: raising,
+    # set the new split.replicationFactor with this at the old value, then
+    # remove it (--set split.querier.replicationFactor=null) once the
+    # ingesters' heads have flushed; lowering, set this to the new value first,
+    # then lower split.replicationFactor and remove it.
+    # replicationFactor: 3
     resources:
       requests: { cpu: 50m, memory: 64Mi }
       limits: { memory: 512Mi }
