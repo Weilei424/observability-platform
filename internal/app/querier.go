@@ -40,7 +40,7 @@ func buildQuerier(cfg *config.Config, log *slog.Logger) (*App, error) {
 	}
 	reg, inst := observability.NewRegistry(observability.RegistryOptions{Omit: observability.AllGroups, Logger: log})
 	observability.NewRingMetrics().Register(reg, r.Members(), false)
-	logRing(mainLog, r)
+	logRing(mainLog, r, max(cfg.ReplicationFactor, 1))
 	srv := api.New(api.Deps{
 		Config:   cfg,
 		Logger:   log,
