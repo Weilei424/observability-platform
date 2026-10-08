@@ -110,8 +110,10 @@ These are properties of the whole system, not of the query languages.
   A read skips up to W-1 ingesters that fail with an outage (refused, `503`, or
   a per-request timeout while the caller's read is still live); a protocol
   error, one more outage, or a read where every ingester was skipped fails it.
-  RF=1 is the 6.2 behaviour: one ingester down fails every read, and a write
-  fails only when the batch has a key that ingester owns. At RF=3 one ingester
+  RF=1 is the 6.2 behaviour except for the `503` body: one ingester down fails
+  every read, and a write fails only when the batch has a key that ingester
+  owns. Unlike 6.2, an RF=1 read of a hung ingester is bounded by
+  `OBS_INGESTER_TIMEOUT` too, and answers `503`. At RF=3 one ingester
   down fails neither writes nor reads; two down answers `503` to both. A write
   that misses quorum answers `503` (or `500` for a protocol error) and its body
   is `write quorum not met: <k> of <n> series could not reach <W> of <RF>
@@ -121,17 +123,29 @@ These are properties of the whole system, not of the query languages.
   leave some of a batch written; retrying the whole batch is safe. Both
   `obs_gateway_write_quorum_total{outcome}` and
   `obs_querier_ingester_reads_total{ingester,outcome}` show a tolerated outage.
-- **`OBS_REPLICATION_FACTOR` must match on the gateway and querier.** Each
-  refuses a value above its own ingester list at startup, but nothing checks
-  that the two agree. Compare `replication_factor` and `quorum` in their
-  `ring ready` lines, next to the ring hash. A querier with a smaller RF than
-  the gateway fails reads it could have answered; a larger one skips ingesters
-  whose data it cannot replace.
-- **Raise RF on the gateway first, then the querier.** Data still in the
-  ingesters' heads was acknowledged under the old, smaller quorum. Raise RF on
-  the gateway, wait for the heads to flush (the maintenance flush interval, or
-  a drain), then raise it on the querier. Lowering RF needs no wait. Helm
-  rolls only the gateway and querier for a change.
+- **`OBS_REPLICATION_FACTOR` must match on the gateway and querier at rest.**
+  Each refuses a value above its own ingester list at startup, but the
+  processes do not check that the two agree. Compare `replication_factor` and
+  `quorum` in their `ring ready` lines, next to the ring hash. A querier with a
+  smaller quorum than the gateway fails reads it could have answered; a larger
+  one skips more ingesters than a write's acknowledgements cover, and can
+  answer an incomplete `200`. They differ only while a change is staged.
+- **An RF change is staged: raise it gateway first, lower it querier first.**
+  Raise RF on the gateway, wait for the heads to flush (the maintenance flush
+  interval, or a drain) — data still in them was acknowledged under the old,
+  smaller quorum — then raise it on the querier. Lower it on the querier
+  first, then on the gateway. Either way the querier's quorum never exceeds the
+  gateway's while an old pod of one runs beside a new pod of the other. Helm
+  stages it with `split.querier.replicationFactor` and refuses the wrong order:
+  a querier quorum above the gateway's in the values, and, on an upgrade, a
+  gateway quorum below the running querier's or a querier quorum above the
+  running gateway's (read from each pod template's
+  `observability-platform.dev/replication-factor` annotation; a release from
+  before it is not checked), or any RF change while either Deployment is still
+  rolling out. It cannot see the flush, so waiting for it is the operator's
+  part, and `split.ingester.previous` previews carry no RF. In Compose the
+  shared `x-ring-env` anchor is edited and the two services recreated one at a
+  time ([../runbooks/split-demo.md](../runbooks/split-demo.md)).
 - **Replicated overwrites have a skew window.** Each ingester assigns its own
   generation, `max(previous + 1, now in Unix microseconds)`. An overwrite of
   the same series and timestamp can lose to the older value only when the
@@ -200,7 +214,10 @@ These are properties of the whole system, not of the query languages.
 - **There is no server-side query timeout.** A querier request runs under the
   inbound HTTP request's own context, and nothing wraps it with a deadline.
   Each ingester read is bounded by `OBS_INGESTER_TIMEOUT` and counts as an
-  outage, so a hung ingester is skipped or fails the read with `503`, but a
+  outage, so a hung ingester is skipped or fails the read with `503`. That
+  bound is per ingester read, not per query: ingesters are read one after
+  another, once per selector, so a query with k selectors can wait it out up
+  to k times in a row before it answers. A
   hung store holds the request open until the caller (Grafana, or curl)
   disconnects — it never resolves to a `503` on its own.
 - **A store that permanently rejects a batch wedges the head.** A tolerant
