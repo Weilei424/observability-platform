@@ -119,8 +119,10 @@ type HeadsOptions struct {
 	Tolerate int
 	// Skippable says which errors are an outage (the querier passes
 	// errors.Is(err, rpc.ErrUnavailable)). Nil means nothing is skippable.
-	// Context cancellation and deadline errors are never skipped, whatever
-	// Skippable says: a cancelled read is not an outage.
+	// Whatever Skippable says, nothing is skipped once the read's own context
+	// is done, nor is a context.Canceled error: a cancelled read is not an
+	// outage. A per-request timeout with a live caller context is an outage
+	// and is skippable even though it wraps context.DeadlineExceeded.
 	Skippable func(error) bool
 	// Observe is called once per head read with the head's index; err is nil
 	// on success.
@@ -172,7 +174,7 @@ func (f fixedSource) SelectLabelValues(context.Context, string) ([]string, error
 // collect reads every head in order, skipping tolerated outages, and folds the
 // answers with Merge. wrap turns one answer into a Source; read reads a Source
 // the same way (used on the folded result).
-func collect[T any](t tolerantHeads, readHead func(Source) (T, error), wrap func(T) Source, read func(Source) (T, error)) (T, error) {
+func collect[T any](ctx context.Context, t tolerantHeads, readHead func(Source) (T, error), wrap func(T) Source, read func(Source) (T, error)) (T, error) {
 	var zero T
 	var answers []Source
 	var skipped []int
@@ -183,7 +185,7 @@ func collect[T any](t tolerantHeads, readHead func(Source) (T, error), wrap func
 			t.opts.Observe(i, err)
 		}
 		if err != nil {
-			if !t.skip(err) || len(skipped) >= t.opts.Tolerate {
+			if !t.skip(ctx, err) || len(skipped) >= t.opts.Tolerate {
 				return zero, err
 			}
 			skipped = append(skipped, i)
@@ -209,8 +211,8 @@ func collect[T any](t tolerantHeads, readHead func(Source) (T, error), wrap func
 	return out, nil
 }
 
-func (t tolerantHeads) skip(err error) bool {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+func (t tolerantHeads) skip(ctx context.Context, err error) bool {
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 		return false
 	}
 	return t.opts.Skippable != nil && t.opts.Skippable(err)
@@ -220,13 +222,13 @@ func (t tolerantHeads) Select(ctx context.Context, p SelectParams) ([]SeriesData
 	if err := p.Validate(); err != nil {
 		return nil, err
 	}
-	return collect(t, func(h Source) ([]SeriesData, error) { return h.Select(ctx, p) }, func(a []SeriesData) Source { return fixedSource{series: a} }, func(s Source) ([]SeriesData, error) { return s.Select(ctx, p) })
+	return collect(ctx, t, func(h Source) ([]SeriesData, error) { return h.Select(ctx, p) }, func(a []SeriesData) Source { return fixedSource{series: a} }, func(s Source) ([]SeriesData, error) { return s.Select(ctx, p) })
 }
 
 func (t tolerantHeads) SelectLabelNames(ctx context.Context) ([]string, error) {
-	return collect(t, func(h Source) ([]string, error) { return h.SelectLabelNames(ctx) }, func(a []string) Source { return fixedSource{strs: a} }, func(s Source) ([]string, error) { return s.SelectLabelNames(ctx) })
+	return collect(ctx, t, func(h Source) ([]string, error) { return h.SelectLabelNames(ctx) }, func(a []string) Source { return fixedSource{strs: a} }, func(s Source) ([]string, error) { return s.SelectLabelNames(ctx) })
 }
 
 func (t tolerantHeads) SelectLabelValues(ctx context.Context, name string) ([]string, error) {
-	return collect(t, func(h Source) ([]string, error) { return h.SelectLabelValues(ctx, name) }, func(a []string) Source { return fixedSource{strs: a} }, func(s Source) ([]string, error) { return s.SelectLabelValues(ctx, name) })
+	return collect(ctx, t, func(h Source) ([]string, error) { return h.SelectLabelValues(ctx, name) }, func(a []string) Source { return fixedSource{strs: a} }, func(s Source) ([]string, error) { return s.SelectLabelValues(ctx, name) })
 }
