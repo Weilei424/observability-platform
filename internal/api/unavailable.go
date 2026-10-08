@@ -75,10 +75,11 @@ func (s *Server) writeRouteError(w http.ResponseWriter, r *http.Request, compone
 	var qe *rpc.QuorumError
 	if errors.As(err, &qe) && isUnavailable(err) {
 		// A replicated write that could not reach quorum because of an outage:
-		// say how far it fell short. A QuorumError with a protocol cause falls
+		// say how far it fell short, and log which ingesters failed it (spec
+		// section 5.4); the body keeps the plain message. A QuorumError with a protocol cause falls
 		// through to the 500 branch below.
 		observability.Component(observability.FromContext(r.Context()), component).Warn(
-			"write quorum not met", slog.String("error", qe.Error()))
+			"write quorum not met", slog.String("error", qe.Error()), slog.Any("ingesters", qe.Ingesters))
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": qe.Error()})
 		return
 	}
