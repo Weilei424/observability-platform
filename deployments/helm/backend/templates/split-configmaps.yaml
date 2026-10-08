@@ -9,6 +9,15 @@
 {{- if or (lt (int .Values.split.replicationFactor) 1) (gt (int .Values.split.replicationFactor) $writeCount) }}
 {{- fail (printf "split.replicationFactor (%d) must be at least 1 and must not exceed the ingesters the gateway writes to (%d): every write needs that many distinct replicas" (int .Values.split.replicationFactor) $writeCount) }}
 {{- end }}
+{{- $qRF := int (include "backend.querierReplicationFactor" .) }}
+{{- if or (lt $qRF 1) (gt $qRF (int .Values.split.ingester.replicas)) }}
+{{- fail (printf "split.querier.replicationFactor (%d) must be at least 1 and must not exceed the ingesters the querier reads (split.ingester.replicas, %d)" $qRF (int .Values.split.ingester.replicas)) }}
+{{- end }}
+{{- $gwQuorum := int (include "backend.quorum" (int .Values.split.replicationFactor)) }}
+{{- $qQuorum := int (include "backend.quorum" $qRF) }}
+{{- if gt $qQuorum $gwQuorum }}
+{{- fail (printf "the querier's quorum %d (split.querier.replicationFactor=%d) exceeds the gateway's quorum %d (split.replicationFactor=%d): a read would skip more ingesters than a write's acknowledgements cover. Raise an RF gateway first and the querier after the ingesters' heads flush; lower it querier first, then the gateway" $qQuorum $qRF $gwQuorum (int .Values.split.replicationFactor)) }}
+{{- end }}
 {{- /* The ring staging check (backend.ringStagingCheck) over the live objects. */}}
 {{- $gwName := include "backend.componentName" (list . "gateway") }}
 {{- $qName := include "backend.componentName" (list . "querier") }}
