@@ -693,17 +693,26 @@ records the decisions and where the code corrected the spec.
   replicas that got it. If every replica holds both writes, the overwrite always wins.
   The design spec words this as any overwrite inside the clock skew; the code is
   narrower, and `TestMergeHeadsOverwriteSkewWindow` pins the narrower rule.
-- **RF changes.** `OBS_REPLICATION_FACTOR` must be equal on the gateway and querier;
-  compare the `replication_factor` and `quorum` fields of the two `ring ready` lines.
-  Raising RF: gateway first, then the querier once the heads have flushed, because
-  heads still hold data acknowledged under the smaller quorum. Lowering needs no wait.
+- **RF changes.** `OBS_REPLICATION_FACTOR` must be equal on the gateway and querier
+  at rest; compare the `replication_factor` and `quorum` fields of the two `ring ready`
+  lines. A change is staged so the querier's quorum never exceeds the gateway's while
+  an old pod of one runs beside a new pod of the other (a read skips up to quorum−1
+  ingesters): raise RF gateway first, then the querier once the heads have flushed,
+  because heads still hold data acknowledged under the smaller quorum; lower it
+  querier first, then the gateway. Helm stages it with `split.querier.replicationFactor`
+  and enforces the order as it does 6.2 membership stages: the render refuses a querier
+  quorum above the gateway's, and an upgrade reads each running pod template's
+  `observability-platform.dev/replication-factor` annotation and refuses the wrong
+  order or an RF change mid-rollout. Compose stages it by editing the shared
+  `x-ring-env` anchor and recreating one service at a time (`up -d --no-deps`).
   Both processes refuse an RF above their own ingester list at startup.
 - **Surfacing.** `obs_gateway_write_quorum_total{outcome=full|degraded|failed}` counts
   each routed batch; per-replica results stay in `obs_gateway_ingester_requests_total`,
   including background pushes. `obs_querier_ingester_reads_total{ingester,outcome}`
   counts each ingester read (`ok`, `unavailable`, `error`). A degraded batch is only
   counted, so an outage does not log once per batch; a `503` quorum failure logs `write
-  quorum not met` at `warn`. The self-observability dashboard gains "Write
+  quorum not met` at `warn` with the failing ingesters. A read the caller cancels is
+  not counted. The self-observability dashboard gains "Write
   quorum" and "Ingester reads" panels.
 - **Deployment.** Compose split runs RF=3 through one env anchor shared by the gateway
   and querier (smoke 108/0 on 2026-10-07). Helm `split.replicationFactor` (default 3)
