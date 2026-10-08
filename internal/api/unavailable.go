@@ -72,6 +72,16 @@ func writeLokiEvalError(w http.ResponseWriter, r *http.Request, logMsg string, e
 // ERROR. Routing failures are not counted as rejections; the per-ingester
 // outcome counter records them.
 func (s *Server) writeRouteError(w http.ResponseWriter, r *http.Request, component string, err error) {
+	var qe *rpc.QuorumError
+	if errors.As(err, &qe) && isUnavailable(err) {
+		// A replicated write that could not reach quorum because of an outage:
+		// say how far it fell short. A QuorumError with a protocol cause falls
+		// through to the 500 branch below.
+		observability.Component(observability.FromContext(r.Context()), component).Warn(
+			"write quorum not met", slog.String("error", qe.Error()))
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": qe.Error()})
+		return
+	}
 	switch {
 	case isUnavailable(err):
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "ingester unavailable"})
