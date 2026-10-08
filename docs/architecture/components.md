@@ -71,7 +71,8 @@ The gateway no longer proxies the two write routes. It decodes and validates
 the body with the same code all-in-one and an ingester's public routes run, so
 every topology refuses the same input with the same `400` body and counts it in
 `obs_samples_rejected_total` or `obs_log_lines_rejected_total`. It then groups
-samples and streams by owner and sends each group to its ingester concurrently
+samples and streams by owner (by its RF replicas when
+[replication](#replication-63) is on; the table below is the RF=1 rule) and sends each group to its ingester concurrently
 over `POST /internal/v1/metrics/push` or `/logs/push`
 ([../api/internal.md](../api/internal.md)), each carrying the inbound
 `X-Request-Id`. The answer is the worst outcome among the groups:
@@ -115,10 +116,40 @@ rejections. It does not check that it owns the keys it is
 sent: a write sent to the wrong ingester is still read, because every read
 covers every member.
 
+### Replication (6.3)
+
+`OBS_REPLICATION_FACTOR` (RF, default 1) on the gateway and querier makes every
+series and stream live on RF ingesters. `ring.Replicas(key, RF)` is the next RF
+distinct members clockwise from the key, and its first member is the owner, so
+RF=1 places as before. Both processes refuse an RF above their ingester list,
+and the two values must match: their `ring ready` lines carry
+`replication_factor` and `quorum` beside the ring hash.
+
+- **Quorum.** W = RF/2 + 1 per key. The gateway sends each member one push with
+  every key it replicates, all concurrently, and answers `204` the moment every
+  key has W acknowledgements. The rest finish in the background, still counted.
+- **Failure.** When a key cannot reach W, the gateway waits for every push and
+  answers `503` for an outage, or `500` for a protocol error. The `503` body is
+  `write quorum not met: <k> of <n> series could not reach <W> of <RF>
+  ingesters` (streams on the Loki route). At RF=3 one ingester down changes
+  nothing a client sees; two down is `503`.
+- **Reads.** The querier skips up to W-1 ingesters that fail with an outage; a
+  protocol error, one more outage, or every ingester skipped fails the read.
+  Every acknowledged write is on at least W replicas, so at least one replica
+  is still read. Copies differ only in generation and collapse on read; the
+  store holds RF copies of a flushed log chunk, and metrics compaction merges
+  the copies.
+- **Deadlines.** `OBS_INGESTER_TIMEOUT` (default 10s, at least 100ms) bounds
+  each push and each ingester read; a timeout is an outage, so a hung ingester
+  is a failed replica.
+- **Metrics.** `obs_gateway_write_quorum_total{outcome}` (`full`, `degraded`,
+  `failed`) and `obs_querier_ingester_reads_total{ingester,outcome}`; the
+  internals dashboard plots them as "Write quorum" and "Ingester reads".
+
 ### Read path
 
 See [Reads](#reads-and-why-a-flush-is-invisible-to-them): the querier reads
-every ingester in turn, then the store.
+every ingester in turn, then the store, skipping up to W-1 failed ingesters.
 
 ### Membership changes
 
@@ -338,10 +369,11 @@ Each component exports only the metrics for work it does. The gateway and the
 querier export `obs_ring_members`, the size of the ring they route over or
 read. The gateway also exports `obs_gateway_ingester_requests_total{ingester,
 outcome}`, the write groups it sent to each ingester (`ingester` is the
-member's host:port; `outcome` is `ok`, `unavailable`, or `error`), and, since
+member's host:port; `outcome` is `ok`, `unavailable`, or `error`), `obs_gateway_write_quorum_total{outcome}`
+(see [Replication](#replication-63)), and, since
 validation now runs there, the ingest rejection counters. Each ingester counts
 the samples and lines it ingested, which shows how evenly the ring spreads
-writes. Every scrape target
+writes. The querier exports `obs_querier_ingester_reads_total{ingester,outcome}`. Every scrape target
 carries a `component` label; the internals dashboard counts HTTP only at the
 edge (`all-in-one` or `gateway`) and plots `up` by component. Every log line
 carries `target=<mode>`, and one `X-Request-Id` follows a request from the
