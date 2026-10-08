@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"errors"
 	"slices"
 )
 
@@ -99,10 +100,9 @@ func unionSorted(a, b []string) []string {
 }
 
 // MergeHeads folds every ingester into one Source that reads them in order,
-// each to completion before the next, merged by the generation rule. The
-// querier reads Merge(MergeHeads(ingesters...), store): every ingester
-// finishes before the store starts, which keeps Merge's no-gap argument true
-// for each of them. Any head failing fails the read.
+// each to completion before the next, with no outage tolerated: any head
+// failing fails the read. See MergeHeadsWith for the merge rules and for
+// reads that survive replicated ingesters being down.
 func MergeHeads(heads ...Source) Source {
 	if len(heads) == 0 {
 		panic("metrics: MergeHeads needs at least one head")
@@ -110,5 +110,123 @@ func MergeHeads(heads ...Source) Source {
 	if len(heads) == 1 {
 		return heads[0]
 	}
-	return Merge(heads[0], MergeHeads(heads[1:]...))
+	return MergeHeadsWith(HeadsOptions{}, heads...)
+}
+
+// HeadsOptions let a read skip failed heads that replication covers.
+type HeadsOptions struct {
+	// Tolerate is how many heads may fail with a Skippable error per read.
+	Tolerate int
+	// Skippable says which errors are an outage (the querier passes
+	// errors.Is(err, rpc.ErrUnavailable)). Nil means nothing is skippable.
+	// Context cancellation and deadline errors are never skipped, whatever
+	// Skippable says: a cancelled read is not an outage.
+	Skippable func(error) bool
+	// Observe is called once per head read with the head's index; err is nil
+	// on success.
+	Observe func(head int, err error)
+	// OnSkip is called, once, with the skipped head indexes when a read
+	// succeeded only by skipping.
+	OnSkip func(skipped []int)
+}
+
+// MergeHeadsWith is MergeHeads that may skip up to opts.Tolerate failed heads.
+//
+// Heads are read sequentially, each to completion, in order, which Merge's
+// no-gap argument needs; they are never read in parallel. Skipping is complete
+// when Tolerate is at most W-1 for replication factor W: every write was
+// acknowledged by W replicas on distinct ingesters, so any W-1 of them
+// being unreadable leaves at least one replica of every sample among the
+// heads read. A protocol error (anything not Skippable) is never skipped,
+// and if every head is skipped the last outage is returned instead of an
+// empty answer. With no failure the answer is identical to MergeHeads: the
+// collected answers are folded through Merge, nested as Merge(h0, Merge(h1,
+// ...)), so series/stream order and the dedup rules are unchanged. Label
+// names and values read with the same tolerance. Like MergeHeads it panics
+// on zero heads.
+func MergeHeadsWith(opts HeadsOptions, heads ...Source) Source {
+	if len(heads) == 0 {
+		panic("metrics: MergeHeadsWith needs at least one head")
+	}
+	return tolerantHeads{opts: opts, heads: heads}
+}
+
+type tolerantHeads struct {
+	opts  HeadsOptions
+	heads []Source
+}
+
+type fixedSource struct {
+	series []SeriesData
+	strs   []string
+}
+
+func (f fixedSource) Select(context.Context, SelectParams) ([]SeriesData, error) {
+	return f.series, nil
+}
+func (f fixedSource) SelectLabelNames(context.Context) ([]string, error) { return f.strs, nil }
+func (f fixedSource) SelectLabelValues(context.Context, string) ([]string, error) {
+	return f.strs, nil
+}
+
+// collect reads every head in order, skipping tolerated outages, and folds the
+// answers with Merge. wrap turns one answer into a Source; read reads a Source
+// the same way (used on the folded result).
+func collect[T any](t tolerantHeads, readHead func(Source) (T, error), wrap func(T) Source, read func(Source) (T, error)) (T, error) {
+	var zero T
+	var answers []Source
+	var skipped []int
+	var lastErr error
+	for i, h := range t.heads {
+		a, err := readHead(h)
+		if t.opts.Observe != nil {
+			t.opts.Observe(i, err)
+		}
+		if err != nil {
+			if !t.skip(err) || len(skipped) >= t.opts.Tolerate {
+				return zero, err
+			}
+			skipped = append(skipped, i)
+			lastErr = err
+			continue
+		}
+		answers = append(answers, wrap(a))
+	}
+	if len(answers) == 0 {
+		return zero, lastErr
+	}
+	acc := answers[len(answers)-1]
+	for i := len(answers) - 2; i >= 0; i-- {
+		acc = Merge(answers[i], acc)
+	}
+	out, err := read(acc)
+	if err != nil {
+		return zero, err
+	}
+	if len(skipped) > 0 && t.opts.OnSkip != nil {
+		t.opts.OnSkip(skipped)
+	}
+	return out, nil
+}
+
+func (t tolerantHeads) skip(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	return t.opts.Skippable != nil && t.opts.Skippable(err)
+}
+
+func (t tolerantHeads) Select(ctx context.Context, p SelectParams) ([]SeriesData, error) {
+	if err := p.Validate(); err != nil {
+		return nil, err
+	}
+	return collect(t, func(h Source) ([]SeriesData, error) { return h.Select(ctx, p) }, func(a []SeriesData) Source { return fixedSource{series: a} }, func(s Source) ([]SeriesData, error) { return s.Select(ctx, p) })
+}
+
+func (t tolerantHeads) SelectLabelNames(ctx context.Context) ([]string, error) {
+	return collect(t, func(h Source) ([]string, error) { return h.SelectLabelNames(ctx) }, func(a []string) Source { return fixedSource{strs: a} }, func(s Source) ([]string, error) { return s.SelectLabelNames(ctx) })
+}
+
+func (t tolerantHeads) SelectLabelValues(ctx context.Context, name string) ([]string, error) {
+	return collect(t, func(h Source) ([]string, error) { return h.SelectLabelValues(ctx, name) }, func(a []string) Source { return fixedSource{strs: a} }, func(s Source) ([]string, error) { return s.SelectLabelValues(ctx, name) })
 }
