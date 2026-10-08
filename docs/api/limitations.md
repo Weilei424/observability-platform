@@ -75,12 +75,12 @@ filter.
 
 These are properties of the whole system, not of the query languages.
 
-- **One store, one compactor, no replication.** The backend runs all-in-one or
+- **One store, one compactor.** The backend runs all-in-one or
   split into five components
   ([../architecture/components.md](../architecture/components.md)). Writes are
-  sharded over a ring of ingesters, but there is one store and one compactor,
-  no replication, no parallel query fanout, and no multi-tenancy. Those are
-  Phases 6.3-6.5 in
+  sharded over a ring of ingesters and replicated across `OBS_REPLICATION_FACTOR`
+  of them, but there is one store and one compactor, no parallel query fanout,
+  and no multi-tenancy. Those are Phases 6.4-6.5 in
   [`../planning/IMPLEMENTATION_PLAN.md`](../planning/IMPLEMENTATION_PLAN.md).
 - **Ring membership is static.** The gateway and querier read the ingester list
   from `OBS_INGESTER_URL` at startup; adding or removing an ingester takes a
@@ -103,10 +103,45 @@ These are properties of the whole system, not of the query languages.
 - **Ingesters are read one after another.** The querier reads every ingester in
   turn, then the store, so read latency grows with the number of ingesters.
   Parallel fanout is Phase 6.4.
-- **One ingester down fails every read and some writes.** A read needs every
-  member, so any unreachable ingester answers `503`. A write answers `503` only
-  when the batch has a key that ingester owns; other batches succeed. A `503`
-  can leave some of a batch's groups written; retrying the whole batch is safe.
+- **Replication tolerates a minority of ingesters, not a majority.**
+  `OBS_REPLICATION_FACTOR` (RF, default 1; the Compose and Helm split use 3) sends
+  every series and stream to RF ingesters. The quorum is W = RF/2 + 1 per key,
+  and a write answers `204` once every key in the batch has W acknowledgements.
+  A read skips up to W-1 ingesters that fail with an outage (refused, `503`, or
+  a per-request timeout while the caller's read is still live); a protocol
+  error, one more outage, or a read where every ingester was skipped fails it.
+  RF=1 is the 6.2 behaviour: one ingester down fails every read, and a write
+  fails only when the batch has a key that ingester owns. At RF=3 one ingester
+  down fails neither writes nor reads; two down answers `503` to both. A write
+  that misses quorum answers `503` (or `500` for a protocol error) and its body
+  is `write quorum not met: <k> of <n> series could not reach <W> of <RF>
+  ingesters` (streams on the Loki route); the `500` body is `internal error`.
+  The gateway waits for every push, each bounded by `OBS_INGESTER_TIMEOUT`
+  (default 10s, at least 100ms), before answering a failed write. A `503` can
+  leave some of a batch written; retrying the whole batch is safe. Both
+  `obs_gateway_write_quorum_total{outcome}` and
+  `obs_querier_ingester_reads_total{ingester,outcome}` show a tolerated outage.
+- **`OBS_REPLICATION_FACTOR` must match on the gateway and querier.** Each
+  refuses a value above its own ingester list at startup, but nothing checks
+  that the two agree. Compare `replication_factor` and `quorum` in their
+  `ring ready` lines, next to the ring hash. A querier with a smaller RF than
+  the gateway fails reads it could have answered; a larger one skips ingesters
+  whose data it cannot replace.
+- **Raise RF on the gateway first, then the querier.** Data still in the
+  ingesters' heads was acknowledged under the old, smaller quorum. Raise RF on
+  the gateway, wait for the heads to flush (the maintenance flush interval, or
+  a drain), then raise it on the querier. Lowering RF needs no wait. Helm
+  rolls only the gateway and querier for a change.
+- **Replicated overwrites have a skew window.** Each ingester assigns its own
+  generation, `max(previous + 1, now in Unix microseconds)`. An overwrite of
+  the same series and timestamp can lose to the older value only when the
+  replica whose clock runs furthest ahead missed the overwrite (a
+  partial-quorum write) and that replica's old write carries a higher
+  generation than the overwrite's on the replicas that got it. If every
+  replica holds both writes, the overwrite always wins.
+- **Log chunks are stored RF times.** Every replica flushes its own copy to the
+  store. Reads deduplicate by `(timestamp, line)`, so answers never change, but
+  disk use is RF times a single copy. Metrics compaction merges the copies.
 - **Removing an ingester needs its drain acknowledged.** `POST
   /internal/v1/drain` answers `200` only once the ingester's whole head is in
   the store; skip that and stop it anyway, and anything a failed or cut-short
@@ -114,8 +149,10 @@ These are properties of the whole system, not of the query languages.
   starts, the ingester refuses every write with `503` until it restarts, so
   drain only an ingester the gateway no longer writes to. A graceful stop also
   drains, within a 50 s shutdown budget so it fits the 60 s grace period, but
-  its outcome is only a log line. Reads answer `503` while a stopped ingester is
-  still on the querier's list.
+  its outcome is only a log line. At RF=1 reads answer `503` while a stopped
+  ingester is still on the querier's list; at RF=3 they tolerate one. With RF
+  equal to the ring size, removing an ingester first needs RF lowered or a
+  further ingester added: the gateway refuses an RF above its write list.
 - **Upgrading to 6.2 has an overwrite window.** A pre-6.2 WAL record replays with a
   fresh generation, so on a restart while pre-6.2 segments are still past the
   checkpoint, a pre-upgrade sample can outrank a post-upgrade overwrite at the same
@@ -161,9 +198,11 @@ These are properties of the whole system, not of the query languages.
   how often a new threshold flush is attempted after a failure; it does not
   bound one already in flight.
 - **There is no server-side query timeout.** A querier request runs under the
-  inbound HTTP request's own context, and nothing wraps it with a deadline. A
-  hung ingester or store therefore holds that request open until the caller
-  (Grafana, or curl) disconnects — it never resolves to a `503` on its own.
+  inbound HTTP request's own context, and nothing wraps it with a deadline.
+  Each ingester read is bounded by `OBS_INGESTER_TIMEOUT` and counts as an
+  outage, so a hung ingester is skipped or fails the read with `503`, but a
+  hung store holds the request open until the caller (Grafana, or curl)
+  disconnects — it never resolves to a `503` on its own.
 - **A store that permanently rejects a batch wedges the head.** A tolerant
   flush never discards a batch the store failed to accept — that would lose
   data already acknowledged to the client — so a store-side bug that keeps
