@@ -22,8 +22,10 @@ spec:
         checksum/config: {{ include "backend.splitConfigMap" (list $root $component) | sha256sum }}
         {{- if eq $component "gateway" }}
         {{ include "backend.ingesterCountAnnotation" $root }}: {{ include "backend.ingesterWriteCount" $root | quote }}
+        {{ include "backend.replicationFactorAnnotation" $root }}: {{ $root.Values.split.replicationFactor | int | toString | quote }}
         {{- else if eq $component "querier" }}
         {{ include "backend.ingesterCountAnnotation" $root }}: {{ $root.Values.split.ingester.replicas | int | toString | quote }}
+        {{ include "backend.replicationFactorAnnotation" $root }}: {{ include "backend.querierReplicationFactor" $root | quote }}
         {{- end }}
     spec:
       {{- include "backend.podSecurityContext" $root | nindent 6 }}
