@@ -74,11 +74,9 @@ func buildGateway(cfg *config.Config, log *slog.Logger) (*App, error) {
 		Target: config.TargetGateway, Handler: srv, log: log,
 		// App closers run after httpSrv.Shutdown (cmd/server/main.go), so no
 		// request can Add to the router's WaitGroup while Wait runs. Waiting
-		// lets in-flight background replica pushes finish, bounded by timeout.
-		closers: []closer{{component: "main", msg: "write router wait", close: func() error {
-			router.Wait()
-			return nil
-		}}},
+		// lets in-flight background replica pushes finish, each bounded by
+		// timeout, but no longer than what is left of the shutdown budget.
+		closers: []closer{{component: "main", msg: "write router wait", closeCtx: router.WaitContext}},
 	}, nil
 }
 
