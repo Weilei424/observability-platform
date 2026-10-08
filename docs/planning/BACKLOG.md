@@ -885,13 +885,14 @@ Spec: `docs/superpowers/specs/2026-10-06-phase-6.3-replication-design.md` · Pla
 **Deployment**
 - [x] Compose split runs RF=3 (one shared env anchor for the gateway and querier); smoke: replication check, one ingester down → writes `204` and reads complete, two down → `503` — `make smoke-compose-split` 108/0 on 2026-10-07
 - [x] Helm `split.replicationFactor` (default 3), rendered to the gateway and querier only, refused above `writeReplicas`; kind smoke: replication check, reads complete while each ingester restarts — `tests/e2e` `TestSplitReplicationFactorReachesGatewayAndQuerierOnly`, `TestSplitReplicationFactorAboveWriteReplicasFails`, and the RF stage in `TestRingStagesRollOnlyTheComponentWhoseListChanges`; the replication and per-ingester-restart checks are in `tests/e2e/kind_smoke.sh` (run recorded under the kind verification item)
+- [x] Helm stages an RF change like a membership change: `split.querier.replicationFactor` (default `split.replicationFactor`); the render refuses a querier quorum above the gateway's; each gateway/querier pod template records its RF, and an upgrade refuses a gateway quorum below the running querier's, a querier quorum above the running gateway's, and an RF change mid-rollout (raise gateway first, lower querier first) — `tests/e2e` `TestRingStagingOrdersReplicationFactorChanges`, `TestSplitQuerierReplicationFactorOverride`, `TestSplitQuerierQuorumAboveGatewayQuorumFails`, and the two-step RF stage in `TestRingStagesRollOnlyTheComponentWhoseListChanges`
 
 **Verification**
 - [x] Failure test: one ingester unavailable but quorum succeeds (writes and reads) — `TestReplicationOneIngesterDown`
 - [x] Failure test: quorum unavailable causes write failure (and read failure) — `TestReplicationTwoIngestersDown`
 - [x] Failure test: a hung ingester is bounded by the timeout — `TestReplicationHungIngester`
 - [x] Unit: the overwrite skew window across replicas is pinned and documented — `internal/metrics` `TestMergeHeadsOverwriteSkewWindow`; documented in `docs/api/limitations.md`
-- [x] RF=1 keeps every 6.2 test green unchanged — the 6.2 router and in-process cluster tests pass unchanged at the default RF=1
+- [x] 6.2 outcomes unchanged at RF=1 — the 6.2 router and in-process cluster tests keep their outcomes at the default RF=1 (the router tests' constructor changed)
 - [x] Verify: `make smoke-compose-split` 108/0 and `make smoke-compose` (all-in-one) 71/0, both on 2026-10-07
 - [ ] Verify: kind split in CI — closes in CI after a push (not run locally: cgroup v1 host)
 
