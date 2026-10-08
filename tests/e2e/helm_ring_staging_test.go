@@ -128,6 +128,67 @@ func TestRingStagingReadsTheRunningRelease(t *testing.T) {
 	}
 }
 
+// withRF records rf as the replication factor a live Deployment's pods
+// loaded, as the pod-template annotation does from Phase 6.3 on.
+func withRF(dep map[string]any, rf int) map[string]any {
+	annotations := dep["spec"].(map[string]any)["template"].(map[string]any)["metadata"].(map[string]any)["annotations"].(map[string]any)
+	annotations["observability-platform.dev/replication-factor"] = strconv.Itoa(rf)
+	return dep
+}
+
+// An RF change is staged like a membership change, so a read never skips
+// more ingesters than a write's acknowledgements cover while an old pod of
+// one component runs beside a new pod of the other: the gateway's quorum
+// rises first and falls last.
+func TestRingStagingOrdersReplicationFactorChanges(t *testing.T) {
+	helmAvailable(t)
+	const gw, q = "observability-backend", "observability-querier"
+	rolling := rollout{spec: 2, generation: 4, observed: 4, total: 3, updated: 1, available: 2}
+	// live is a 3/3 ring whose gateway and querier run gwRF and qRF; an RF
+	// below 1 leaves the annotation out, as a release from before it has.
+	live := func(gwRF, qRF int, qR rollout) map[string]any {
+		g, qq := liveDeployment(gw, 3, rolledOut), liveDeployment(q, 3, qR)
+		if gwRF > 0 {
+			withRF(g, gwRF)
+		}
+		if qRF > 0 {
+			withRF(qq, qRF)
+		}
+		return map[string]any{
+			"gateway": g, "querier": qq,
+			"gatewayConfig": liveConfigMap(3), "querierConfig": liveConfigMap(3),
+		}
+	}
+	for _, tc := range []struct {
+		name               string
+		live               map[string]any
+		set                []string
+		wantFailureMention string // "" means the render must succeed
+	}{
+		{"raise: gateway first", live(1, 1, rolledOut), []string{"split.replicationFactor=3", "split.querier.replicationFactor=1"}, ""},
+		{"raise: then the querier", live(3, 1, rolledOut), []string{"split.replicationFactor=3"}, ""},
+		{"raise: both at once", live(1, 1, rolledOut), []string{"split.replicationFactor=3"}, "unstaged replication factor change"},
+		{"raise: querier first", live(1, 1, rolledOut), []string{"split.replicationFactor=1", "split.querier.replicationFactor=3"}, "quorum"},
+		{"lower: querier first", live(3, 3, rolledOut), []string{"split.replicationFactor=3", "split.querier.replicationFactor=1"}, ""},
+		{"lower: then the gateway", live(3, 1, rolledOut), []string{"split.replicationFactor=1"}, ""},
+		{"lower: both at once", live(3, 3, rolledOut), []string{"split.replicationFactor=1"}, "unstaged replication factor change"},
+		{"lower: gateway first", live(3, 3, rolledOut), []string{"split.replicationFactor=1", "split.querier.replicationFactor=3"}, "quorum"},
+		{"an RF change while the querier still rolls", live(1, 1, rolling), []string{"split.replicationFactor=3", "split.querier.replicationFactor=1"}, "deployment/observability-querier has not finished rolling out"},
+		{"no RF change while the querier still rolls", live(3, 3, rolling), nil, ""},
+		{"a release without the RF annotation skips the RF check", live(-1, -1, rolledOut), []string{"split.replicationFactor=1"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := renderWithLive(t, tc.live, tc.set...)
+			switch {
+			case tc.wantFailureMention == "" && err != nil:
+				t.Errorf("render failed, want success: %v\n%.600s", err, out)
+			case tc.wantFailureMention != "" && (err == nil || !strings.Contains(out, tc.wantFailureMention)):
+				t.Errorf("rendered (err %v), want a failure naming %q\n%.600s", err, tc.wantFailureMention, out)
+			}
+		})
+	}
+}
+
 // The pod templates record the ingester count each pod loads, which is what
 // the staging check reads back on the next upgrade.
 func TestSplitPodTemplatesRecordTheirIngesterCount(t *testing.T) {
@@ -229,7 +290,8 @@ func TestRingStagesRollOnlyTheComponentWhoseListChanges(t *testing.T) {
 		{"remove stage 1: 4/3", []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=3"}, []string{"observability-backend"}},
 		{"remove stage 3: 3/3", []string{"split.ingester.replicas=3", "split.ingester.writeReplicas=3"}, []string{"observability-querier"}},
 		{"4/4 at the default RF 3 (baseline for the next stage)", []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=4"}, []string{"observability-backend", "observability-querier"}},
-		{"replication factor 3 -> 2 on 4/4", []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=4", "split.replicationFactor=2"}, []string{"observability-backend", "observability-querier"}},
+		{"lower RF stage 1: the querier 3 -> 2 on 4/4", []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=4", "split.querier.replicationFactor=2"}, []string{"observability-querier"}},
+		{"lower RF stage 2: the gateway 3 -> 2 on 4/4", []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=4", "split.replicationFactor=2"}, []string{"observability-backend"}},
 	}
 	prev := podTemplates(t, stages[0].sets...)
 	for _, st := range stages[1:] {
