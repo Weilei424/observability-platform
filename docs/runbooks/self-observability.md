@@ -250,6 +250,8 @@ All `obs_*` metrics exposed by the backend (scraped by the internals Prometheus)
 **Ring (split topology):**
 - `obs_ring_members` — number of ingesters in the ring the gateway routes over or the querier reads; exported by both
 - `obs_gateway_ingester_requests_total{ingester,outcome}` — write groups the gateway sent to each ingester, by the ingester's `host:port` and outcome (`ok`, `unavailable`, or `error`); gateway only
+- `obs_gateway_write_quorum_total{outcome}` — routed write batches by quorum outcome: `full` (every replica acknowledged), `degraded` (quorum met, at least one replica failed), `failed` (quorum not met); gateway only. The "Write quorum" panel plots its rate
+- `obs_querier_ingester_reads_total{ingester,outcome}` — reads the querier sent to each ingester, by the ingester's `host:port` and outcome (`ok`, `unavailable`, or `error`); querier only. A tolerated outage shows as `unavailable` while queries still answer `200`. The "Ingester reads" panel plots its rate
 
 **Errors:**
 - `obs_collector_errors_total{collector}` — scrape-time collector failures (values: "wal", "logs")
