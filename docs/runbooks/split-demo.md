@@ -39,9 +39,15 @@ The gateway and the querier each log one `ring ready` line at startup:
 docker compose -f deployments/docker/docker-compose.split.yml logs gateway querier | grep 'ring ready'
 ```
 
-It carries `members=3` and `ring=<8 hex chars>`, a hash of the sorted member
-list. The two hashes must be equal: if they differ, the gateway writes to an
-ingester the querier does not read.
+It carries `members=3`, `ring=<8 hex chars>` (a hash of the sorted member
+list), `replication_factor=3`, and `quorum=2`. The two hashes must be equal: if
+they differ, the gateway writes to an ingester the querier does not read. The
+two `replication_factor` values must be equal too. Compose sets
+`OBS_REPLICATION_FACTOR: "3"` once, in the `x-ring-env` anchor the gateway and
+querier share, so every series and stream is written to all three ingesters and
+a write is acknowledged once two of them hold it. Each ingester's
+`obs_samples_ingested_total` is therefore about equal, not a third of the
+total.
 
 ## What to look at
 
@@ -50,8 +56,9 @@ Open **Observability Platform Internals** in Grafana. **Component Health** plots
 proxies to the querier is counted once. **Blocks and Log Chunks** is the store's;
 **WAL Size** and **Active Series and Log Streams** (series) are the ingesters',
 one line per ingester. The ring spreads series and streams over the three, so
-each ingester's `obs_samples_ingested_total` is above zero and roughly equal:
-the gateway's per-ingester write counter shows the same split.
+each ingester's `obs_samples_ingested_total` is above zero and, at replication
+factor 3, roughly equal, since every ingester holds a copy: the gateway's
+per-ingester write counter shows the same.
 
 ```bash
 curl -s http://localhost:8080/metrics | grep -E 'obs_ring_members|obs_gateway_ingester_requests_total'
@@ -66,6 +73,12 @@ make local-logs-split
 and look for `"target":"ingester"` and the other targets beside `component`.
 
 ## Add or remove an ingester
+
+With replication factor 3 on three ingesters, removing one first needs the
+factor lowered (the gateway and querier refuse a factor above their list) or a
+fourth ingester added. Raise the factor on the gateway first and on the querier
+only after the heads have flushed; lowering needs no wait. See
+[Replication](#failure-drill-stop-one-ingester).
 
 Membership is static: the gateway and the querier read the ingester list once,
 at startup, so a change takes a restart of each. The ring moves only the keys
@@ -167,6 +180,17 @@ after a failed or stuck upgrade, wait for `kubectl rollout status` or
 `split.ingester.previous.replicas` and `.writeReplicas` to preview the check.
 A real upgrade refuses them.)
 
+`split.replicationFactor` (default 3, at least 1) is how many ingesters hold each
+series and stream; the chart renders it as `OBS_REPLICATION_FACTOR` on the
+gateway and querier only, so changing it rolls just those two
+(`config.OBS_REPLICATION_FACTOR` is chart-owned and refused). The chart refuses
+a factor above `writeReplicas`, the ingesters the gateway writes to. Raise it
+with the gateway first and the querier after the heads have flushed; lowering
+needs no wait. Because of that refusal, removing an ingester from a
+three-ingester ring at factor 3 needs the factor lowered first
+(`--set split.replicationFactor=2` with the other values unchanged) or a fourth
+ingester added; `helm upgrade` fails naming `split.replicationFactor` otherwise.
+
 To add a fourth ingester, first add the pod and the querier's read, then the
 gateway's writes:
 
@@ -213,20 +237,26 @@ docker compose -f deployments/docker/docker-compose.split.yml stop ingester-2
 curl -s -w '\n%{http_code}\n' -G 'http://localhost:8080/api/v1/query' --data-urlencode 'query=http_requests_total'
 ```
 
-The query answers `503`: a read covers every ingester, and the ring cannot
-tell which one holds a series. Writes fail only where they must: a batch with a
-series or stream `ingester-2` owns answers `503` `{"error":"ingester
-unavailable"}`, and a batch whose keys all belong to the other two succeeds.
-The gateway's counter shows where the failures went:
+With replication factor 3 the query answers `200` and is complete: the querier
+skips up to W-1 = 1 ingester that fails with an outage, and every acknowledged
+write is on at least two ingesters. Writes still answer `204`, because every
+series has two other replicas. The gateway's counters show the outage was
+absorbed:
 
 ```bash
-curl -s http://localhost:8080/metrics | grep obs_gateway_ingester_requests_total
+curl -s http://localhost:8080/metrics | grep -E 'obs_gateway_ingester_requests_total|obs_gateway_write_quorum_total'
 ```
 
-`outcome="unavailable"` climbs for `ingester-2`'s `host:port`, while the other
-two keep climbing under `outcome="ok"`. A client may retry the whole
-batch: it rewrites the same values at the same timestamps, and reads collapse
-duplicate log entries.
+`outcome="unavailable"` climbs for `ingester-2`'s `host:port`, the other two
+keep climbing under `outcome="ok"`, and `obs_gateway_write_quorum_total` counts
+batches under `outcome="degraded"` (quorum met, one replica failed) rather than
+`failed`. The querier logs `read answered by replication` at `warn` with the
+skipped ingester, and `obs_querier_ingester_reads_total` counts it as
+`unavailable`; the internals dashboard's "Write quorum" and "Ingester reads"
+panels plot both. Stop a second ingester and both writes and reads answer
+`503`; a failed write's body is `write quorum not met: <k> of <n> series could
+not reach 2 of 3 ingesters`. A client may retry the whole batch: it rewrites
+the same values at the same timestamps, and reads collapse duplicates.
 
 ```bash
 docker compose -f deployments/docker/docker-compose.split.yml start ingester-2
