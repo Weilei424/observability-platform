@@ -230,7 +230,7 @@ All `obs_*` metrics exposed by the backend (scraped by the internals Prometheus)
 - `obs_log_chunk_bytes` — total size of log chunks in bytes
 
 **Ingestion:**
-- `obs_samples_ingested_total` — total metric samples accepted
+- `obs_samples_ingested_total` — total metric samples accepted. In the split topology each ingester counts its own copies: at replication factor RF every sample lands on RF ingesters, so a sum across ingesters is RF times the real ingest rate
 - `obs_samples_rejected_total{reason}` — samples rejected (reasons: `name`, `timestamp`, `value`, `labels`, `other`, `append`, `batch`). The first five are validation errors (client sent invalid data); `append` means the data passed validation but the write to storage failed — a durability signal, not a client error; `batch` means the sample was itself valid but was discarded only because a sibling in the same atomically-rejected batch was invalid. The metrics handler attempts every append even after one fails, so a failed write is always `append` here and never `batch`.
 - `obs_log_lines_ingested_total` — total log lines accepted
 - `obs_log_lines_rejected_total{reason}` — log lines rejected (reasons: `values`, `timestamp`, `line`, `labels`, `other`, `append`, `batch`). The first five are validation errors; `append` means the write to storage failed; `batch` means the line was itself valid but was discarded either because a sibling was invalid, or because the push handler returned on the first append failure and abandoned the remaining lines. Unlike the metrics path, the Loki push handler does stop at the first append error, so both causes are real here.
@@ -251,7 +251,7 @@ All `obs_*` metrics exposed by the backend (scraped by the internals Prometheus)
 - `obs_ring_members` — number of ingesters in the ring the gateway routes over or the querier reads; exported by both
 - `obs_gateway_ingester_requests_total{ingester,outcome}` — write groups the gateway sent to each ingester, by the ingester's `host:port` and outcome (`ok`, `unavailable`, or `error`); gateway only
 - `obs_gateway_write_quorum_total{outcome}` — routed write batches by quorum outcome: `full` (every replica acknowledged), `degraded` (quorum met, at least one replica failed), `failed` (quorum not met); gateway only. The "Write quorum" panel plots its rate
-- `obs_querier_ingester_reads_total{ingester,outcome}` — reads the querier sent to each ingester, by the ingester's `host:port` and outcome (`ok`, `unavailable`, or `error`); querier only. A tolerated outage shows as `unavailable` while queries still answer `200`. The "Ingester reads" panel plots its rate
+- `obs_querier_ingester_reads_total{ingester,outcome}` — reads the querier sent to each ingester, by the ingester's `host:port` and outcome; querier only. `ok` is an answer; `unavailable` is an outage — a refused connection, a `5xx`, or no answer within `OBS_INGESTER_TIMEOUT` — and is the only outcome a read may skip, up to quorum − 1 ingesters, so a tolerated outage shows as `unavailable` while queries still answer `200`; `error` is a protocol error (a `4xx`, say), which is never skipped and fails the read with `500`. A read the caller cancels (Grafana abandoning a refresh) is not counted at all, and an ingester after the one that failed a read is not read, so not counted either. The "Ingester reads" panel plots its rate
 
 **Errors:**
 - `obs_collector_errors_total{collector}` — scrape-time collector failures (values: "wal", "logs")
