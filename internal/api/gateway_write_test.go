@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -122,6 +123,30 @@ func TestGatewayWriteOutcomes(t *testing.T) {
 				t.Errorf("%v on %s: %d %s, want %d containing %s", tc.err, w.path, rr.Code, rr.Body, tc.code, tc.bodyHas)
 			}
 		}
+	}
+}
+
+// A write that misses quorum logs the ingesters that failed it (spec §5.4),
+// while the client's body stays the plain quorum message.
+func TestGatewayQuorumWarnNamesTheFailingIngesters(t *testing.T) {
+	var buf bytes.Buffer
+	q, _ := url.Parse("http://127.0.0.1:1")
+	srv := api.New(api.Deps{
+		Config:    &config.Config{HTTPAddr: ":0", DataDir: t.TempDir(), LogLevel: "info"},
+		Logger:    slog.New(slog.NewJSONHandler(&buf, nil)),
+		Ingest:    observability.NewIngestMetrics(),
+		Upstreams: &api.Upstreams{Querier: q},
+		Writes: &fakeRouter{err: &rpc.QuorumError{Kind: "series", Failed: 1, Total: 4, Quorum: 2, RF: 3,
+			Ingesters: []string{"ingester-1:8080", "ingester-3:8080"}, Cause: fmt.Errorf("%w: x", rpc.ErrUnavailable)}},
+	})
+	rr := post(t, srv, "/api/v1/ingest/metrics", okMetrics)
+	if rr.Code != http.StatusServiceUnavailable || strings.Contains(rr.Body.String(), "ingester-1") {
+		t.Fatalf("got %d %s, want 503 with the plain quorum message", rr.Code, rr.Body)
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, `"msg":"write quorum not met"`) || !strings.Contains(logged, `"level":"WARN"`) ||
+		!strings.Contains(logged, `"ingesters":["ingester-1:8080","ingester-3:8080"]`) {
+		t.Errorf("warn line does not name the failing ingesters: %s", logged)
 	}
 }
 
