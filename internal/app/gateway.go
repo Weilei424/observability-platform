@@ -33,9 +33,21 @@ func buildGateway(cfg *config.Config, log *slog.Logger) (*App, error) {
 		labels = append(labels, rpc.MemberLabel(m))
 	}
 	rm.Register(reg, labels, true)
-	router, err := rpc.NewRouter(members, rpc.RouterOptions{ReplicationFactor: 1, ObserveMember: func(member, outcome string) {
-		rm.IngesterRequests.WithLabelValues(member, outcome).Inc()
-	}})
+	rf := max(cfg.ReplicationFactor, 1)
+	// Background replica pushes run detached from the request context, so the
+	// per-request timeout is what ends a push to a hung ingester.
+	timeout := cfg.IngesterTimeout
+	if timeout <= 0 {
+		timeout = config.DefaultIngesterTimeout
+	}
+	router, err := rpc.NewRouter(members, rpc.RouterOptions{
+		ReplicationFactor: rf,
+		Timeout:           timeout,
+		ObserveMember: func(member, outcome string) {
+			rm.IngesterRequests.WithLabelValues(member, outcome).Inc()
+		},
+		ObserveBatch: func(outcome string) { rm.WriteQuorum.WithLabelValues(outcome).Inc() },
+	})
 	if err != nil {
 		err = fmt.Errorf("app: write router: %w", err)
 		mainLog.Error("failed to build write router", slog.String("error", err.Error()))
@@ -47,7 +59,7 @@ func buildGateway(cfg *config.Config, log *slog.Logger) (*App, error) {
 		mainLog.Error("failed to parse querier URL", slog.String("error", err.Error()))
 		return nil, err
 	}
-	logRing(mainLog, members)
+	logRing(mainLog, members, rf)
 	srv := api.New(api.Deps{
 		Config:    cfg,
 		Logger:    log,
@@ -58,11 +70,21 @@ func buildGateway(cfg *config.Config, log *slog.Logger) (*App, error) {
 		Upstreams: &api.Upstreams{Querier: querier},
 		Writes:    router,
 	})
-	return &App{Target: config.TargetGateway, Handler: srv, log: log}, nil
+	return &App{
+		Target: config.TargetGateway, Handler: srv, log: log,
+		// App closers run after httpSrv.Shutdown (cmd/server/main.go), so no
+		// request can Add to the router's WaitGroup while Wait runs. Waiting
+		// lets in-flight background replica pushes finish, bounded by timeout.
+		closers: []closer{{component: "main", msg: "write router wait", close: func() error {
+			router.Wait()
+			return nil
+		}}},
+	}, nil
 }
 
 // logRing logs the ring's size and member-set hash. The gateway and querier
 // log the same hash exactly when they route and read over the same set.
-func logRing(mainLog *slog.Logger, r *ring.Ring) {
-	mainLog.Info("ring ready", slog.Int("members", len(r.Members())), slog.String("ring", r.Hash()))
+func logRing(mainLog *slog.Logger, r *ring.Ring, rf int) {
+	mainLog.Info("ring ready", slog.Int("members", len(r.Members())), slog.String("ring", r.Hash()),
+		slog.Int("replication_factor", rf), slog.Int("quorum", config.Quorum(rf)))
 }
