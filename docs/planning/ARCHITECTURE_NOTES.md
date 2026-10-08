@@ -620,16 +620,108 @@ records the decisions and the one place the code diverged from it.
   shutdown, and the whole stop shares one 50 s budget (`cmd/server`) inside the 60 s
   grace period. Its outcome is only a log line. A restart therefore writes one more small block (compaction merges it) and
   normally replays nothing; all-in-one is unchanged.
-- **Failure semantics.** One ingester down: batches with keys it owns answer `503`,
-  other batches `204`, reads `503`; a retry after recovery reads back once.
+- **Failure semantics.** At RF=1 (6.2's behaviour, still the binary default): one
+  ingester down, batches with keys it owns answer `503`, other batches `204`, reads
+  `503`; a retry after recovery reads back once. Replication (6.3) changes this for
+  RF above 1.
 - **Observability and checks.** The kind and Compose spread checks read per-instance
   counters through the self-observability Prometheus, because the backend image is
   distroless.
 
 **Hand-off to 6.3.** The ring already orders members around each key. Replication takes
 the next R distinct members clockwise, and the write outcome rule becomes a quorum rule.
-Reads already cover every member, so replicated duplicates are a dedup problem for 6.4,
-not a completeness one.
+Reads already cover every member, so replicated duplicates are a dedup problem, not a
+completeness one; the merge already deduplicates, so 6.3 proves it rather than adding
+it (6.4 keeps parallel fanout and pruning).
+
+### Replication (introduced in 6.3)
+
+`OBS_REPLICATION_FACTOR` (RF) makes the gateway write every series or stream to RF
+ingesters and the querier tolerate failed ones. The design is
+`docs/superpowers/specs/2026-10-06-phase-6.3-replication-design.md`; this section
+records the decisions and where the code corrected the spec.
+
+- **Gateway-side, per-key quorum.** Quorum is `W = RF/2 + 1` (RF=1 -> 1, 2 -> 2, 3 -> 2,
+  5 -> 3). `ring.Replicas(key, n)` takes the next n distinct members clockwise from the
+  key's position, so `Replicas(key, 1)[0]` is `Owner(key)` and RF=1 places exactly as
+  6.2 does (`TestReplicasOfOneIsTheOwner`, `TestGoldenReplicas`, `TestGoldenPlacement`).
+  The router sends each member one push carrying every key it replicates, all
+  concurrently, each bounded by `OBS_INGESTER_TIMEOUT`. Rejected: ingester-chained
+  replication (an extra failure point and recovery questions) and a per-member quorum
+  (keys in one batch have different replica sets).
+- **Answer at quorum, finish in the background.** The router answers `204` as soon as
+  every key has W acks. Pushes still running finish on a context detached from the
+  request (`context.WithoutCancel`), still bounded by the timeout and still counted,
+  so a hung replica costs one bounded goroutine per push. When a key can no longer
+  reach W, the router waits for every push (each bounded) and answers `503` if every
+  failure was an outage or `500` if any was a protocol error, so the answer does not
+  depend on arrival order. The `503` body is `write quorum not met: <k> of <n> series
+  could not reach <W> of <RF> ingesters` (`streams` for Loki); the `500` body stays
+  `internal error` and the cause goes to the log at `error`. At RF=1 a failed
+  outage write carries that same quorum message. A plain `rpc.ErrUnavailable` elsewhere
+  keeps `ingester
+  unavailable`. A caller that cancels first gets `499`; the pushes go on regardless.
+- **Deadlines folded in.** `OBS_INGESTER_TIMEOUT` (default 10s, at least 100ms) bounds
+  every routed write and every ingester read; a timeout is an outage, so a hung
+  ingester is a failed replica and costs at most the timeout. This closes 6.2's deferred
+  request-deadline item for ingesters; the querier still sets no overall request timeout.
+- **Reads skip up to W-1 outages.** `metrics.MergeHeadsWith` / `logs.MergeHeadsWith`
+  take `Tolerate = W-1` and a `Skippable` predicate (the querier passes
+  `errors.Is(err, rpc.ErrUnavailable)`). An outage is a refusal, a `503`, or a
+  per-request timeout while the caller's own read is still live; a cancelled caller is
+  never a skip. The W-th outage, or any protocol error, fails the read; a read where
+  every ingester was skipped fails with the last outage. Label-name and label-value
+  reads use the same tolerance. A read that relied on it logs `read answered by
+  replication` at `warn`.
+- **Why the read is complete.** Every acknowledged write is on at least W replicas.
+  With at most W-1 ingesters skipped, at least one replica of every acknowledged write
+  is read. This needs no ring lookup and holds across membership changes, because older
+  writes were also acknowledged by W replicas. The 6.2 no-gap argument still holds per
+  ingester read, and a skipped ingester's flushed data is already in the store. RF=1
+  gives `Tolerate = 0`: 6.2's fail-closed reads. The argument does not cover an RF
+  change while heads hold data (below).
+- **Duplicates.** Each ingester still assigns its own generation, so copies of one
+  sample differ only in generation and collapse to one value on read (`sortAndDedup`);
+  log lines dedup by `(timestamp, line)`. Dedup is proven for `sum`, `rate`, an instant
+  series count and `count_over_time` plus raw lines, from heads, from the store after a
+  flush has put RF copies there, and after compaction (`count()` is not in the PromQL
+  engine). Metrics compaction merges the copies; log chunks stay RF x on disk.
+- **Overwrite skew.** Two writes to one series and timestamp are ordered by the highest
+  generation across all replicas. An overwrite can lose to the older value only when the
+  replica whose clock runs furthest ahead missed the overwrite (a partial-quorum write)
+  and that replica's old write carries a higher generation than the overwrite's on the
+  replicas that got it. If every replica holds both writes, the overwrite always wins.
+  The design spec words this as any overwrite inside the clock skew; the code is
+  narrower, and `TestMergeHeadsOverwriteSkewWindow` pins the narrower rule.
+- **RF changes.** `OBS_REPLICATION_FACTOR` must be equal on the gateway and querier;
+  compare the `replication_factor` and `quorum` fields of the two `ring ready` lines.
+  Raising RF: gateway first, then the querier once the heads have flushed, because
+  heads still hold data acknowledged under the smaller quorum. Lowering needs no wait.
+  Both processes refuse an RF above their own ingester list at startup.
+- **Surfacing.** `obs_gateway_write_quorum_total{outcome=full|degraded|failed}` counts
+  each routed batch; per-replica results stay in `obs_gateway_ingester_requests_total`,
+  including background pushes. `obs_querier_ingester_reads_total{ingester,outcome}`
+  counts each ingester read (`ok`, `unavailable`, `error`). A degraded batch is only
+  counted, so an outage does not log once per batch; a `503` quorum failure logs `write
+  quorum not met` at `warn`. The self-observability dashboard gains "Write
+  quorum" and "Ingester reads" panels.
+- **Deployment.** Compose split runs RF=3 through one env anchor shared by the gateway
+  and querier (smoke 108/0 on 2026-10-07). Helm `split.replicationFactor` (default 3)
+  renders into the gateway and querier ConfigMaps only, so only those two roll, and is
+  refused above `split.ingester.writeReplicas`; `config.OBS_REPLICATION_FACTOR` is
+  chart-owned. Removing an ingester from a 3-ingester RF=3 ring first needs RF lowered
+  (`split.replicationFactor=2`) or a fourth ingester.
+- **Failure semantics (RF=3).** One ingester down, refused, crashed or hung: writes
+  `204` (degraded), reads complete `200`. Two down: writes `503` and reads `503`
+  (with 3 members every key has both among its replicas). A protocol error that breaks
+  a key's quorum: `500`. Store down: unchanged from 6.2.
+- **Where the tests live.** `internal/ring` (`Replicas`, golden placement);
+  `internal/rpc` router tests (quorum met and missed, per-key quorum, early answer
+  while a replica hangs, outcomes counted); `internal/metrics` and `internal/logs`
+  `merge_heads_test.go` (tolerance, cancellation, timeout, skew); `internal/app`
+  `querier_tolerance_test.go`; `internal/config` (bounds); `tests/integration/
+  replication_test.go` (one down, two down, hung, dedup); `tests/e2e` Helm tests;
+  the Compose and kind smoke scripts.
 
 ---
 
@@ -755,6 +847,8 @@ The backend exposes the following metrics at `/metrics`, scraped by a separate P
 **Ring (gateway and querier):**
 - `obs_ring_members` — ingesters in the configured ring
 - `obs_gateway_ingester_requests_total{ingester, outcome}` — gateway push requests per ingester and outcome
+- `obs_gateway_write_quorum_total{outcome}` — gateway write batches by quorum outcome: `full`, `degraded` (quorum met, a replica failed), `failed`
+- `obs_querier_ingester_reads_total{ingester, outcome}` — querier reads per ingester and outcome (`ok`, `unavailable`, `error`)
 
 In split, `obs_active_series` counts the ingester's head series and `obs_log_streams_total` the store's persisted streams.
 
