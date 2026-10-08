@@ -581,6 +581,60 @@
       ],
       "title": "Gateway Writes by Ingester and Outcome",
       "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "obs-internals" },
+      "description": "Gateway writes by whether a quorum of the replicas acknowledged them. A rising failure outcome means too many ingesters are unreachable for writes to succeed.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "pointSize": 5, "showPoints": "never", "spanNulls": false }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 72 },
+      "id": 17,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "obs-internals" },
+          "expr": "sum by (outcome)(rate(obs_gateway_write_quorum_total[1m]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Write quorum",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "obs-internals" },
+      "description": "The querier's reads of each ingester, by outcome. An ingester whose error or timeout outcomes climb is the one reads are skipping; queries stay complete while the rest answer.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "pointSize": 5, "showPoints": "never", "spanNulls": false }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 72 },
+      "id": 18,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "obs-internals" },
+          "expr": "sum by (ingester, outcome)(rate(obs_querier_ingester_reads_total[1m]))",
+          "legendFormat": "{{ingester}} {{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Ingester reads",
+      "type": "timeseries"
     }
   ],
   "refresh": "10s",
