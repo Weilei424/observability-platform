@@ -404,6 +404,11 @@ if [ "$TOPOLOGY" = split ]; then
         "unstaged ring change" --set split.ingester.replicas=4
     expect_refused "split.ingester.previous is refused on a real upgrade" \
         "previews only" --set split.ingester.previous.replicas=3 --set split.ingester.previous.writeReplicas=3
+    # Lowering the RF on both at once would let a new gateway write at a
+    # quorum below the one the running querier reads at; the RF comes from the
+    # running pods' replication-factor annotations.
+    expect_refused "a one-step replication factor change is refused from the live pods" \
+        "unstaged replication factor change" --set split.replicationFactor=1
     # A querier rollout that has not finished: paused, with a template change
     # the controller has not rolled out. A ring change must wait for it.
     QUERIER=deployment/observability-querier
