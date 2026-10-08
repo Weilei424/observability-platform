@@ -110,6 +110,10 @@ func TestGatewayWriteOutcomes(t *testing.T) {
 		{fmt.Errorf("%w: ingester x", rpc.ErrUnavailable), http.StatusServiceUnavailable, `"ingester unavailable"`},
 		{errors.New("rpc: ingester x answered 400"), http.StatusInternalServerError, `"internal error"`},
 		{context.Canceled, 499, ""},
+		{&rpc.QuorumError{Kind: "series", Failed: 1, Total: 4, Quorum: 2, RF: 3, Cause: fmt.Errorf("%w: x", rpc.ErrUnavailable)},
+			http.StatusServiceUnavailable, `write quorum not met: 1 of 4 series could not reach 2 of 3 ingesters`},
+		{&rpc.QuorumError{Kind: "series", Failed: 1, Total: 4, Quorum: 2, RF: 3, Cause: errors.New("answered 400")},
+			http.StatusInternalServerError, `"internal error"`},
 	} {
 		srv, _ := newRoutingGateway(t, &fakeRouter{err: tc.err})
 		for _, w := range []struct{ path, body string }{{"/api/v1/ingest/metrics", okMetrics}, {"/loki/api/v1/push", okLogs}} {
