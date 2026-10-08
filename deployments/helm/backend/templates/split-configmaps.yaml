@@ -6,6 +6,9 @@
 {{- if or (lt $writeCount 1) (gt $writeCount (int .Values.split.ingester.replicas)) }}
 {{- fail (printf "split.ingester.writeReplicas must be between 1 and split.ingester.replicas (%d), got %d: the gateway may only write to ingesters the querier reads" (int .Values.split.ingester.replicas) $writeCount) }}
 {{- end }}
+{{- if or (lt (int .Values.split.replicationFactor) 1) (gt (int .Values.split.replicationFactor) $writeCount) }}
+{{- fail (printf "split.replicationFactor (%d) must be at least 1 and must not exceed the ingesters the gateway writes to (%d): every write needs that many distinct replicas" (int .Values.split.replicationFactor) $writeCount) }}
+{{- end }}
 {{- /* The ring staging check (backend.ringStagingCheck) over the live objects. */}}
 {{- $gwName := include "backend.componentName" (list . "gateway") }}
 {{- $qName := include "backend.componentName" (list . "querier") }}
