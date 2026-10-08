@@ -430,7 +430,7 @@ func TestSplitStatelessComponentsMountNoVolume(t *testing.T) {
 // not bypass that guard.
 func TestSplitRejectsTemplateOwnedConfigKeys(t *testing.T) {
 	helmAvailable(t)
-	for _, key := range []string{"config.OBS_TARGET=gateway", "config.OBS_STORE_URL=http://elsewhere:8080"} {
+	for _, key := range []string{"config.OBS_TARGET=gateway", "config.OBS_STORE_URL=http://elsewhere:8080", "config.OBS_REPLICATION_FACTOR=1"} {
 		out, err := exec.Command("helm", "template", "backend", backendChart,
 			"--set", "topology=split", "--set-string", key).CombinedOutput()
 		if err == nil {
@@ -566,7 +566,7 @@ func checkCollisionRefused(t *testing.T, name, component string) {
 
 func TestSplitIngesterListFollowsReplicas(t *testing.T) {
 	for _, replicas := range []int{1, 3} {
-		objs := renderSplit(t, fmt.Sprintf("split.ingester.replicas=%d", replicas))
+		objs := renderSplit(t, fmt.Sprintf("split.ingester.replicas=%d", replicas), "split.replicationFactor=1")
 		var want []string
 		for i := range replicas {
 			want = append(want, fmt.Sprintf("http://observability-ingester-%d.observability-ingester-headless:8080", i))
@@ -692,5 +692,41 @@ func TestSplitRefusesUnstagedRingChanges(t *testing.T) {
 				t.Errorf("rendered (err %v), want a failure naming %s\n%.400s", err, tc.wantFailureMention, out)
 			}
 		})
+	}
+}
+
+// The replication factor is a gateway and querier setting: the gateway fans
+// each write out to that many ingesters and the querier dedups that many
+// copies. The ingesters, store and compactor never read it, so it must not
+// appear in their ConfigMaps (which would also roll them).
+func TestSplitReplicationFactorReachesGatewayAndQuerierOnly(t *testing.T) {
+	helmAvailable(t)
+	seen := map[string]bool{}
+	for _, o := range renderSplit(t) {
+		if o.Kind != "ConfigMap" || o.Data["OBS_TARGET"] == "" {
+			continue
+		}
+		target := o.Data["OBS_TARGET"]
+		seen[target] = true
+		got, has := o.Data["OBS_REPLICATION_FACTOR"]
+		if target == "gateway" || target == "querier" {
+			if got != "3" {
+				t.Errorf("%s OBS_REPLICATION_FACTOR = %q, want \"3\"", target, got)
+			}
+		} else if has {
+			t.Errorf("%s ConfigMap holds OBS_REPLICATION_FACTOR=%q, want none", target, got)
+		}
+	}
+	if len(seen) != 5 {
+		t.Errorf("saw ConfigMaps for %v, want all five components", seen)
+	}
+}
+
+func TestSplitReplicationFactorAboveWriteReplicasFails(t *testing.T) {
+	helmAvailable(t)
+	out, err := exec.Command("helm", "template", "backend", backendChart,
+		"--set", "topology=split", "--set", "split.ingester.writeReplicas=2").CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "split.replicationFactor") {
+		t.Fatalf("writeReplicas=2 with the default RF 3 rendered (err %v), want a failure naming split.replicationFactor\n%.300s", err, out)
 	}
 }
