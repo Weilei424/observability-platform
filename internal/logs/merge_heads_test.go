@@ -6,9 +6,13 @@ import (
 	"fmt"
 	"slices"
 	"testing"
+	"time"
 )
 
 var errOutage = errors.New("outage")
+
+// timeoutErr is what a per-request timeout looks like: an outage that also wraps DeadlineExceeded.
+var timeoutErr = fmt.Errorf("%w: %w", errOutage, context.DeadlineExceeded)
 
 func outage(err error) bool { return errors.Is(err, errOutage) }
 
@@ -62,10 +66,20 @@ func TestMergeHeadsWithNeverSkipsCancellationOrAllHeadsDown(t *testing.T) {
 	good := headWith(t, "api", "x", 1)
 	always := func(error) bool { return true }
 	ctx := context.Background()
-	for _, e := range []error{context.Canceled, fmt.Errorf("wrapped: %w", context.DeadlineExceeded)} {
-		_, err := MergeHeadsWith(HeadsOptions{Tolerate: 2, Skippable: always}, staticSource{err: e}, good).SelectStreams(ctx, nil, 0, 10)
-		if !errors.Is(err, e) {
-			t.Errorf("%v was skipped: err = %v", e, err)
+	if _, err := MergeHeadsWith(HeadsOptions{Tolerate: 2, Skippable: always}, staticSource{err: context.Canceled}, good).SelectStreams(ctx, nil, 0, 10); !errors.Is(err, context.Canceled) {
+		t.Errorf("Canceled was skipped: err = %v", err)
+	}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	expired, cancel2 := context.WithDeadline(ctx, time.Now().Add(-time.Second))
+	defer cancel2()
+	for _, c := range []context.Context{cancelled, expired} {
+		h := MergeHeadsWith(HeadsOptions{Tolerate: 2, Skippable: outage}, staticSource{err: timeoutErr}, good)
+		if _, err := h.SelectStreams(c, nil, 0, 10); !errors.Is(err, errOutage) {
+			t.Errorf("skipped with a done caller context: err = %v", err)
+		}
+		if _, err := h.SelectLabelNames(c); !errors.Is(err, errOutage) {
+			t.Errorf("label read skipped with a done caller context: err = %v", err)
 		}
 	}
 	down := staticSource{err: errOutage}
@@ -96,5 +110,21 @@ func TestMergeHeadsWithMatchesMergeHeadsWhenNothingFails(t *testing.T) {
 	got, err := MergeHeadsWith(HeadsOptions{Tolerate: 1, Skippable: outage}, a, b, c).SelectStreams(ctx, nil, 0, 10)
 	if err != nil || fmt.Sprintf("%+v", got) != fmt.Sprintf("%+v", want) {
 		t.Fatalf("got %+v (%v), want %+v", got, err, want)
+	}
+}
+
+func TestMergeHeadsWithSkipsPerRequestTimeoutWhileCallerIsLive(t *testing.T) {
+	good := staticSource{streams: headWith(t, "api", "x", 1).(staticSource).streams, names: []string{"service"}}
+	src := MergeHeadsWith(HeadsOptions{Tolerate: 1, Skippable: outage}, staticSource{err: timeoutErr}, good)
+	ctx := context.Background()
+	got, err := src.SelectStreams(ctx, nil, 0, 10)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("hung head not skipped: %v %+v", err, got)
+	}
+	if _, err := src.SelectLabelNames(ctx); err != nil {
+		t.Fatalf("label names: %v", err)
+	}
+	if _, err := src.SelectLabelValues(ctx, "service"); err != nil {
+		t.Fatalf("label values: %v", err)
 	}
 }
