@@ -53,6 +53,11 @@ topology: all-in-one
 # compactor are singletons and the chart refuses more than one.
 # Their PVCs use persistence.storageClassName above.
 split:
+  # How many distinct ingesters every write goes to (the gateway) and how many
+  # copies a read dedups (the querier). Must not exceed the ingesters the
+  # gateway writes to (ingester.writeReplicas, else ingester.replicas); the
+  # chart refuses it otherwise. Changing it rolls the gateway and the querier.
+  replicationFactor: 3
   gateway:
     replicas: 1
     resources:
