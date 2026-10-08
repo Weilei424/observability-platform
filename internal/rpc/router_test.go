@@ -265,6 +265,11 @@ func TestRouterQuorumMissedWithTwoDown(t *testing.T) {
 	if want := "write quorum not met: 10 of 10 series could not reach 2 of 3 ingesters"; err.Error() != want {
 		t.Errorf("message = %q, want %q", err.Error(), want)
 	}
+	want := []string{MemberLabel(ings[0].url), MemberLabel(ings[2].url)}
+	slices.Sort(want)
+	if !slices.Equal(qe.Ingesters, want) {
+		t.Errorf("Ingesters = %v, want the two failing members, sorted: %v", qe.Ingesters, want)
+	}
 	rt.Wait()
 	if !slices.Equal(batches, []string{"failed"}) {
 		t.Errorf("batch outcomes = %v, want [failed]", batches)
@@ -387,5 +392,34 @@ func TestRouterQuorumIsPerKey(t *testing.T) {
 	}
 	if qe.Failed != bothDown || qe.Total != len(batch) {
 		t.Errorf("Failed/Total = %d/%d, want %d/%d: only keys on both down members miss quorum", qe.Failed, qe.Total, bothDown, len(batch))
+	}
+	want := []string{MemberLabel(ings[0].url), MemberLabel(ings[1].url)}
+	slices.Sort(want)
+	if !slices.Equal(qe.Ingesters, want) {
+		t.Errorf("Ingesters = %v, want only the down members, sorted: %v", qe.Ingesters, want)
+	}
+}
+
+// WaitContext gives up when its context ends, so a hung background push
+// cannot hold a shutdown past its budget; Wait would block until the push's
+// own timeout.
+func TestRouterWaitContextHonoursItsContext(t *testing.T) {
+	ings := startIngesters(t, 3, nil, map[int]bool{2: true})
+	rt, _ := newTestRouterOpts(t, ings, RouterOptions{ReplicationFactor: 3, Timeout: time.Second})
+	if err := rt.PushSamples(context.Background(), samplesFor(t, 20)); err != nil {
+		t.Fatal(err) // quorum met by the two healthy replicas; the hung push runs on
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := rt.WaitContext(ctx)
+	if d := time.Since(start); d > 500*time.Millisecond {
+		t.Errorf("WaitContext returned after %v, want about its 50ms context", d)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want the context's deadline", err)
+	}
+	if err := rt.WaitContext(context.Background()); err != nil {
+		t.Errorf("WaitContext with no deadline = %v, want nil once the push timed out", err)
 	}
 }
