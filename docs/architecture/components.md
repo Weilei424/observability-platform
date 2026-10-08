@@ -80,9 +80,9 @@ over `POST /internal/v1/metrics/push` or `/logs/push`
 | Outcome | Status |
 |---|---|
 | every group answered `204` | `204` |
-| a transport error, a deadline, or a `5xx` | `503` `{"error":"ingester unavailable"}` |
+| a transport error, a deadline, or a `5xx` | `503` `{"error":"write quorum not met: <k> of <n> series could not reach 1 of 1 ingesters"}` (`streams` on the Loki route) |
 | a `4xx` from an ingester | `500` `{"error":"internal error"}`, logged at ERROR: the gateway validated the body, so the two disagree about the protocol |
-| the client went away | `499`, and outstanding sends are canceled |
+| the client went away | `499`; sends already started run on, detached from the request, each bounded by `OBS_INGESTER_TIMEOUT` |
 
 When groups differ, `500` outranks `503`, which outranks `499`. A `503` can
 leave some groups written. Retrying the whole batch is safe: a metrics retry
