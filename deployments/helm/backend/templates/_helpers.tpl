@@ -109,6 +109,23 @@ stops reading it).
 {{- end -}}
 
 {{/*
+backend.querierReplicationFactor: split.querier.replicationFactor, or
+split.replicationFactor when unset or null (--set ...=null drops it on a
+--reuse-values upgrade). It differs from the gateway's only while an
+RF change is staged: raising one, the gateway goes first; lowering one, the
+querier goes first, so the querier's quorum never exceeds the gateway's.
+*/}}
+{{- define "backend.querierReplicationFactor" -}}
+{{- $q := .Values.split.querier -}}
+{{- if and (hasKey $q "replicationFactor") (not (kindIs "invalid" $q.replicationFactor)) -}}{{ int $q.replicationFactor }}{{- else -}}{{ int .Values.split.replicationFactor }}{{- end -}}
+{{- end -}}
+
+{{/* backend.quorum: a write's quorum at replication factor rf, rf/2+1, as config.Quorum computes it. */}}
+{{- define "backend.quorum" -}}
+{{- add (div (int .) 2) 1 -}}
+{{- end -}}
+
+{{/*
 backend.splitConfigMap: one split component's ConfigMap, called as (list $root
 component). split-configmaps.yaml renders all five from it, and each
 workload's checksum/config hashes only its own, so a change to one
@@ -139,8 +156,10 @@ data:
   OBS_{{ upper $peer }}_URL: {{ include "backend.peerURL" (list $root $peer) | quote }}
   {{- end }}
   {{- end }}
-  {{- if or (eq $component "gateway") (eq $component "querier") }}
+  {{- if eq $component "gateway" }}
   OBS_REPLICATION_FACTOR: {{ $root.Values.split.replicationFactor | int | toString | quote }}
+  {{- else if eq $component "querier" }}
+  OBS_REPLICATION_FACTOR: {{ include "backend.querierReplicationFactor" $root | quote }}
   {{- end }}
   {{- range $key, $value := $root.Values.config }}
   {{ $key }}: {{ $value | quote }}
@@ -154,6 +173,15 @@ pods loaded, which the staging check in split-configmaps.yaml compares against.
 */}}
 {{- define "backend.ingesterCountAnnotation" -}}
 observability-platform.dev/ingester-count
+{{- end -}}
+
+{{/*
+backend.replicationFactorAnnotation: the pod-template annotation recording the
+replication factor a gateway or querier pod loaded, which the staging check
+compares against the same way.
+*/}}
+{{- define "backend.replicationFactorAnnotation" -}}
+observability-platform.dev/replication-factor
 {{- end -}}
 
 {{/*
@@ -174,12 +202,24 @@ Deployment is still rolling out, because its old pods may still hold an older
 list. A release whose templates predate the annotation falls back to its
 ConfigMaps. split.ingester.previous stands in for the live counts only where
 there is no live release to look up (helm template); a real upgrade refuses it.
+
+A replication factor change is staged the same way (spec §5.3): a read skips up
+to quorum-1 ingesters, so it stays complete only while the querier's quorum is
+at most the gateway's. Each pod template records its RF too
+(backend.replicationFactorAnnotation), and the check refuses a new gateway
+quorum below the running querier's and a new querier quorum above the running
+gateway's, so an RF rises gateway first and falls querier first. An RF change
+counts as a ring change for the rollout rule. A release whose templates predate
+the RF annotation skips the RF part, and split.ingester.previous carries no RF:
+a preview checks the ingester counts only.
 */}}
 {{- define "backend.ringStagingCheck" -}}
 {{- $root := index . 0 -}}
 {{- $live := index . 1 -}}
 {{- $replicas := int $root.Values.split.ingester.replicas -}}
 {{- $writeCount := int (include "backend.ingesterWriteCount" $root) -}}
+{{- $gwRF := int $root.Values.split.replicationFactor -}}
+{{- $qRF := int (include "backend.querierReplicationFactor" $root) -}}
 {{- $gwDep := $live.gateway -}}
 {{- $qDep := $live.querier -}}
 {{- $prev := dict -}}
@@ -197,7 +237,14 @@ there is no live release to look up (helm template); a real upgrade refuses it.
 {{- else if and $gw $q $gw.data $q.data $gw.data.OBS_INGESTER_URL $q.data.OBS_INGESTER_URL -}}
 {{- $prev = dict "replicas" (len (splitList "," $q.data.OBS_INGESTER_URL)) "writeReplicas" (len (splitList "," $gw.data.OBS_INGESTER_URL)) -}}
 {{- end -}}
-{{- if and $prev (or (ne $writeCount (int $prev.writeReplicas)) (ne $replicas (int $prev.replicas))) -}}
+{{- $rfKey := include "backend.replicationFactorAnnotation" $root -}}
+{{- $liveGwRF := dig "spec" "template" "metadata" "annotations" $rfKey "" $gwDep -}}
+{{- $liveQRF := dig "spec" "template" "metadata" "annotations" $rfKey "" $qDep -}}
+{{- $rfChanged := false -}}
+{{- if and $liveGwRF $liveQRF -}}
+{{- $rfChanged = or (ne $gwRF (int $liveGwRF)) (ne $qRF (int $liveQRF)) -}}
+{{- end -}}
+{{- if or $rfChanged (and $prev (or (ne $writeCount (int $prev.writeReplicas)) (ne $replicas (int $prev.replicas)))) -}}
 {{- range $dep := list $gwDep $qDep -}}
 {{- $want := int (dig "spec" "replicas" 1 $dep) -}}
 {{- $generation := int (dig "metadata" "generation" 0 $dep) -}}
@@ -206,8 +253,20 @@ there is no live release to look up (helm template); a real upgrade refuses it.
 {{- $updated := int (dig "status" "updatedReplicas" 0 $dep) -}}
 {{- $available := int (dig "status" "availableReplicas" 0 $dep) -}}
 {{- if or (lt $observed $generation) (ne $updated $want) (ne $total $updated) (lt $available $updated) -}}
-{{- fail (printf "ring change refused: deployment/%s has not finished rolling out (%d of %d replicas updated, %d running, %d available), so its old pods may still hold an older ingester list. Wait for `kubectl rollout status deployment/%s` to succeed, or helm rollback, then retry" $dep.metadata.name $updated $want $total $available $dep.metadata.name) -}}
+{{- fail (printf "ring change refused: deployment/%s has not finished rolling out (%d of %d replicas updated, %d running, %d available), so its old pods may still hold an older ingester list or replication factor. Wait for `kubectl rollout status deployment/%s` to succeed, or helm rollback, then retry" $dep.metadata.name $updated $want $total $available $dep.metadata.name) -}}
 {{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if and $liveGwRF $liveQRF -}}
+{{- $gwQuorum := int (include "backend.quorum" $gwRF) -}}
+{{- $qQuorum := int (include "backend.quorum" $qRF) -}}
+{{- $liveGwQuorum := int (include "backend.quorum" (int $liveGwRF)) -}}
+{{- $liveQQuorum := int (include "backend.quorum" (int $liveQRF)) -}}
+{{- if lt $gwQuorum $liveQQuorum -}}
+{{- fail (printf "unstaged replication factor change: the gateway would write at quorum %d (split.replicationFactor=%d) while the running querier reads at quorum %d (RF %d), so a read could skip every ingester holding a write. Lower the RF querier first: set split.querier.replicationFactor=%d with split.replicationFactor=%d, and once that has rolled out, lower split.replicationFactor" $gwQuorum $gwRF $liveQQuorum (int $liveQRF) $qRF (int $liveGwRF)) -}}
+{{- end -}}
+{{- if gt $qQuorum $liveGwQuorum -}}
+{{- fail (printf "unstaged replication factor change: the querier would read at quorum %d (split.querier.replicationFactor=%d) while the running gateway writes at quorum %d (RF %d), so a read could skip every ingester holding a write. Raise the RF gateway first: set split.replicationFactor=%d with split.querier.replicationFactor=%d, and raise the querier only once that has rolled out and the ingesters' heads have flushed (the maintenance flush interval, or a drain)" $qQuorum $qRF $liveGwQuorum (int $liveGwRF) $gwRF (int $liveQRF)) -}}
 {{- end -}}
 {{- end -}}
 {{- else -}}
