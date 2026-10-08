@@ -12,6 +12,16 @@
 # start with its peers down (tests/e2e/compose_split_test.go pins that).
 name: observability-platform-split
 
+# The ring settings the gateway and querier must share: the gateway writes where
+# the querier reads (spec §7), so the member list, replication factor and
+# per-ingester timeout live in one place and cannot drift. RF=3 on three
+# ingesters puts every key on every ingester; quorum is 2, so one ingester down
+# is survivable and two down is not.
+x-ring-env: &ring-env
+  OBS_INGESTER_URL: http://ingester-1:8080,http://ingester-2:8080,http://ingester-3:8080
+  OBS_REPLICATION_FACTOR: "3"
+  OBS_INGESTER_TIMEOUT: "10s"
+
 x-ingester: &ingester
   restart: unless-stopped
   # Docker's default stop_grace_period is 10s: SIGTERM, then SIGKILL if the
@@ -41,8 +51,7 @@ services:
     environment:
       OBS_TARGET: gateway
       OBS_LOG_LEVEL: info
-      # The ring's members. Both lists must match: the gateway writes where the querier reads (spec §7).
-      OBS_INGESTER_URL: http://ingester-1:8080,http://ingester-2:8080,http://ingester-3:8080
+      <<: *ring-env
       OBS_QUERIER_URL: http://querier:8080
     # Loopback only, as in docker-compose.yml. The gateway is the only component
     # published at all: the internal API on every other one stays on the
@@ -93,8 +102,7 @@ services:
     environment:
       OBS_TARGET: querier
       OBS_LOG_LEVEL: info
-      # The ring's members. Both lists must match: the gateway writes where the querier reads (spec §7).
-      OBS_INGESTER_URL: http://ingester-1:8080,http://ingester-2:8080,http://ingester-3:8080
+      <<: *ring-env
       OBS_STORE_URL: http://store:8080
     healthcheck:
       test: ["CMD", "/server", "-healthcheck"]
