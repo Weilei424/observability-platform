@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"sync"
 	"time"
 
@@ -41,7 +42,8 @@ type QuorumError struct {
 	Kind          string // "series" or "streams"
 	Failed, Total int    // keys that missed quorum, of all keys in the batch
 	Quorum, RF    int
-	Cause         error // the worst failure among the failed keys' replicas
+	Ingesters     []string // MemberLabel of each replica that failed a key that missed quorum, sorted
+	Cause         error    // the worst failure among the failed keys' replicas
 }
 
 func (e *QuorumError) Error() string {
@@ -77,6 +79,23 @@ func NewRouter(r *ring.Ring, opts RouterOptions) (*Router, error) {
 // Wait blocks until every push and batch observation started so far has
 // ended, including those still running after a batch was answered.
 func (rt *Router) Wait() { rt.wg.Wait() }
+
+// WaitContext is Wait bounded by ctx: it answers nil once every push and batch
+// observation has ended, or ctx's error if ctx ends first. The pushes it
+// stops waiting for still run, each bounded by the client timeout.
+func (rt *Router) WaitContext(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		rt.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("rpc: background replica pushes still running: %w", ctx.Err())
+	}
+}
 
 // MemberLabel is a member URL's host:port, the ingester label on gateway metrics.
 func MemberLabel(member string) string {
@@ -172,7 +191,8 @@ func replicate[T any](ctx context.Context, rt *Router, kind string, items []T, k
 		defer rt.wg.Done()
 		acks := make([]int, len(replicasOf))
 		fails := make([][]error, len(replicasOf))
-		pending := len(replicasOf) // keys still short of quorum acks
+		failedBy := make([][]string, len(replicasOf)) // the members behind fails
+		pending := len(replicasOf)                    // keys still short of quorum acks
 		anyFailure, answered := false, false
 		for range len(groups) {
 			r := <-results
@@ -182,6 +202,7 @@ func replicate[T any](ctx context.Context, rt *Router, kind string, items []T, k
 			for _, ki := range memberKeys[r.member] {
 				if r.err != nil {
 					fails[ki] = append(fails[ki], r.err)
+					failedBy[ki] = append(failedBy[ki], MemberLabel(r.member))
 					continue
 				}
 				if acks[ki]++; acks[ki] == need {
@@ -195,16 +216,20 @@ func replicate[T any](ctx context.Context, rt *Router, kind string, items []T, k
 		}
 		failed := 0
 		var causes []error
+		var culprits []string
 		for ki := range replicasOf {
 			if len(fails[ki]) > maxFail {
 				failed++
 				causes = append(causes, worst(fails[ki]))
+				culprits = append(culprits, failedBy[ki]...)
 			}
 		}
+		slices.Sort(culprits)
+		culprits = slices.Compact(culprits)
 		if !answered {
 			// Every push ended and some key is short of quorum, so it failed.
 			decided <- &QuorumError{Kind: kind, Failed: failed, Total: len(replicasOf),
-				Quorum: need, RF: rt.rf, Cause: worst(causes)}
+				Quorum: need, RF: rt.rf, Ingesters: culprits, Cause: worst(causes)}
 		}
 		if rt.opts.ObserveBatch != nil {
 			outcome := "full"
