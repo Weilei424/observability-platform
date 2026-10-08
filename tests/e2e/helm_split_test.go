@@ -730,3 +730,75 @@ func TestSplitReplicationFactorAboveWriteReplicasFails(t *testing.T) {
 		t.Fatalf("writeReplicas=2 with the default RF 3 rendered (err %v), want a failure naming split.replicationFactor\n%.300s", err, out)
 	}
 }
+
+// split.querier.replicationFactor stages an RF change: it overrides the
+// querier's RF alone, and each pod template records the RF its pods load,
+// which the staging check reads back on the next upgrade.
+func TestSplitQuerierReplicationFactorOverride(t *testing.T) {
+	helmAvailable(t)
+	const rfKey = "observability-platform.dev/replication-factor"
+	for _, tc := range []struct {
+		name          string
+		sets          []string
+		wantGW, wantQ string
+	}{
+		{"defaults to split.replicationFactor", []string{"split.replicationFactor=1"}, "1", "1"},
+		{"lower the querier first", []string{"split.querier.replicationFactor=1"}, "3", "1"},
+		// --set ...=null is how a --reuse-values upgrade drops the override.
+		{"null unsets the override", []string{"split.replicationFactor=2", "split.querier.replicationFactor=null"}, "2", "2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rf := map[string]string{}
+			annotated := map[string]string{}
+			for _, o := range renderSplit(t, tc.sets...) {
+				if o.Kind == "ConfigMap" && o.Data["OBS_TARGET"] != "" {
+					rf[o.Data["OBS_TARGET"]] = o.Data["OBS_REPLICATION_FACTOR"]
+				}
+				if o.Kind == "Deployment" {
+					annotated[splitNames[o.Metadata.Name]] = o.Spec.Template.Metadata.Annotations[rfKey]
+				}
+			}
+			for target, want := range map[string]string{"gateway": tc.wantGW, "querier": tc.wantQ} {
+				if rf[target] != want {
+					t.Errorf("%s OBS_REPLICATION_FACTOR = %q, want %q", target, rf[target], want)
+				}
+				if annotated[target] != want {
+					t.Errorf("%s pod template %s = %q, want %q", target, rfKey, annotated[target], want)
+				}
+			}
+			if got := annotated["compactor"]; got != "" {
+				t.Errorf("compactor pod template carries %s=%q, want none", rfKey, got)
+			}
+		})
+	}
+}
+
+// A querier whose quorum exceeds the gateway's would skip more ingesters on a
+// read than a write's acknowledgements cover, and could answer an incomplete
+// 200. The render refuses it whatever the live release runs.
+func TestSplitQuerierQuorumAboveGatewayQuorumFails(t *testing.T) {
+	helmAvailable(t)
+	for _, tc := range []struct {
+		sets []string
+		want string
+	}{
+		{[]string{"split.replicationFactor=1", "split.querier.replicationFactor=3"}, "quorum"},
+		{[]string{"split.querier.replicationFactor=4"}, "split.querier.replicationFactor"},
+		// The schema refuses it; Helm 3 and 4 spell the path differently.
+		{[]string{"split.querier.replicationFactor=0"}, "replicationFactor"},
+	} {
+		args := []string{"template", "backend", backendChart, "--set", "topology=split"}
+		for _, s := range tc.sets {
+			args = append(args, "--set", s)
+		}
+		out, err := exec.Command("helm", args...).CombinedOutput()
+		if err == nil || !strings.Contains(string(out), tc.want) {
+			t.Errorf("%v rendered (err %v), want a failure naming %q\n%.400s", tc.sets, err, tc.want, out)
+		}
+	}
+	// Equal quorums are safe: RF 3 and RF 2 both need 2.
+	if out, err := exec.Command("helm", "template", "backend", backendChart, "--set", "topology=split",
+		"--set", "split.replicationFactor=2", "--set", "split.querier.replicationFactor=3").CombinedOutput(); err != nil {
+		t.Errorf("gateway RF 2 with querier RF 3 (quorum 2 each) failed: %v\n%.400s", err, out)
+	}
+}
