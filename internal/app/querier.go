@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"log/slog"
 
 	"github.com/masonwheeler/observability-platform/internal/api"
@@ -22,10 +23,20 @@ func buildQuerier(cfg *config.Config, log *slog.Logger) (*App, error) {
 		mainLog.Error("failed to build the ingester ring", slog.String("error", err.Error()))
 		return nil, err
 	}
+	rf := max(cfg.ReplicationFactor, 1)
+	timeout := cfg.IngesterTimeout
+	if timeout <= 0 {
+		timeout = config.DefaultIngesterTimeout
+	}
+	members := r.Members()
+	labels := make([]string, len(members))
+	for i, m := range members {
+		labels[i] = rpc.MemberLabel(m)
+	}
 	var metricHeads []metrics.Source
 	var logHeads []logs.Source
-	for _, m := range r.Members() {
-		c, err := rpc.NewClient("ingester "+rpc.MemberLabel(m), m)
+	for i, m := range members {
+		c, err := rpc.NewClient("ingester "+labels[i], m, rpc.WithRequestTimeout(timeout))
 		if err != nil {
 			mainLog.Error("failed to build ingester client", slog.String("error", err.Error()))
 			return nil, err
@@ -39,14 +50,26 @@ func buildQuerier(cfg *config.Config, log *slog.Logger) (*App, error) {
 		return nil, err
 	}
 	reg, inst := observability.NewRegistry(observability.RegistryOptions{Omit: observability.AllGroups, Logger: log})
-	observability.NewRingMetrics().Register(reg, r.Members(), false)
-	logRing(mainLog, r, max(cfg.ReplicationFactor, 1))
+	rm := observability.NewRingMetrics()
+	rm.Register(reg, labels, false)
+	logRing(mainLog, r, rf)
+	queryLog := observability.Component(log, "querier")
+	skippable := func(err error) bool { return errors.Is(err, rpc.ErrUnavailable) }
+	observe := func(i int, err error) { rm.IngesterReads.WithLabelValues(labels[i], rpc.OutcomeOf(err)).Inc() }
+	onSkip := func(skipped []int) {
+		names := make([]string, len(skipped))
+		for j, i := range skipped {
+			names[j] = labels[i]
+		}
+		queryLog.Warn("read answered by replication", slog.Any("skipped", names))
+	}
+	tolerate := config.Quorum(rf) - 1
 	srv := api.New(api.Deps{
 		Config:   cfg,
 		Logger:   log,
 		Routes:   api.RoutesRead,
-		Engine:   metrics.NewQueryEngineFromSource(metrics.Merge(metrics.MergeHeads(metricHeads...), rpc.NewMetricsSource(store))),
-		LogQuery: logs.NewQueryEngineFromSource(logs.Merge(logs.MergeHeads(logHeads...), rpc.NewLogsSource(store))),
+		Engine:   metrics.NewQueryEngineFromSource(metrics.Merge(metrics.MergeHeadsWith(metrics.HeadsOptions{Tolerate: tolerate, Skippable: skippable, Observe: observe, OnSkip: onSkip}, metricHeads...), rpc.NewMetricsSource(store))),
+		LogQuery: logs.NewQueryEngineFromSource(logs.Merge(logs.MergeHeadsWith(logs.HeadsOptions{Tolerate: tolerate, Skippable: skippable, Observe: observe, OnSkip: onSkip}, logHeads...), rpc.NewLogsSource(store))),
 		Registry: reg,
 		HTTP:     inst.HTTP,
 		Ready:    alwaysReady,
