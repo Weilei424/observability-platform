@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -79,5 +81,70 @@ func TestQuerierToleratesIngestersUpToQuorum(t *testing.T) {
 	}
 	if code, _ := labelsStatus(t, 1, up1, up2, down1); code != http.StatusServiceUnavailable {
 		t.Errorf("one down, rf 1: status %d, want 503", code)
+	}
+}
+
+// readCounters scrapes the querier's obs_querier_ingester_reads_total, keyed
+// "<ingester> <outcome>".
+func readCounters(t *testing.T, h http.Handler) map[string]string {
+	t.Helper()
+	rec := do(h, http.MethodGet, "/metrics", "")
+	re := regexp.MustCompile(`(?m)^obs_querier_ingester_reads_total\{ingester="([^"]+)",outcome="([^"]+)"\} (\S+)$`)
+	out := map[string]string{}
+	for _, m := range re.FindAllStringSubmatch(rec.Body.String(), -1) {
+		out[m[1]+" "+m[2]] = m[3]
+	}
+	if len(out) == 0 {
+		t.Fatalf("no obs_querier_ingester_reads_total in /metrics:\n%s", rec.Body)
+	}
+	return out
+}
+
+func hostOf(t *testing.T, raw string) string {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u.Host
+}
+
+// The read counter records each ingester's outcome: the down one as
+// unavailable, the others as ok. A read the caller cancels is not an ingester
+// failure and is not counted at all.
+func TestQuerierCountsIngesterReadsButNotCancellations(t *testing.T) {
+	up1, up2, down := readsPeer(t), readsPeer(t), downPeer(t)
+	cfg := testConfig(t, config.TargetQuerier)
+	cfg.IngesterURLs = []string{up1, up2, down}
+	cfg.StoreURL = readsPeer(t)
+	cfg.ReplicationFactor = 3
+	a, err := app.Build(cfg, slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil)))
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if rec := do(a.Handler, http.MethodGet, "/api/v1/labels", ""); rec.Code != http.StatusOK {
+		t.Fatalf("labels: %d %s", rec.Code, rec.Body)
+	}
+	got := readCounters(t, a.Handler)
+	for _, want := range []struct {
+		peer, outcome, value string
+	}{
+		{up1, "ok", "1"}, {up2, "ok", "1"}, {down, "unavailable", "1"},
+		{up1, "error", "0"}, {up2, "error", "0"}, {down, "error", "0"}, {down, "ok", "0"},
+	} {
+		if key := hostOf(t, want.peer) + " " + want.outcome; got[key] != want.value {
+			t.Errorf("reads{%s} = %q, want %s (all: %v)", key, got[key], want.value, got)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/labels", nil).WithContext(ctx)
+	a.Handler.ServeHTTP(httptest.NewRecorder(), req)
+	after := readCounters(t, a.Handler)
+	for key, v := range got {
+		if after[key] != v {
+			t.Errorf("a cancelled read moved reads{%s} from %s to %s", key, v, after[key])
+		}
 	}
 }
