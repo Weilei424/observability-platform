@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/masonwheeler/observability-platform/internal/observability"
+	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 )
 
@@ -286,6 +287,17 @@ func registeredMetricNames(t *testing.T) map[string]bool {
 	}
 	names := make(map[string]bool, len(families))
 	for _, f := range families {
+		addQueryableNames(names, f.GetName(), f.GetType())
+	}
+	// The querier registers its own ring metrics (the ingester-read counter) in
+	// its own process; a separate registry stands in for it.
+	qreg := prometheus.NewRegistry()
+	observability.NewRingMetrics().Register(qreg, []string{"http://seed:8080"}, false)
+	qfamilies, err := qreg.Gather()
+	if err != nil {
+		t.Fatalf("Gather (querier): %v", err)
+	}
+	for _, f := range qfamilies {
 		addQueryableNames(names, f.GetName(), f.GetType())
 	}
 	return names
