@@ -90,11 +90,22 @@ func TestRingStagingReadsTheRunningRelease(t *testing.T) {
 	const gw, q = "observability-backend", "observability-querier"
 	rolling := rollout{spec: 2, generation: 4, observed: 4, total: 3, updated: 1, available: 2}
 	unobserved := rollout{spec: 2, generation: 5, observed: 4, total: 2, updated: 2, available: 2}
+	// live is a release running the chart's default RF 3, so these ring cases
+	// test the ingester counts alone. A count below 0 leaves out the pod
+	// annotations, as a release from before them has; its ConfigMaps still
+	// carry the RF, which the check falls back to.
 	live := func(gwCount, qCount int, gwR, qR rollout) map[string]any {
-		return map[string]any{
-			"gateway": liveDeployment(gw, gwCount, gwR), "querier": liveDeployment(q, qCount, qR),
-			"gatewayConfig": liveConfigMap(3), "querierConfig": liveConfigMap(3),
+		g, qq := liveDeployment(gw, gwCount, gwR), liveDeployment(q, qCount, qR)
+		if gwCount >= 0 {
+			withRF(g, 3)
 		}
+		if qCount >= 0 {
+			withRF(qq, 3)
+		}
+		gc, qc := liveConfigMap(3), liveConfigMap(3)
+		gc["data"].(map[string]any)["OBS_REPLICATION_FACTOR"] = "3"
+		qc["data"].(map[string]any)["OBS_REPLICATION_FACTOR"] = "3"
+		return map[string]any{"gateway": g, "querier": qq, "gatewayConfig": gc, "querierConfig": qc}
 	}
 	for _, tc := range []struct {
 		name               string
@@ -175,7 +186,14 @@ func TestRingStagingOrdersReplicationFactorChanges(t *testing.T) {
 		{"lower: gateway first", live(3, 3, rolledOut), []string{"split.replicationFactor=1", "split.querier.replicationFactor=3"}, "quorum"},
 		{"an RF change while the querier still rolls", live(1, 1, rolling), []string{"split.replicationFactor=3", "split.querier.replicationFactor=1"}, "deployment/observability-querier has not finished rolling out"},
 		{"no RF change while the querier still rolls", live(3, 3, rolling), nil, ""},
-		{"a release without the RF annotation skips the RF check", live(-1, -1, rolledOut), []string{"split.replicationFactor=1"}, ""},
+		// A Phase 6.2 release carries no RF annotation and no OBS_REPLICATION_FACTOR:
+		// it ran RF=1, and its heads hold writes on one ingester only. Upgrading
+		// it straight to the chart's RF=3 default would let the new querier skip
+		// the one ingester holding such a write.
+		{"6.2 release: staying at RF=1", live(-1, -1, rolledOut), []string{"split.replicationFactor=1"}, ""},
+		{"6.2 release: the RF=3 default in one step", live(-1, -1, rolledOut), nil, "unstaged replication factor change"},
+		{"6.2 release: gateway first", live(-1, -1, rolledOut), []string{"split.replicationFactor=3", "split.querier.replicationFactor=1"}, ""},
+		{"6.2 release: an RF change waits out a querier rollout", live(-1, -1, rolling), []string{"split.replicationFactor=3", "split.querier.replicationFactor=1"}, "has not finished rolling out"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := renderWithLive(t, tc.live, tc.set...)
