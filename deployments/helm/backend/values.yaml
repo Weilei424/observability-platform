@@ -69,8 +69,9 @@ split:
     # Unset, the querier runs split.replicationFactor. Set it only to stage an
     # RF change, so the querier's quorum never exceeds the gateway's: raising,
     # set the new split.replicationFactor with this at the old value, then
-    # remove it (--set split.querier.replicationFactor=null) once the
-    # ingesters' heads have flushed; lowering, set this to the new value first,
+    # remove it (--set split.querier.replicationFactor=null) once every
+    # ingester has been drained (POST /internal/v1/drain answers 200) and
+    # restarted, one at a time; lowering, set this to the new value first,
     # then lower split.replicationFactor and remove it.
     # replicationFactor: 3
     resources:
