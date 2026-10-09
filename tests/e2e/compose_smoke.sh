@@ -772,34 +772,38 @@ scrape_ok() {
 # which is why the panel queries below exist.
 wait_for "Prometheus reports every scrape target up" 90 scrape_ok
 
-# Spec 10.1: at RF=3 on three ingesters every sample is written to every
-# ingester, so their counters must agree. The ingester image is distroless (no
-# shell or wget), so read each one's counter through the self-observability
-# Prometheus that scrapes it. Polled because the first scrape after a write can
-# lag by one interval, and the three scrapes are not simultaneous (each value
-# can be up to a 15s scrape interval stale while the producers keep writing;
-# a run measured 2328/2532/2729): the 80% tolerance absorbs that skew, and
-# still tells replication (all equal) from a ring split (each about a third).
+# Spec 10.1: at RF=3 on three ingesters every write lands on every ingester.
+# Checked exactly, not through Prometheus counters (their scrapes are
+# staggered while the producers keep writing, so counters only ever agree
+# approximately): one controlled batch of marker series goes in through the
+# gateway, then each ingester's own head is asked for them over the internal
+# select route. Every ingester must hold every marker. The ingester image is
+# distroless, so the request is made from the Prometheus container (busybox
+# wget) on the Compose network. The 204 comes at quorum (2 of 3); the third
+# replica's push may land a moment later, hence the short poll.
 if [ "$TOPOLOGY" = split ]; then
-    ingester_ingested() { # <service> -> sample count on stdout
-        curl -s "${CURL_TIMEOUTS[@]}" -G "$PROMETHEUS/api/v1/query" \
-            --data-urlencode "query=sum(obs_samples_ingested_total{instance=\"$1:8080\"})" 2>/dev/null \
-            | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null
+    REPL_N=20
+    REPL_MS=$(( $(date +%s) * 1000 ))
+    REPL_METRICS=""
+    for i in $(seq 0 $((REPL_N - 1))); do
+        REPL_METRICS="$REPL_METRICS{\"name\":\"repl_marker\",\"labels\":{\"run_id\":\"$RUN_ID\",\"i\":\"$i\"},\"timestamp_ms\":$REPL_MS,\"value\":$i},"
+    done
+    CODE=$(curl -s "${CURL_TIMEOUTS[@]}" -o /dev/null -w '%{http_code}' -X POST "$BACKEND/api/v1/ingest/metrics" \
+        -H "Content-Type: application/json" --data "{\"metrics\":[${REPL_METRICS%,}]}" 2>/dev/null || echo 000)
+    [ "$CODE" = 204 ] || log_fail "the replication marker batch answered $CODE, want 204"
+    ingester_holds() { # <service> -> how many of this run's markers its head holds
+        dc exec -T prometheus wget -qO- --header 'Content-Type: application/json' \
+            --post-data "{\"matchers\":[{\"name\":\"__name__\",\"value\":\"repl_marker\"},{\"name\":\"run_id\",\"value\":\"$RUN_ID\"}],\"min_ms\":$((REPL_MS - 1)),\"max_ms\":$((REPL_MS + 1))}" \
+            "http://$1:8080/internal/v1/metrics/select" 2>/dev/null | jq '.series | length' 2>/dev/null
     }
-    replicated_everywhere() { # sets COUNTS "a b c"; true when each is >0 and >=80% of the largest
-        local a b c
-        a="$(ingester_ingested ingester-1)"; b="$(ingester_ingested ingester-2)"; c="$(ingester_ingested ingester-3)"
-        COUNTS="${a:-0} ${b:-0} ${c:-0}"
-        awk -v a="${a:-0}" -v b="${b:-0}" -v c="${c:-0}" 'BEGIN {
-            m = a; if (b > m) m = b; if (c > m) m = c
-            exit !(m > 0 && a >= 0.8 * m && b >= 0.8 * m && c >= 0.8 * m)
-        }'
-    }
-    COUNTS=""
-    if wait_for "every ingester holds every sample at RF=3" 60 replicated_everywhere; then :
-    else
-        echo "    per-ingester obs_samples_ingested_total (1 2 3): $COUNTS"
-    fi
+    for svc in ingester-1 ingester-2 ingester-3; do
+        HELD=""
+        holds_all() { HELD="$(ingester_holds "$svc")"; [ "${HELD:-0}" = "$REPL_N" ]; }
+        if wait_for "$svc holds all $REPL_N replicated markers at RF=3" 15 holds_all; then :
+        else
+            echo "    $svc holds ${HELD:-0} of $REPL_N markers"
+        fi
+    done
 fi
 
 # The real assertion: samples actually reached Prometheus and Grafana can read
@@ -1106,6 +1110,13 @@ if [ "$TOPOLOGY" = split ]; then
         log_pass "a write with two ingesters down answers 503 write quorum not met"
     else
         log_fail "a write with two ingesters down answered $CODE, want 503 with 'write quorum not met'; body: $(head -c 200 "$RING_BODY")"
+        # Seen once (2026-10-09, not reproduced on rerun or in 2000 in-process
+        # two-down writes): say which ingesters were really down and what the
+        # gateway's pushes got, so a recurrence explains itself.
+        echo "    ingester state at the failure:"
+        dc ps -a --format '      {{.Service}} {{.State}} {{.Status}}' ingester-1 ingester-2 ingester-3 2>&1
+        echo "    gateway quorum / push lines from the last 30s:"
+        dc logs --since 30s gateway 2>&1 | grep -E 'quorum|ingest/metrics' | tail -10 | cut -c1-300
     fi
     CODE=$(ring_read_status)
     if [ "$CODE" = 503 ]; then
