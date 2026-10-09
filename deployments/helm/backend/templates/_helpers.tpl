@@ -238,12 +238,17 @@ a preview checks the ingester counts only.
 {{- $prev = dict "replicas" (len (splitList "," $q.data.OBS_INGESTER_URL)) "writeReplicas" (len (splitList "," $gw.data.OBS_INGESTER_URL)) -}}
 {{- end -}}
 {{- $rfKey := include "backend.replicationFactorAnnotation" $root -}}
+{{- /*
+The running RF: the pod-template annotation, else the live ConfigMap's
+OBS_REPLICATION_FACTOR, else 1 -- a release from before 6.3 has neither and
+ran RF=1, so its heads may hold writes on one ingester only and its RF change
+is staged like any other.
+*/}}
 {{- $liveGwRF := dig "spec" "template" "metadata" "annotations" $rfKey "" $gwDep -}}
+{{- if not $liveGwRF -}}{{- $liveGwRF = dig "data" "OBS_REPLICATION_FACTOR" "1" ($gw | default dict) -}}{{- end -}}
 {{- $liveQRF := dig "spec" "template" "metadata" "annotations" $rfKey "" $qDep -}}
-{{- $rfChanged := false -}}
-{{- if and $liveGwRF $liveQRF -}}
-{{- $rfChanged = or (ne $gwRF (int $liveGwRF)) (ne $qRF (int $liveQRF)) -}}
-{{- end -}}
+{{- if not $liveQRF -}}{{- $liveQRF = dig "data" "OBS_REPLICATION_FACTOR" "1" ($q | default dict) -}}{{- end -}}
+{{- $rfChanged := or (ne $gwRF (int $liveGwRF)) (ne $qRF (int $liveQRF)) -}}
 {{- if or $rfChanged (and $prev (or (ne $writeCount (int $prev.writeReplicas)) (ne $replicas (int $prev.replicas)))) -}}
 {{- range $dep := list $gwDep $qDep -}}
 {{- $want := int (dig "spec" "replicas" 1 $dep) -}}
@@ -257,7 +262,6 @@ a preview checks the ingester counts only.
 {{- end -}}
 {{- end -}}
 {{- end -}}
-{{- if and $liveGwRF $liveQRF -}}
 {{- $gwQuorum := int (include "backend.quorum" $gwRF) -}}
 {{- $qQuorum := int (include "backend.quorum" $qRF) -}}
 {{- $liveGwQuorum := int (include "backend.quorum" (int $liveGwRF)) -}}
@@ -267,7 +271,6 @@ a preview checks the ingester counts only.
 {{- end -}}
 {{- if gt $qQuorum $liveGwQuorum -}}
 {{- fail (printf "unstaged replication factor change: the querier would read at quorum %d (split.querier.replicationFactor=%d) while the running gateway writes at quorum %d (RF %d), so a read could skip every ingester holding a write. Raise the RF gateway first: set split.replicationFactor=%d with split.querier.replicationFactor=%d, and raise the querier only once that has rolled out and the ingesters' heads have flushed (the maintenance flush interval, or a drain)" $qQuorum $qRF $liveGwQuorum (int $liveGwRF) $gwRF (int $liveQRF)) -}}
-{{- end -}}
 {{- end -}}
 {{- else -}}
 {{- with $root.Values.split.ingester.previous -}}
