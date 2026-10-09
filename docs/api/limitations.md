@@ -144,7 +144,8 @@ These are properties of the whole system, not of the query languages.
   gateway quorum below the running querier's or a querier quorum above the
   running gateway's (read from each pod template's
   `observability-platform.dev/replication-factor` annotation; a release from
-  before it is not checked), or any RF change while either Deployment is still
+  before it is read from its ConfigMaps' `OBS_REPLICATION_FACTOR`, else as RF 1),
+  or any RF change while either Deployment is still
   rolling out. It cannot see the flush, so waiting for it is the operator's
   part, and `split.ingester.previous` previews carry no RF. In Compose the
   shared `x-ring-env` anchor is edited and the two services recreated one at a
