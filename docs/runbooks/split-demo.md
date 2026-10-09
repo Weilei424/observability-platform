@@ -79,8 +79,10 @@ With replication factor 3 on three ingesters, removing one first needs the
 factor lowered (the gateway and querier refuse a factor above their list) or a
 fourth ingester added. An RF change is staged like a membership change, so a
 read never skips more ingesters than a write's acknowledgements cover:
-**raise** it on the gateway first, and on the querier only once the heads have
-flushed (the maintenance flush interval, or a drain); **lower** it on the
+**raise** it on the gateway first, then drain every ingester, one at a time,
+restarting each after its `200`, and only then on the querier (a flush
+interval is not enough: it leaves open chunks and small log lines on their one
+ingester); **lower** it on the
 querier first, then on the gateway. See
 [Replication](../architecture/components.md#replication-63).
 
@@ -232,14 +234,21 @@ helm upgrade backend deployments/helm/backend -n obs --reuse-values \
   --set split.replicationFactor=2 --set split.querier.replicationFactor=null --wait
 ```
 
-Raise it gateway first, keeping the querier at the old factor, and let the
-heads flush (the maintenance flush interval, or a drain) before the querier
-follows — the chart cannot see the flush, so that wait is yours:
+Raise it gateway first, keeping the querier at the old factor, then drain and
+restart every ingester, one at a time, before the querier follows — the chart
+cannot see the drains, so they are yours:
 
 ```bash
 helm upgrade backend deployments/helm/backend -n obs --reuse-values \
   --set split.replicationFactor=3 --set split.querier.replicationFactor=2 --wait
-# wait for the heads to flush
+for i in 0 1 2; do   # every ingester, one at a time
+  kubectl port-forward -n obs pod/observability-ingester-$i 18080:8080 &
+  sleep 2
+  curl -s -X POST -w '\n%{http_code}\n' http://localhost:18080/internal/v1/drain   # repeat until 200
+  kill %1
+  kubectl delete pod -n obs observability-ingester-$i --wait=true   # a drained ingester takes writes again after a restart
+  kubectl rollout status statefulset/observability-ingester -n obs
+done
 helm upgrade backend deployments/helm/backend -n obs --reuse-values \
   --set split.querier.replicationFactor=null --wait
 ```
@@ -368,9 +377,10 @@ make smoke-compose-split
 The same Grafana-level checks as `make smoke-compose`, plus the split-only
 ones: every ingester's ingested counter above zero after seeding, a flushed
 marker read back by value after an ingester restarts, a block on the store,
-`target` on every component's logs, the replication check (every ingester's
-ingested counter within 80% of the largest, since at factor 3 each holds every
-sample), the ingester-outage drill (one ingester down: writes `204` and reads
+`target` on every component's logs, the replication check (a controlled batch
+of marker series, read back from each ingester's own head over the internal
+select route: every ingester must hold all of them, since at factor 3 each holds
+every write), the ingester-outage drill (one ingester down: writes `204` and reads
 complete `200`; two down: both `503`), and the store-outage drill above.
 
 ## Kubernetes
