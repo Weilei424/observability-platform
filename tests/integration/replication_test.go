@@ -181,6 +181,7 @@ func TestReplicationDuplicatesNeverChangeAnswers(t *testing.T) {
 	baseNs := base * 1_000_000
 
 	c.ingestRep(t, 5, base, 1)
+	c.ingestRep(t, 5, base+30_000, 31) // a second sample, so rate() has two points per series
 	for i := range 3 {
 		c.pushLog(t, "rep", baseNs+int64(i), fmt.Sprintf("rep line %d", i))
 	}
@@ -189,6 +190,12 @@ func TestReplicationDuplicatesNeverChangeAnswers(t *testing.T) {
 		t.Helper()
 		if v := c.instantExpr(t, "sum(rep_metric)", base); v != "5" {
 			t.Errorf("%s: sum = %q, want 5", label, v)
+		}
+		// rate() is (last - first) / window over each series' samples in the
+		// window: (31 - 1) / 60s = 0.5 per series, 2.5 for the five. A copy
+		// merged out of order, or counted twice, would change it.
+		if v := c.instantExpr(t, "sum(rate(rep_metric[1m]))", base+30_000); v != "2.5" {
+			t.Errorf("%s: sum(rate) = %q, want 2.5", label, v)
 		}
 		if n := c.instantSeriesCount(t, "rep_metric", base); n != 5 {
 			t.Errorf("%s: rep_metric returns %d series, want 5 (count() is unsupported, so series are counted directly)", label, n)
