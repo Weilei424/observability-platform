@@ -894,7 +894,7 @@ Spec: `docs/superpowers/specs/2026-10-06-phase-6.3-replication-design.md` · Pla
 - [x] Unit: the overwrite skew window across replicas is pinned and documented — `internal/metrics` `TestMergeHeadsOverwriteSkewWindow`; documented in `docs/api/limitations.md`
 - [x] 6.2 outcomes unchanged at RF=1 — the 6.2 router and in-process cluster tests keep their outcomes at the default RF=1 (the router tests' constructor changed)
 - [x] Verify: `make smoke-compose-split` 108/0 and `make smoke-compose` (all-in-one) 71/0, both on 2026-10-07
-- [ ] Verify: kind split in CI — closes in CI after a push (not run locally: cgroup v1 host)
+- [x] Verify: kind split in CI — job "Helm + Kubernetes E2E (kind, split)" passed on 2026-10-08 at `56fdc69` (https://github.com/Weilei424/observability-platform/actions/runs/37727955426/job/113150773268), including the replication check, reads during each ingester restart, and the RF staging refusal in `tests/e2e/kind_smoke.sh` (not run locally: cgroup v1 host)
 
 ### Phase 6.4 — Query Fanout and Merge
 - [ ] Implement metrics query fanout
