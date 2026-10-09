@@ -148,7 +148,7 @@ func TestRouterOutcomes(t *testing.T) {
 		want   string
 	}{
 		{"one unavailable", map[int]int{1: http.StatusServiceUnavailable}, func(e error) bool { return errors.Is(e, ErrUnavailable) }, "ErrUnavailable"},
-		{"protocol error beats unavailable", map[int]int{0: http.StatusBadRequest, 1: http.StatusServiceUnavailable},
+		{"protocol error", map[int]int{0: http.StatusBadRequest},
 			func(e error) bool { return e != nil && !errors.Is(e, ErrUnavailable) }, "a non-unavailable error"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -160,6 +160,9 @@ func TestRouterOutcomes(t *testing.T) {
 			if !tc.check(err) {
 				t.Fatalf("err = %v, want %s", err, tc.want)
 			}
+			rt.Wait() // the answer comes at the first failed key; the other pushes run on
+			mu.Lock()
+			defer mu.Unlock()
 			if outcomes["ok"] == 0 || outcomes["ok"]+outcomes["unavailable"]+outcomes["error"] != 3 {
 				t.Errorf("outcomes = %v, want one per ingester with at least one ok", outcomes)
 			}
@@ -421,5 +424,55 @@ func TestRouterWaitContextHonoursItsContext(t *testing.T) {
 	}
 	if err := rt.WaitContext(context.Background()); err != nil {
 		t.Errorf("WaitContext with no deadline = %v, want nil once the push timed out", err)
+	}
+}
+
+// Quorum impossible is answered at once, not after the replicas still
+// running end (spec §5.2): with two of three replicas refused and the third
+// hung, the write fails in milliseconds, not after the push timeout. The hung
+// push still ends in the background, bounded, and is counted.
+func TestRouterAnswersAtOnceWhenQuorumIsImpossible(t *testing.T) {
+	ings := startIngesters(t, 3, map[int]int{0: http.StatusServiceUnavailable, 1: http.StatusServiceUnavailable}, map[int]bool{2: true})
+	var mu sync.Mutex
+	var batches []string
+	outcomes := map[string]int{}
+	rt, _ := newTestRouterOpts(t, ings, RouterOptions{ReplicationFactor: 3, Timeout: 2 * time.Second,
+		ObserveMember: func(_, o string) { mu.Lock(); outcomes[o]++; mu.Unlock() },
+		ObserveBatch:  func(o string) { mu.Lock(); batches = append(batches, o); mu.Unlock() }})
+	start := time.Now()
+	err := rt.PushSamples(context.Background(), samplesFor(t, 10))
+	var qe *QuorumError
+	if !errors.As(err, &qe) || !errors.Is(err, ErrUnavailable) || qe.Failed != 10 {
+		t.Fatalf("err = %v, want a QuorumError over ErrUnavailable for all 10 series", err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Errorf("answered after %v; quorum was impossible once two replicas refused, long before the 2s push timeout", d)
+	}
+	rt.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	if outcomes["unavailable"] != 3 || !slices.Equal(batches, []string{"failed"}) {
+		t.Errorf("member outcomes %v, batch %v; want 3 unavailable (the hung one after its timeout) and [failed]", outcomes, batches)
+	}
+}
+
+// A protocol error that breaks a key's quorum answers 500 even when the
+// outage on the same key arrived first: the key fails at its second failure,
+// and the answer is the worse of the two.
+func TestRouterProtocolErrorWinsWithinAFailedKey(t *testing.T) {
+	ings := startIngesters(t, 3, map[int]int{0: http.StatusServiceUnavailable}, nil)
+	slow := chi.NewRouter()
+	slow.HandleFunc("/*", func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(100 * time.Millisecond) // arrives after the outage
+		w.WriteHeader(http.StatusBadRequest)
+	})
+	srv := httptest.NewServer(slow)
+	t.Cleanup(srv.Close)
+	ings[1].url = srv.URL
+	rt, _ := newTestRouter(t, ings, 3, nil)
+	err := rt.PushSamples(context.Background(), samplesFor(t, 5))
+	var qe *QuorumError
+	if !errors.As(err, &qe) || errors.Is(err, ErrUnavailable) {
+		t.Fatalf("err = %v, want a QuorumError whose cause is the protocol error", err)
 	}
 }
