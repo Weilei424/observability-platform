@@ -210,8 +210,10 @@ at most the gateway's. Each pod template records its RF too
 quorum below the running querier's and a new querier quorum above the running
 gateway's, so an RF rises gateway first and falls querier first. An RF change
 counts as a ring change for the rollout rule. A release whose templates predate
-the RF annotation skips the RF part, and split.ingester.previous carries no RF:
-a preview checks the ingester counts only.
+the RF annotation is read from its ConfigMaps' OBS_REPLICATION_FACTOR, else as
+RF 1 (a Phase 6.2 release), so its upgrade to a higher RF is staged too.
+split.ingester.previous carries no RF: a preview checks the ingester counts
+only.
 */}}
 {{- define "backend.ringStagingCheck" -}}
 {{- $root := index . 0 -}}
