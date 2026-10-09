@@ -327,3 +327,53 @@ func TestRingStagesRollOnlyTheComponentWhoseListChanges(t *testing.T) {
 		prev = cur
 	}
 }
+
+// A release is live when anything of it survives, not only both Deployments:
+// a recovery after a deleted gateway or querier, or a reinstall over kept
+// ingester PVCs, still has heads that may hold RF=1 writes. Every such render
+// stages the RF upgrade; only a render with nothing live is a fresh install.
+func TestRingStagingTreatsAPartialReleaseAsLive(t *testing.T) {
+	helmAvailable(t)
+	const q = "observability-querier"
+	cm := func(rf int) map[string]any {
+		c := liveConfigMap(3)
+		if rf > 0 {
+			c["data"].(map[string]any)["OBS_REPLICATION_FACTOR"] = strconv.Itoa(rf)
+		}
+		return c
+	}
+	stagedRaise := []string{"split.replicationFactor=3", "split.querier.replicationFactor=1"}
+	for _, tc := range []struct {
+		name               string
+		live               map[string]any
+		set                []string
+		wantFailureMention string
+	}{
+		{"fresh install", map[string]any{}, nil, ""},
+		{"6.2 release without its gateway Deployment", map[string]any{
+			"querier": liveDeployment(q, 3, rolledOut), "gatewayConfig": cm(0), "querierConfig": cm(0),
+		}, nil, "unstaged replication factor change"},
+		{"6.2 release without its gateway Deployment, staged", map[string]any{
+			"querier": liveDeployment(q, 3, rolledOut), "gatewayConfig": cm(0), "querierConfig": cm(0),
+		}, stagedRaise, ""},
+		{"6.2 release with only its ConfigMaps", map[string]any{"gatewayConfig": cm(0), "querierConfig": cm(0)}, nil, "unstaged replication factor change"},
+		{"only the ingester StatefulSet", map[string]any{"ingester": map[string]any{"metadata": map[string]any{"name": "observability-ingester"}}}, nil, "unstaged replication factor change"},
+		{"only kept ingester PVCs", map[string]any{"ingesterData": true}, nil, "unstaged replication factor change"},
+		{"only kept ingester PVCs, staged", map[string]any{"ingesterData": true}, stagedRaise, ""},
+		{"6.3 release without its gateway Deployment", map[string]any{
+			"querier": withRF(liveDeployment(q, 3, rolledOut), 3), "gatewayConfig": cm(3), "querierConfig": cm(3),
+		}, nil, ""},
+		{"a preview of a partial release", map[string]any{"gatewayConfig": cm(3), "querierConfig": cm(3)},
+			[]string{"split.ingester.previous.replicas=3", "split.ingester.previous.writeReplicas=3"}, "previews only"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := renderWithLive(t, tc.live, tc.set...)
+			switch {
+			case tc.wantFailureMention == "" && err != nil:
+				t.Errorf("render failed, want success: %v\n%.600s", err, out)
+			case tc.wantFailureMention != "" && (err == nil || !strings.Contains(out, tc.wantFailureMention)):
+				t.Errorf("rendered (err %v), want a failure naming %q\n%.600s", err, tc.wantFailureMention, out)
+			}
+		})
+	}
+}
