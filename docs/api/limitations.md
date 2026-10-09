@@ -134,9 +134,14 @@ These are properties of the whole system, not of the query languages.
   one skips more ingesters than a write's acknowledgements cover, and can
   answer an incomplete `200`. They differ only while a change is staged.
 - **An RF change is staged: raise it gateway first, lower it querier first.**
-  Raise RF on the gateway, wait for the heads to flush (the maintenance flush
-  interval, or a drain) — data still in them was acknowledged under the old,
-  smaller quorum — then raise it on the querier. Lower it on the querier
+  Raise RF on the gateway, then drain every ingester, one at a time
+  (`POST /internal/v1/drain` until it answers `200`, then restart it: a drained
+  ingester refuses writes until it restarts), and only then raise it on the
+  querier. Waiting is not enough: data still in the heads was acknowledged under
+  the old, smaller quorum, and the maintenance flush takes sealed chunks only and
+  never the logs head, so a quiet series or a small log line can stay on its one
+  ingester indefinitely (`TestRaisingRFNeedsADrainOfEveryIngester`). With the
+  gateway at RF=3, one ingester draining still leaves write quorum. Lower it on the querier
   first, then on the gateway. Either way the querier's quorum never exceeds the
   gateway's while an old pod of one runs beside a new pod of the other. Helm
   stages it with `split.querier.replicationFactor` and refuses the wrong order:
@@ -144,7 +149,10 @@ These are properties of the whole system, not of the query languages.
   gateway quorum below the running querier's or a querier quorum above the
   running gateway's (read from each pod template's
   `observability-platform.dev/replication-factor` annotation; a release from
-  before it is read from its ConfigMaps' `OBS_REPLICATION_FACTOR`, else as RF 1),
+  before it is read from its ConfigMaps' `OBS_REPLICATION_FACTOR`, else as RF 1;
+  a release counts as live when either Deployment, either ConfigMap, the ingester
+  StatefulSet, or kept ingester PVCs survive, so a recovery or a reinstall over
+  kept PVCs is staged too),
   or any RF change while either Deployment is still
   rolling out. It cannot see the flush, so waiting for it is the operator's
   part, and `split.ingester.previous` previews carry no RF. In Compose the
@@ -175,11 +183,13 @@ These are properties of the whole system, not of the query languages.
   release ran RF 1, so its ingesters' heads hold each write on one ingester only.
   Helm reads a release without the RF annotation as RF 1 and refuses the upgrade
   to the RF 3 default until it is staged: first upgrade with
-  `--set split.querier.replicationFactor=1`, then remove that once the heads have
-  flushed. Compose sets both RFs from one anchor, so before upgrading the split
-  stack drain each ingester (`POST /internal/v1/drain`, which leaves it refusing
-  writes until its restart) or let the maintenance flush run, so no write is held
-  by one ingester alone when the querier starts skipping one.
+  `--set split.querier.replicationFactor=1`, then drain every ingester, one at a
+  time, restarting each after its `200`, and only then remove that. Compose sets
+  both RFs from one anchor, so stage the upgrade there too: bring up the new
+  gateway with the querier still at RF 1 (override `OBS_REPLICATION_FACTOR` on the
+  querier), drain and restart every ingester, then recreate the querier from the
+  anchor — so no write is held by one ingester alone when the querier starts
+  skipping one.
 - **Upgrading to 6.2 has an overwrite window.** A pre-6.2 WAL record replays with a
   fresh generation, so on a restart while pre-6.2 segments are still past the
   checkpoint, a pre-upgrade sample can outrank a post-upgrade overwrite at the same
