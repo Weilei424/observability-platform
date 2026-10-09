@@ -40,7 +40,7 @@ type RouterOptions struct {
 // ErrUnavailable) holds when the worst failure was an outage.
 type QuorumError struct {
 	Kind          string // "series" or "streams"
-	Failed, Total int    // keys that missed quorum, of all keys in the batch
+	Failed, Total int    // keys that had missed quorum when the batch was decided, of all keys
 	Quorum, RF    int
 	Ingesters     []string // MemberLabel of each replica that failed a key that missed quorum, sorted
 	Cause         error    // the worst failure among the failed keys' replicas
@@ -127,10 +127,13 @@ func quorum(rf int) int { return rf/2 + 1 }
 // member. It answers nil the moment every key has quorum acknowledgements;
 // the pushes still running then finish in the background on a context
 // detached from the caller, bounded by the client timeout, and are still
-// observed. If some key cannot reach quorum it waits for every push to end
-// and answers a *QuorumError over the worst failure of all failed keys, so
-// the answer does not depend on the order failures arrive in. A caller that
-// gives up first gets its context's error; the pushes go on regardless.
+// observed. The moment some key can no longer reach quorum it answers a
+// *QuorumError over the worst failure seen so far, without waiting for the
+// replicas still running (a hung one would otherwise hold the answer for the
+// whole timeout). Which code a mixed batch answers with can therefore depend
+// on arrival order: a protocol error that lands after the decision is still
+// counted and observed, but does not change the answer. A caller that gives
+// up first gets its context's error; the pushes go on regardless.
 func replicate[T any](ctx context.Context, rt *Router, kind string, items []T, key func(T) uint64,
 	send func(context.Context, *Client, []T) error) error {
 	if err := ctx.Err(); err != nil {
@@ -181,9 +184,10 @@ func replicate[T any](ctx context.Context, rt *Router, kind string, items []T, k
 		}()
 	}
 
-	// One collector per batch owns all quorum state. It sends the decision on
-	// decided (buffered: the caller may have left) and observes the batch
-	// once every push has ended.
+	// One collector per batch owns all quorum state. It answers on decided
+	// (buffered: the caller may have left) the moment the batch is decided —
+	// every key at quorum, or some key past its failure budget — and observes
+	// the batch once every push has ended.
 	decided := make(chan error, 1)
 	need, maxFail := quorum(rt.rf), rt.rf-quorum(rt.rf)
 	rt.wg.Add(1)
@@ -194,8 +198,32 @@ func replicate[T any](ctx context.Context, rt *Router, kind string, items []T, k
 		failedBy := make([][]string, len(replicasOf)) // the members behind fails
 		pending := len(replicasOf)                    // keys still short of quorum acks
 		anyFailure, answered := false, false
+		// quorumErr describes the keys past their failure budget so far. It is
+		// called at the moment a key fails, so its cause is the worst failure
+		// seen by then: a replica still running may yet fail worse, and is
+		// counted and observed when it does, but cannot change the answer.
+		quorumErr := func() (*QuorumError, int) {
+			failed := 0
+			var causes []error
+			var culprits []string
+			for ki := range replicasOf {
+				if len(fails[ki]) > maxFail {
+					failed++
+					causes = append(causes, worst(fails[ki]))
+					culprits = append(culprits, failedBy[ki]...)
+				}
+			}
+			if failed == 0 {
+				return nil, 0
+			}
+			slices.Sort(culprits)
+			culprits = slices.Compact(culprits)
+			return &QuorumError{Kind: kind, Failed: failed, Total: len(replicasOf),
+				Quorum: need, RF: rt.rf, Ingesters: culprits, Cause: worst(causes)}, failed
+		}
 		for range len(groups) {
 			r := <-results
+			keyFailed := false
 			if r.err != nil {
 				anyFailure = true
 			}
@@ -203,34 +231,29 @@ func replicate[T any](ctx context.Context, rt *Router, kind string, items []T, k
 				if r.err != nil {
 					fails[ki] = append(fails[ki], r.err)
 					failedBy[ki] = append(failedBy[ki], MemberLabel(r.member))
+					if len(fails[ki]) == maxFail+1 {
+						keyFailed = true
+					}
 					continue
 				}
 				if acks[ki]++; acks[ki] == need {
 					pending--
 				}
 			}
-			if pending == 0 && !answered {
+			switch {
+			case answered:
+			case keyFailed:
+				// Quorum is now impossible for some key: answer without
+				// waiting for the replicas still running (spec §5.2).
+				answered = true
+				qe, _ := quorumErr()
+				decided <- qe
+			case pending == 0:
 				answered = true
 				decided <- nil
 			}
 		}
-		failed := 0
-		var causes []error
-		var culprits []string
-		for ki := range replicasOf {
-			if len(fails[ki]) > maxFail {
-				failed++
-				causes = append(causes, worst(fails[ki]))
-				culprits = append(culprits, failedBy[ki]...)
-			}
-		}
-		slices.Sort(culprits)
-		culprits = slices.Compact(culprits)
-		if !answered {
-			// Every push ended and some key is short of quorum, so it failed.
-			decided <- &QuorumError{Kind: kind, Failed: failed, Total: len(replicasOf),
-				Quorum: need, RF: rt.rf, Ingesters: culprits, Cause: worst(causes)}
-		}
+		_, failed := quorumErr()
 		if rt.opts.ObserveBatch != nil {
 			outcome := "full"
 			switch {
