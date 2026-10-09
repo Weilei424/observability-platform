@@ -700,8 +700,11 @@ records the decisions and where the code corrected the spec.
   at rest; compare the `replication_factor` and `quorum` fields of the two `ring ready`
   lines. A change is staged so the querier's quorum never exceeds the gateway's while
   an old pod of one runs beside a new pod of the other (a read skips up to quorum−1
-  ingesters): raise RF gateway first, then the querier once the heads have flushed,
-  because heads still hold data acknowledged under the smaller quorum; lower it
+  ingesters): raise RF gateway first, then drain and restart every ingester one at a
+  time, then the querier, because heads still hold data acknowledged under the
+  smaller quorum and the maintenance flush leaves open chunks and the logs head
+  (a Codex review found the first cut saying a flush interval was enough;
+  `TestRaisingRFNeedsADrainOfEveryIngester` shows the incomplete `200`); lower it
   querier first, then the gateway. Helm stages it with `split.querier.replicationFactor`
   and enforces the order as it does 6.2 membership stages: the render refuses a querier
   quorum above the gateway's, and an upgrade reads each running pod template's
