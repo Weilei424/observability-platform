@@ -16,16 +16,24 @@
 {{- $gwQuorum := int (include "backend.quorum" (int .Values.split.replicationFactor)) }}
 {{- $qQuorum := int (include "backend.quorum" $qRF) }}
 {{- if gt $qQuorum $gwQuorum }}
-{{- fail (printf "the querier's quorum %d (split.querier.replicationFactor=%d) exceeds the gateway's quorum %d (split.replicationFactor=%d): a read would skip more ingesters than a write's acknowledgements cover. Raise an RF gateway first and the querier after the ingesters' heads flush; lower it querier first, then the gateway" $qQuorum $qRF $gwQuorum (int .Values.split.replicationFactor)) }}
+{{- fail (printf "the querier's quorum %d (split.querier.replicationFactor=%d) exceeds the gateway's quorum %d (split.replicationFactor=%d): a read would skip more ingesters than a write's acknowledgements cover. Raise an RF gateway first and the querier after every ingester has been drained (POST /internal/v1/drain answers 200) and restarted; lower it querier first, then the gateway" $qQuorum $qRF $gwQuorum (int .Values.split.replicationFactor)) }}
 {{- end }}
 {{- /* The ring staging check (backend.ringStagingCheck) over the live objects. */}}
 {{- $gwName := include "backend.componentName" (list . "gateway") }}
 {{- $qName := include "backend.componentName" (list . "querier") }}
+{{- $ingName := include "backend.componentName" (list . "ingester") }}
+{{- /* Kept ingester PVCs (data-<ingester>-<i>) mean heads that may hold writes, even with nothing else left. */}}
+{{- $ingesterData := false }}
+{{- range (lookup "v1" "PersistentVolumeClaim" .Release.Namespace "").items | default list }}
+{{- if hasPrefix (printf "data-%s-" $ingName) .metadata.name }}{{- $ingesterData = true }}{{- end }}
+{{- end }}
 {{- $live := dict
   "gateway" (lookup "apps/v1" "Deployment" .Release.Namespace $gwName)
   "querier" (lookup "apps/v1" "Deployment" .Release.Namespace $qName)
   "gatewayConfig" (lookup "v1" "ConfigMap" .Release.Namespace (printf "%s-config" $gwName))
-  "querierConfig" (lookup "v1" "ConfigMap" .Release.Namespace (printf "%s-config" $qName)) }}
+  "querierConfig" (lookup "v1" "ConfigMap" .Release.Namespace (printf "%s-config" $qName))
+  "ingester" (lookup "apps/v1" "StatefulSet" .Release.Namespace $ingName)
+  "ingesterData" $ingesterData }}
 {{- include "backend.ringStagingCheck" (list . $live) }}
 {{- if gt (int .Values.split.store.replicas) 1 }}
 {{- fail "split.store.replicas must be 1 until Phase 6.4: a second store would hold blocks no querier reads" }}
