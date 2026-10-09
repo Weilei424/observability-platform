@@ -118,8 +118,11 @@ These are properties of the whole system, not of the query languages.
   that misses quorum answers `503` (or `500` for a protocol error) and its body
   is `write quorum not met: <k> of <n> series could not reach <W> of <RF>
   ingesters` (streams on the Loki route); the `500` body is `internal error`.
-  The gateway waits for every push, each bounded by `OBS_INGESTER_TIMEOUT`
-  (default 10s, at least 100ms), before answering a failed write. A `503` can
+  A failed write is answered the moment quorum becomes impossible, without
+  waiting for replicas still running; each push stays bounded by
+  `OBS_INGESTER_TIMEOUT` (default 10s, at least 100ms). Which code a batch with
+  both an outage and a protocol error answers with depends on which arrives
+  first; the later one is still counted. A `503` can
   leave some of a batch written; retrying the whole batch is safe. Both
   `obs_gateway_write_quorum_total{outcome}` and
   `obs_querier_ingester_reads_total{ingester,outcome}` show a tolerated outage.
@@ -167,6 +170,15 @@ These are properties of the whole system, not of the query languages.
   ingester is still on the querier's list; at RF=3 they tolerate one. With RF
   equal to the ring size, removing an ingester first needs RF lowered or a
   further ingester added: the gateway refuses an RF above its write list.
+- **Upgrading to 6.3 changes the replication factor, and that is staged.** A 6.2
+  release ran RF 1, so its ingesters' heads hold each write on one ingester only.
+  Helm reads a release without the RF annotation as RF 1 and refuses the upgrade
+  to the RF 3 default until it is staged: first upgrade with
+  `--set split.querier.replicationFactor=1`, then remove that once the heads have
+  flushed. Compose sets both RFs from one anchor, so before upgrading the split
+  stack drain each ingester (`POST /internal/v1/drain`, which leaves it refusing
+  writes until its restart) or let the maintenance flush run, so no write is held
+  by one ingester alone when the querier starts skipping one.
 - **Upgrading to 6.2 has an overwrite window.** A pre-6.2 WAL record replays with a
   fresh generation, so on a restart while pre-6.2 segments are still past the
   checkpoint, a pre-upgrade sample can outrank a post-upgrade overwrite at the same
