@@ -584,11 +584,8 @@ kill "$PF_PID" 2>/dev/null; PF_PID=""
 # only the UID can show that the replacement is a different process; without
 # that, a delete that never happened would leave every later check satisfied by
 # the original pod.
-# An optional third argument is a command (run via eval) executed right after
-# the delete returns, while the pod is still down; it needs marker_reads_back,
-# defined below, only by the time restart_pod is called.
 restart_pod() {
-    local sts="$1" pod="$1-${2:-0}" after_delete="${3:-}" old_uid new_uid poll_start
+    local sts="$1" pod="$1-${2:-0}" old_uid new_uid poll_start
     echo ""
     echo "-- Deleting pod $pod --"
     old_uid=$(kubectl get pod "$pod" -n "$NS" -o jsonpath='{.metadata.uid}' 2>/dev/null)
@@ -598,7 +595,6 @@ restart_pod() {
     else
         log_fail "deleting $pod failed — nothing below this actually tests a restart"
     fi
-    [ -z "$after_delete" ] || eval "$after_delete"
     if kubectl rollout status "statefulset/$sts" -n "$NS" --timeout="$ROLLOUT_TIMEOUT"; then
         log_pass "$sts rescheduled its pod"
     else
@@ -691,9 +687,7 @@ if [ "$TOPOLOGY" = split ]; then
         INGESTERS=1
     fi
     for i in $(seq 0 $((INGESTERS - 1))); do
-        # At RF=3 the other two ingesters hold every write, so the marker must
-        # read back through the gateway while this one is down.
-        restart_pod observability-ingester "$i" "marker_reads_back 'reads complete while ingester $i is down' k8s_e2e_marker"
+        restart_pod observability-ingester "$i"
     done
     marker_reads_back "data persists across every ingester's restart" k8s_e2e_marker
     marker_reads_back "the flushed series persists across every ingester's restart" k8s_e2e_flush_marker
@@ -824,42 +818,95 @@ while [ $((SECONDS - start)) -lt 90 ]; do
 done
 [ "$target_ok" -eq 1 ] || log_fail "in-cluster Prometheus never reported every scrape target up within 90s"
 
-# Split only: at the chart's default RF=3 on three ingesters every sample is
-# written to every ingester, so their counters must agree. The backend image is
-# distroless (no shell or wget), so read each pod's obs_samples_ingested_total
-# through this same Prometheus, which scrapes every pod by its DNS name (the
-# instance label). Polled because the first scrape after a write can lag by one
-# interval, and the three scrapes are not simultaneous (each value can be up to
-# a 15s scrape interval stale while the producers keep writing; a Compose run
-# measured 2328/2532/2729): the 80% tolerance absorbs that skew, and still
-# tells replication (all equal) from a ring split (each about a third).
-# Mirrors compose_smoke.sh's check.
+kill "$PF_PID" 2>/dev/null; PF_PID=""
+
+# Split only: at the chart's default RF=3 on three ingesters every write lands
+# on every ingester. Checked exactly, not through Prometheus counters (their
+# scrapes are staggered while the producers keep writing, so counters only
+# ever agree approximately): one controlled batch of marker series goes in
+# through the gateway, then each ingester pod's own head is asked for them
+# over the internal select route, through a port-forward to that pod. Every
+# ingester must hold every marker. Mirrors compose_smoke.sh's check.
 if [ "$TOPOLOGY" = split ]; then
-    ingester_ingested() { # <pod> -> sample count on stdout
-        curl -s --max-time 10 -G "http://localhost:19090/api/v1/query" \
-            --data-urlencode "query=sum(obs_samples_ingested_total{instance=\"$1.observability-ingester-headless:8080\"})" 2>/dev/null \
-            | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null
-    }
-    replicated_everywhere() { # sets COUNTS "a b c"; true when each is >0 and >=80% of the largest
-        local a b c
-        a="$(ingester_ingested observability-ingester-0)"; b="$(ingester_ingested observability-ingester-1)"; c="$(ingester_ingested observability-ingester-2)"
-        COUNTS="${a:-0} ${b:-0} ${c:-0}"
-        awk -v a="${a:-0}" -v b="${b:-0}" -v c="${c:-0}" 'BEGIN {
-            m = a; if (b > m) m = b; if (c > m) m = c
-            exit !(m > 0 && a >= 0.8 * m && b >= 0.8 * m && c >= 0.8 * m)
-        }'
-    }
-    COUNTS=""
-    repl_start=$SECONDS
-    repl_ok=0
-    while [ $((SECONDS - repl_start)) -lt 60 ]; do
-        if replicated_everywhere; then repl_ok=1; break; fi
-        sleep 3
+    kubectl port-forward -n "$NS" svc/observability-backend 18080:8080 >/dev/null 2>&1 &
+    PF_PID=$!
+    wait_for_port "backend port-forward is ready (replication)" 30 "http://localhost:18080/healthz"
+    REPL_N=20
+    REPL_RUN="kind$RANDOM$RANDOM"
+    REPL_MS=$(( $(date +%s) * 1000 ))
+    REPL_METRICS=""
+    for i in $(seq 0 $((REPL_N - 1))); do
+        REPL_METRICS="$REPL_METRICS{\"name\":\"repl_marker\",\"labels\":{\"run_id\":\"$REPL_RUN\",\"i\":\"$i\"},\"timestamp_ms\":$REPL_MS,\"value\":$i},"
     done
-    if [ "$repl_ok" -eq 1 ]; then
-        log_pass "every ingester holds every sample at RF=3 (ingested 0 1 2: $COUNTS)"
+    STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 -X POST "http://localhost:18080/api/v1/ingest/metrics" \
+        -H "Content-Type: application/json" -d "{\"metrics\":[${REPL_METRICS%,}]}")
+    [ "$STATUS" = 204 ] || log_fail "the replication marker batch answered HTTP $STATUS, want 204"
+    REPL_SELECT="{\"matchers\":[{\"name\":\"__name__\",\"value\":\"repl_marker\"},{\"name\":\"run_id\",\"value\":\"$REPL_RUN\"}],\"min_ms\":$((REPL_MS - 1)),\"max_ms\":$((REPL_MS + 1))}"
+    for i in 0 1 2; do
+        pod="observability-ingester-$i"
+        kubectl port-forward -n "$NS" "pod/$pod" 18081:8080 >/dev/null 2>&1 &
+        ING_PF=$!
+        HELD=0
+        if wait_for_port "$pod port-forward is ready" 30 "http://localhost:18081/healthz"; then
+            # The 204 comes at quorum (2 of 3); the third replica may land a moment later.
+            for _ in $(seq 1 10); do
+                HELD=$(curl -s --max-time 10 -X POST "http://localhost:18081/internal/v1/metrics/select" \
+                    -H "Content-Type: application/json" -d "$REPL_SELECT" | jq '.series | length' 2>/dev/null)
+                [ "${HELD:-0}" = "$REPL_N" ] && break
+                sleep 1
+            done
+        fi
+        if [ "${HELD:-0}" = "$REPL_N" ]; then
+            log_pass "$pod holds all $REPL_N replicated markers at RF=3"
+        else
+            log_fail "$pod holds ${HELD:-0} of $REPL_N replicated markers at RF=3"
+        fi
+        kill "$ING_PF" 2>/dev/null
+    done
+
+    # One ingester held down, not merely restarted: scaling the StatefulSet to
+    # two removes ingester-2 and keeps it gone (a deleted pod is recreated at
+    # once, so a check after a delete may run against its replacement). The
+    # gateway and querier still list it, so it is a real outage to them. At
+    # RF=3 a write still reaches quorum and a read is still complete; the pod's
+    # absence is confirmed both before and after the assertions.
+    echo ""
+    echo "-- Holding ingester-2 down --"
+    pod_gone() { ! kubectl get pod observability-ingester-2 -n "$NS" >/dev/null 2>&1; }
+    if kubectl scale statefulset/observability-ingester -n "$NS" --replicas=2 >/dev/null \
+        && kubectl wait --for=delete pod/observability-ingester-2 -n "$NS" --timeout="$ROLLOUT_TIMEOUT" >/dev/null 2>&1 \
+        && pod_gone; then
+        log_pass "ingester-2 is down and stays down"
+        DOWN_MS=$(( $(date +%s) * 1000 ))
+        DOWN_VALUE=$(( (RANDOM % 90000) + 10000 ))
+        STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 -X POST "http://localhost:18080/api/v1/ingest/metrics" \
+            -H "Content-Type: application/json" \
+            -d "{\"metrics\":[{\"name\":\"k8s_e2e_down_marker\",\"labels\":{\"run_id\":\"$REPL_RUN\"},\"timestamp_ms\":$DOWN_MS,\"value\":$DOWN_VALUE}]}")
+        if [ "$STATUS" = 204 ]; then
+            log_pass "a write with ingester-2 down answers 204 (quorum 2 of 3)"
+        else
+            log_fail "a write with ingester-2 down answered HTTP $STATUS, want 204"
+        fi
+        BODY=$(curl -s --max-time 15 -G "http://localhost:18080/api/v1/query" \
+            --data-urlencode "query=k8s_e2e_down_marker{run_id=\"$REPL_RUN\"}" --data-urlencode "time=$((DOWN_MS / 1000))")
+        if printf '%s' "$BODY" | jq -e --arg v "$DOWN_VALUE" '.status == "success" and ([.data.result[].value[1]] | index($v))' >/dev/null 2>&1; then
+            log_pass "a read with ingester-2 down is complete (200 with the value written while it was down)"
+        else
+            log_fail "a read with ingester-2 down was not complete: $(printf '%s' "$BODY" | head -c 300)"
+        fi
+        if pod_gone; then
+            log_pass "ingester-2 was still down after the checks"
+        else
+            log_fail "ingester-2 came back during the checks; they may not have run against an outage"
+        fi
     else
-        log_fail "ingesters do not hold the same samples at RF=3 (ingested 0 1 2: $COUNTS)"
+        log_fail "could not hold ingester-2 down; the outage checks did not run"
+    fi
+    kubectl scale statefulset/observability-ingester -n "$NS" --replicas=3 >/dev/null
+    if kubectl rollout status statefulset/observability-ingester -n "$NS" --timeout="$ROLLOUT_TIMEOUT" >/dev/null; then
+        log_pass "ingester-2 is back"
+    else
+        log_fail "ingester-2 did not come back after the outage drill"
     fi
 fi
 kill "$PF_PID" 2>/dev/null; PF_PID=""
