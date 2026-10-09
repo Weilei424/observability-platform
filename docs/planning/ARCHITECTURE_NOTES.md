@@ -652,10 +652,13 @@ records the decisions and where the code corrected the spec.
 - **Answer at quorum, finish in the background.** The router answers `204` as soon as
   every key has W acks. Pushes still running finish on a context detached from the
   request (`context.WithoutCancel`), still bounded by the timeout and still counted,
-  so a hung replica costs one bounded goroutine per push. When a key can no longer
-  reach W, the router waits for every push (each bounded) and answers `503` if every
-  failure was an outage or `500` if any was a protocol error, so the answer does not
-  depend on arrival order. The `503` body is `write quorum not met: <k> of <n> series
+  so a hung replica costs one bounded goroutine per push. The moment a key can no
+  longer reach W, the router answers `503` if every failure seen so far was an
+  outage or `500` if any was a protocol error, without waiting for replicas still
+  running (a Codex review found the first cut waiting for every push, so two down
+  plus one hung took the full timeout to fail). A protocol error that lands after the
+  decision is still counted but does not change the answer
+  (`TestRouterAnswersAtOnceWhenQuorumIsImpossible`). The `503` body is `write quorum not met: <k> of <n> series
   could not reach <W> of <RF> ingesters` (`streams` for Loki); the `500` body stays
   `internal error` and the cause goes to the log at `error`. At RF=1 a failed
   outage write carries that same quorum message. A plain `rpc.ErrUnavailable` elsewhere
