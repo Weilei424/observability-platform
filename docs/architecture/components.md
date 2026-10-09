@@ -128,8 +128,9 @@ and the two values must match: their `ring ready` lines carry
 - **Quorum.** W = RF/2 + 1 per key. The gateway sends each member one push with
   every key it replicates, all concurrently, and answers `204` the moment every
   key has W acknowledgements. The rest finish in the background, still counted.
-- **Failure.** When a key cannot reach W, the gateway waits for every push and
-  answers `503` for an outage, or `500` for a protocol error. The `503` body is
+- **Failure.** The moment a key can no longer reach W, the gateway answers
+  `503` for an outage, or `500` if a protocol error is among the failures seen
+  so far; it does not wait for replicas still running. The `503` body is
   `write quorum not met: <k> of <n> series could not reach <W> of <RF>
   ingesters` (streams on the Loki route). At RF=3 one ingester down changes
   nothing a client sees; two down is `503`.
