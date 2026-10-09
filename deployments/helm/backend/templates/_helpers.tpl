@@ -225,19 +225,31 @@ only.
 {{- $gwDep := $live.gateway -}}
 {{- $qDep := $live.querier -}}
 {{- $prev := dict -}}
-{{- if and $gwDep $qDep -}}
+{{- /*
+A release is live when anything of it survives, not only both Deployments: a
+recovery that recreates a deleted gateway or querier, or a reinstall over kept
+ingester PVCs, still has ingester heads that may hold writes acknowledged at a
+lower RF. Only a render with none of these is a fresh install (or a preview).
+*/}}
+{{- $isLive := or $gwDep $qDep $live.gatewayConfig $live.querierConfig $live.ingester $live.ingesterData -}}
+{{- if $isLive -}}
 {{- if $root.Values.split.ingester.previous -}}
 {{- fail "split.ingester.previous is for previews only (helm template, which cannot look up the live release): remove it; an upgrade reads the running gateway and querier" -}}
 {{- end -}}
 {{- $key := include "backend.ingesterCountAnnotation" $root -}}
-{{- $gwCount := dig "spec" "template" "metadata" "annotations" $key "" $gwDep -}}
-{{- $qCount := dig "spec" "template" "metadata" "annotations" $key "" $qDep -}}
+{{- $gwCount := dig "spec" "template" "metadata" "annotations" $key "" ($gwDep | default dict) -}}
+{{- $qCount := dig "spec" "template" "metadata" "annotations" $key "" ($qDep | default dict) -}}
 {{- $gw := $live.gatewayConfig -}}
 {{- $q := $live.querierConfig -}}
+{{- /* Each side's count from its pod template, else its ConfigMap's list. */}}
+{{- if and (not $gwCount) $gw (dig "data" "OBS_INGESTER_URL" "" $gw) -}}
+{{- $gwCount = len (splitList "," $gw.data.OBS_INGESTER_URL) | toString -}}
+{{- end -}}
+{{- if and (not $qCount) $q (dig "data" "OBS_INGESTER_URL" "" $q) -}}
+{{- $qCount = len (splitList "," $q.data.OBS_INGESTER_URL) | toString -}}
+{{- end -}}
 {{- if and $gwCount $qCount -}}
 {{- $prev = dict "replicas" (int $qCount) "writeReplicas" (int $gwCount) -}}
-{{- else if and $gw $q $gw.data $q.data $gw.data.OBS_INGESTER_URL $q.data.OBS_INGESTER_URL -}}
-{{- $prev = dict "replicas" (len (splitList "," $q.data.OBS_INGESTER_URL)) "writeReplicas" (len (splitList "," $gw.data.OBS_INGESTER_URL)) -}}
 {{- end -}}
 {{- $rfKey := include "backend.replicationFactorAnnotation" $root -}}
 {{- /*
@@ -246,13 +258,14 @@ OBS_REPLICATION_FACTOR, else 1 -- a release from before 6.3 has neither and
 ran RF=1, so its heads may hold writes on one ingester only and its RF change
 is staged like any other.
 */}}
-{{- $liveGwRF := dig "spec" "template" "metadata" "annotations" $rfKey "" $gwDep -}}
+{{- $liveGwRF := dig "spec" "template" "metadata" "annotations" $rfKey "" ($gwDep | default dict) -}}
 {{- if not $liveGwRF -}}{{- $liveGwRF = dig "data" "OBS_REPLICATION_FACTOR" "1" ($gw | default dict) -}}{{- end -}}
-{{- $liveQRF := dig "spec" "template" "metadata" "annotations" $rfKey "" $qDep -}}
+{{- $liveQRF := dig "spec" "template" "metadata" "annotations" $rfKey "" ($qDep | default dict) -}}
 {{- if not $liveQRF -}}{{- $liveQRF = dig "data" "OBS_REPLICATION_FACTOR" "1" ($q | default dict) -}}{{- end -}}
 {{- $rfChanged := or (ne $gwRF (int $liveGwRF)) (ne $qRF (int $liveQRF)) -}}
 {{- if or $rfChanged (and $prev (or (ne $writeCount (int $prev.writeReplicas)) (ne $replicas (int $prev.replicas)))) -}}
 {{- range $dep := list $gwDep $qDep -}}
+{{- if $dep -}}{{- /* a missing Deployment has no old pods to wait for */}}
 {{- $want := int (dig "spec" "replicas" 1 $dep) -}}
 {{- $generation := int (dig "metadata" "generation" 0 $dep) -}}
 {{- $observed := int (dig "status" "observedGeneration" 0 $dep) -}}
@@ -264,6 +277,7 @@ is staged like any other.
 {{- end -}}
 {{- end -}}
 {{- end -}}
+{{- end -}}
 {{- $gwQuorum := int (include "backend.quorum" $gwRF) -}}
 {{- $qQuorum := int (include "backend.quorum" $qRF) -}}
 {{- $liveGwQuorum := int (include "backend.quorum" (int $liveGwRF)) -}}
@@ -272,7 +286,7 @@ is staged like any other.
 {{- fail (printf "unstaged replication factor change: the gateway would write at quorum %d (split.replicationFactor=%d) while the running querier reads at quorum %d (RF %d), so a read could skip every ingester holding a write. Lower the RF querier first: set split.querier.replicationFactor=%d with split.replicationFactor=%d, and once that has rolled out, lower split.replicationFactor" $gwQuorum $gwRF $liveQQuorum (int $liveQRF) $qRF (int $liveGwRF)) -}}
 {{- end -}}
 {{- if gt $qQuorum $liveGwQuorum -}}
-{{- fail (printf "unstaged replication factor change: the querier would read at quorum %d (split.querier.replicationFactor=%d) while the running gateway writes at quorum %d (RF %d), so a read could skip every ingester holding a write. Raise the RF gateway first: set split.replicationFactor=%d with split.querier.replicationFactor=%d, and raise the querier only once that has rolled out and the ingesters' heads have flushed (the maintenance flush interval, or a drain)" $qQuorum $qRF $liveGwQuorum (int $liveGwRF) $gwRF (int $liveQRF)) -}}
+{{- fail (printf "unstaged replication factor change: the querier would read at quorum %d (split.querier.replicationFactor=%d) while the running gateway writes at quorum %d (RF %d), so a read could skip every ingester holding a write. Raise the RF gateway first: set split.replicationFactor=%d with split.querier.replicationFactor=%d, and raise the querier only once that has rolled out and every ingester has been drained (POST /internal/v1/drain answers 200) and restarted, one at a time" $qQuorum $qRF $liveGwQuorum (int $liveGwRF) $gwRF (int $liveQRF)) -}}
 {{- end -}}
 {{- else -}}
 {{- with $root.Values.split.ingester.previous -}}
