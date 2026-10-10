@@ -11,6 +11,15 @@ import (
 // PushSamples sends samples to the ingester's push route, grouped by series in
 // first-seen order; each series keeps its samples' order.
 func (c *Client) PushSamples(ctx context.Context, samples []metrics.PendingSample) error {
+	_, err := c.PushSamplesGen(ctx, samples, true)
+	return err
+}
+
+// PushSamplesGen sends samples to the ingester's push route, with each
+// sample's generation only when withGen is set: an ingester from before 6.3
+// refuses a sample that carries one. It reports whether the ingester said it
+// takes generations (PushGenerationsHeader on its answer).
+func (c *Client) PushSamplesGen(ctx context.Context, samples []metrics.PendingSample, withGen bool) (bool, error) {
 	req := metricsPushRequest{}
 	pos := make(map[uint64]int)
 	for _, s := range samples {
@@ -21,9 +30,14 @@ func (c *Client) PushSamples(ctx context.Context, samples []metrics.PendingSampl
 			pos[h] = i
 			req.Series = append(req.Series, wirePushSeries{Labels: s.Labels.Map()})
 		}
-		req.Series[i].Samples = append(req.Series[i].Samples, wirePushSample{T: s.TimestampMs, V: s.Value, G: s.Gen})
+		ps := wirePushSample{T: s.TimestampMs, V: s.Value}
+		if withGen {
+			ps.G = s.Gen
+		}
+		req.Series[i].Samples = append(req.Series[i].Samples, ps)
 	}
-	return c.doNoContent(ctx, http.MethodPost, "metrics/push", req)
+	hdr, err := c.callHeader(ctx, http.MethodPost, "metrics/push", req, http.StatusNoContent)
+	return err == nil && hdr.Get(PushGenerationsHeader) == "1", err
 }
 
 // PushEntries sends log lines to the ingester's push route, grouped by stream
