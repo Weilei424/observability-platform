@@ -12,11 +12,11 @@ on:
 jobs:
   build-test-lint:
     name: Build, Test, Lint, and Docker Build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -63,7 +63,7 @@ jobs:
 
   compose-e2e:
     name: Compose Stack E2E (${{ matrix.topology }}, through Grafana)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Starts the real demo stack and drives it through Grafana's HTTP API. The
     # job above proves the images build; only this one proves the services
     # actually talk to each other — provisioning mounts, datasource resolution,
@@ -78,7 +78,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Compose stack test
         run: bash tests/e2e/compose_smoke.sh
@@ -87,7 +87,7 @@ jobs:
 
   helm-k8s-e2e:
     name: Helm + Kubernetes E2E (kind, ${{ matrix.topology }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # tests/e2e/helm_test.go validates the charts without a cluster; only this
     # job proves the images start, the PVCs bind, the probes pass against a
     # real server, and data survives rescheduling — for both topologies.
@@ -100,7 +100,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # Neither helm nor kind is preinstalled on ubuntu-latest. Helm is pinned
       # to the same Helm 3 release as the test job.
