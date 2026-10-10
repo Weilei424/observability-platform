@@ -91,6 +91,20 @@ func (m gatedMetrics) Append(labels metrics.Labels, tsMs int64, value float64) e
 	return m.ing.Append(labels, tsMs, value)
 }
 
+// AppendWithGeneration passes a writer-assigned generation through the gate
+// when the ingester behind it takes one, and falls back to Append otherwise.
+func (m gatedMetrics) AppendWithGeneration(labels metrics.Labels, tsMs int64, value float64, gen int64) error {
+	gi, ok := m.ing.(metrics.GenIngester)
+	if !ok || gen == 0 {
+		return m.Append(labels, tsMs, value)
+	}
+	if err := m.g.enter(); err != nil {
+		return err
+	}
+	defer m.g.leave()
+	return gi.AppendWithGeneration(labels, tsMs, value, gen)
+}
+
 type gatedLogs struct {
 	g   *Gate
 	ing logs.Ingester
