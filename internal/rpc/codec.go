@@ -156,11 +156,14 @@ type wireChunkSeries struct {
 	Chunks [][]byte          `json:"chunks"`
 }
 
-// wirePushSample is [timestamp_ms, "value"]: a sample the ingester has not yet
-// given a generation. The value is a string for the reason wireSample's is.
+// wirePushSample is [timestamp_ms, "value", generation]: the generation is the
+// one the gateway stamped at admission, which every replica stores exactly.
+// [timestamp_ms, "value"] (no generation) has the ingester assign one. The
+// value is a string for the reason wireSample's is.
 type wirePushSample struct {
 	T int64
 	V float64
+	G int64 // 0: none
 }
 
 func (s wirePushSample) MarshalJSON() ([]byte, error) {
@@ -169,7 +172,12 @@ func (s wirePushSample) MarshalJSON() ([]byte, error) {
 	b = strconv.AppendInt(b, s.T, 10)
 	b = append(b, ',', '"')
 	b = strconv.AppendFloat(b, s.V, 'g', -1, 64)
-	return append(b, '"', ']'), nil
+	b = append(b, '"')
+	if s.G != 0 {
+		b = append(b, ',')
+		b = strconv.AppendInt(b, s.G, 10)
+	}
+	return append(b, ']'), nil
 }
 
 func (s *wirePushSample) UnmarshalJSON(data []byte) error {
@@ -177,8 +185,17 @@ func (s *wirePushSample) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return fmt.Errorf("rpc: push sample: %w", err)
 	}
-	if len(raw) != 2 {
-		return fmt.Errorf("rpc: push sample must be [timestamp, value], got %d elements", len(raw))
+	if len(raw) != 2 && len(raw) != 3 {
+		return fmt.Errorf("rpc: push sample must be [timestamp, value] or [timestamp, value, generation], got %d elements", len(raw))
+	}
+	s.G = 0
+	if len(raw) == 3 {
+		if err := json.Unmarshal(raw[2], &s.G); err != nil {
+			return fmt.Errorf("rpc: push sample generation: %w", err)
+		}
+		if s.G <= 0 {
+			return fmt.Errorf("rpc: push sample generation %d must be positive", s.G)
+		}
 	}
 	if err := json.Unmarshal(raw[0], &s.T); err != nil {
 		return fmt.Errorf("rpc: push sample timestamp: %w", err)
