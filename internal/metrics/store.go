@@ -364,7 +364,7 @@ func (s *MemoryStore) QueryInstant(id SeriesID, tMs int64) (Sample, bool, error)
 			gen := it.Gen()
 			// Latest timestamp wins; for an equal timestamp the higher generation
 			// (later write) wins.
-			if !found || ts > best.TimestampMs || (ts == best.TimestampMs && gen > best.Gen) {
+			if !found || ts > best.TimestampMs || (ts == best.TimestampMs && chunk.Outranks(gen, val, best.Gen, best.Value)) {
 				best = Sample{SeriesID: id, TimestampMs: ts, Value: val, Gen: gen}
 				found = true
 			}
