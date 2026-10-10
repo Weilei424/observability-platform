@@ -12,7 +12,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"time"
 
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
@@ -122,12 +121,6 @@ func (c *Client) call(ctx context.Context, method, path string, query url.Values
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set(chimiddleware.RequestIDHeader, requestID(ctx))
-	if dl, ok := ctx.Deadline(); ok {
-		// The peer stops applying a push once this passes (abandonedPush): the
-		// caller has given up on it, and a later push of the same keys may
-		// already be on its way.
-		req.Header.Set(DeadlineHeader, strconv.FormatInt(dl.UnixMicro(), 10))
-	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -156,7 +149,10 @@ func (c *Client) call(ctx context.Context, method, path string, query url.Values
 		if out != nil {
 			_ = json.Unmarshal(raw, out)
 		}
-		if resp.StatusCode >= 500 {
+		// A 5xx is the peer failing; a 499 is the peer having seen this
+		// request as abandoned (statusClientClosedRequest) -- neither is the
+		// two sides disagreeing about the protocol, so both are an outage.
+		if resp.StatusCode >= 500 || resp.StatusCode == statusClientClosedRequest {
 			return fmt.Errorf("%w: %s %s answered %d: %s", ErrUnavailable, c.peer, path, resp.StatusCode, errorMessage(raw))
 		}
 		return fmt.Errorf("rpc: %s %s answered %d: %s", c.peer, path, resp.StatusCode, errorMessage(raw))
