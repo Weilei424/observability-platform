@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -46,7 +47,10 @@ func buildGateway(cfg *config.Config, log *slog.Logger) (*App, error) {
 		ObserveMember: func(member, outcome string) {
 			rm.IngesterRequests.WithLabelValues(member, outcome).Inc()
 		},
-		ObserveBatch: func(outcome string) { rm.WriteQuorum.WithLabelValues(outcome).Inc() },
+		ObserveBatch: func(ctx context.Context, b rpc.BatchReport) {
+			rm.WriteQuorum.WithLabelValues(b.Outcome).Inc()
+			logBatch(ctx, b)
+		},
 	})
 	if err != nil {
 		err = fmt.Errorf("app: write router: %w", err)
@@ -78,6 +82,27 @@ func buildGateway(cfg *config.Config, log *slog.Logger) (*App, error) {
 		// timeout, but no longer than what is left of the shutdown budget.
 		closers: []closer{{component: "main", msg: "write router close", closeCtx: router.Close}},
 	}, nil
+}
+
+// logBatch logs a routed batch's outcome where the write handler cannot (spec
+// section 5.4): a degraded batch -- quorum met, some replica failed -- at
+// debug, since an outage would otherwise log once per batch; and a failed
+// batch whose caller left before the decision, at warn, since no handler saw
+// its QuorumError. A failed batch whose caller got the answer was already
+// logged by the handler (api writeRouteError). ctx is the request's, so each
+// line carries its request ID.
+func logBatch(ctx context.Context, b rpc.BatchReport) {
+	log := observability.Component(observability.FromContext(ctx), "write_routing")
+	switch {
+	case b.Outcome == "degraded":
+		log.Debug("write quorum met with failed replicas", slog.Any("ingesters", b.Ingesters))
+	case b.Outcome == "failed" && b.CallerGone && b.Err != nil:
+		attrs := []any{slog.String("error", b.Err.Error()), slog.Any("ingesters", b.Err.Ingesters)}
+		if b.Err.Cause != nil {
+			attrs = append(attrs, slog.String("cause", b.Err.Cause.Error()))
+		}
+		log.Warn("write quorum not met after the client left", attrs...)
+	}
 }
 
 // logRing logs the ring's size and member-set hash. The gateway and querier
