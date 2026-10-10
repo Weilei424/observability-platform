@@ -162,19 +162,23 @@ These are properties of the whole system, not of the query languages.
   part, and `split.ingester.previous` previews carry no RF. In Compose the
   shared `x-ring-env` anchor is edited and the two services recreated one at a
   time ([../runbooks/split-demo.md](../runbooks/split-demo.md)).
-- **Replicated overwrites have a skew window.** Each ingester assigns its own
-  generation, `max(previous + 1, now in Unix microseconds)`, when it applies a
-  write. The gateway keeps a key's writes in order on every replica: it sends a
-  key's next push to an ingester only once the previous one has ended, and an
-  ingester stops applying a push the gateway has given up on (`X-Obs-Deadline`,
-  [internal.md](internal.md)), so a slow replica never applies an
-  acknowledged write after the overwrite that followed it. An overwrite of the
-  same series and timestamp can still lose to the older value when the replica
-  whose clock runs furthest ahead missed the overwrite (a partial-quorum write)
-  and its old write carries a higher generation than the overwrite's on the
-  replicas that got it, or, for a push that timed out, within the clock skew
-  between the gateway and that ingester. If every replica holds both writes,
-  the overwrite wins.
+- **An ingester listed under two DNS names counts twice.** Peer URLs are
+  compared in one spelling (lowercase, no trailing dot, canonical IP form, no
+  default port), so `http://INGESTER:8080` and `http://ingester:8080` are one
+  member and the duplicate is refused at startup. Two different names that
+  resolve to the same host are not detected: listed both ways, one ingester
+  would count as two replicas toward a write quorum. List each ingester once.
+- **Overwrites through different gateways follow their clocks.** The gateway
+  stamps each write's generation, `max(previous + 1, now in Unix
+  microseconds)`, when it admits it, and every replica stores that one, so how
+  late a push reaches a replica never matters: an overwrite admitted after the
+  write it overwrites wins on every replica that holds it. Through one gateway
+  that is exact. Through different gateway pods, two writes to the same series
+  and timestamp are ordered by the pods' clocks, so an overwrite within their
+  clock skew of the original can lose to it; a gateway restarted on a clock
+  that stepped back stamps lower generations until the clock passes its last
+  run's. A write sent straight to an ingester, or in all-in-one, takes that
+  process's own generation.
 - **Log chunks are stored RF times.** Every replica flushes its own copy to the
   store. Reads deduplicate by `(timestamp, line)`, so answers never change, but
   disk use is RF times a single copy. Metrics compaction merges the copies.
