@@ -22,19 +22,7 @@
 {{- $gwName := include "backend.componentName" (list . "gateway") }}
 {{- $qName := include "backend.componentName" (list . "querier") }}
 {{- $ingName := include "backend.componentName" (list . "ingester") }}
-{{- /*
-Kept ingester PVCs (data-<ingester>-<i>) mean heads that may hold writes, even
-with nothing else left. ingesterData is one past the highest such ordinal: the
-ingesters 0 to ingesterData-1 may hold data (0 when there is none).
-*/}}
-{{- $ingesterData := 0 }}
-{{- $pvcPrefix := printf "data-%s-" $ingName }}
-{{- range (lookup "v1" "PersistentVolumeClaim" .Release.Namespace "").items | default list }}
-{{- if hasPrefix $pvcPrefix .metadata.name }}
-{{- $ordinal := trimPrefix $pvcPrefix .metadata.name }}
-{{- if regexMatch "^[0-9]+$" $ordinal }}{{- $ingesterData = max $ingesterData (add1 (atoi $ordinal)) }}{{- end }}
-{{- end }}
-{{- end }}
+{{- $ingesterData := int (include "backend.ingesterDataOrdinals" (list . (lookup "v1" "PersistentVolumeClaim" .Release.Namespace "").items)) }}
 {{- $live := dict
   "gateway" (lookup "apps/v1" "Deployment" .Release.Namespace $gwName)
   "querier" (lookup "apps/v1" "Deployment" .Release.Namespace $qName)
