@@ -3,18 +3,17 @@ package app
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"sync"
 
-	"github.com/masonwheeler/observability-platform/internal/logs"
-	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/observability"
-	"github.com/masonwheeler/observability-platform/internal/storage/index"
 )
 
-// skipNote collects, for one read, the ingesters the head merge skipped. The
-// head merge records into it (MergeHeadsWith's OnSkip) when the heads are
-// done; the noted source around the whole read -- heads, then store -- logs it
-// only once that read has succeeded, through the request's logger.
+// skipNote collects, for one HTTP request, the ingesters its reads skipped.
+// A request can read the sources several times -- /api/v1/series reads once
+// per match[] selector -- so the head merge records each skip here
+// (MergeHeadsWith's OnSkip) and the request logs the note once, after its
+// response, and only if that response succeeded.
 type skipNote struct {
 	mu      sync.Mutex
 	skipped []string
@@ -22,12 +21,7 @@ type skipNote struct {
 
 type skipNoteKey struct{}
 
-func withSkipNote(ctx context.Context) (context.Context, *skipNote) {
-	n := &skipNote{}
-	return context.WithValue(ctx, skipNoteKey{}, n), n
-}
-
-// recordSkip adds names to the read's note, if the read carries one.
+// recordSkip adds names to the request's note, if the read carries one.
 func recordSkip(ctx context.Context, names []string) {
 	if n, ok := ctx.Value(skipNoteKey{}).(*skipNote); ok {
 		n.mu.Lock()
@@ -36,64 +30,45 @@ func recordSkip(ctx context.Context, names []string) {
 	}
 }
 
-// report logs a successful read that relied on replication.
-func (n *skipNote) report(ctx context.Context, err error) {
-	if err != nil {
-		return
-	}
-	n.mu.Lock()
-	skipped := n.skipped
-	n.mu.Unlock()
-	if len(skipped) > 0 {
+// replicationNotes gives each request a skip note and, once the handler has
+// answered with a non-error status, logs one "read answered by replication"
+// line with the distinct ingesters skipped, through the request's logger (so
+// with its request ID). It runs inside the API server's request-ID and logger
+// middleware (api.Deps.Middleware).
+func replicationNotes(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := &skipNote{}
+		ctx := context.WithValue(r.Context(), skipNoteKey{}, n)
+		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(sw, r.WithContext(ctx))
+		n.mu.Lock()
+		skipped := n.skipped
+		n.mu.Unlock()
+		if len(skipped) == 0 || sw.status >= http.StatusBadRequest {
+			return
+		}
+		seen := map[string]bool{}
+		var distinct []string
+		for _, s := range skipped {
+			if !seen[s] {
+				seen[s] = true
+				distinct = append(distinct, s)
+			}
+		}
 		observability.Component(observability.FromContext(ctx), "querier").Warn(
-			"read answered by replication", slog.Any("skipped", skipped))
-	}
+			"read answered by replication", slog.Any("skipped", distinct))
+	})
 }
 
-// notedMetrics wraps the querier's whole metrics source (heads, then store).
-type notedMetrics struct{ metrics.Source }
-
-func (s notedMetrics) Select(ctx context.Context, p metrics.SelectParams) ([]metrics.SeriesData, error) {
-	ctx, n := withSkipNote(ctx)
-	out, err := s.Source.Select(ctx, p)
-	n.report(ctx, err)
-	return out, err
+// statusWriter records the status a handler answered with.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
 }
 
-func (s notedMetrics) SelectLabelNames(ctx context.Context) ([]string, error) {
-	ctx, n := withSkipNote(ctx)
-	out, err := s.Source.SelectLabelNames(ctx)
-	n.report(ctx, err)
-	return out, err
+func (w *statusWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
 }
 
-func (s notedMetrics) SelectLabelValues(ctx context.Context, name string) ([]string, error) {
-	ctx, n := withSkipNote(ctx)
-	out, err := s.Source.SelectLabelValues(ctx, name)
-	n.report(ctx, err)
-	return out, err
-}
-
-// notedLogs wraps the querier's whole logs source (heads, then store).
-type notedLogs struct{ logs.Source }
-
-func (s notedLogs) SelectStreams(ctx context.Context, m []index.Pair, minTs, maxTs int64) ([]logs.StreamData, error) {
-	ctx, n := withSkipNote(ctx)
-	out, err := s.Source.SelectStreams(ctx, m, minTs, maxTs)
-	n.report(ctx, err)
-	return out, err
-}
-
-func (s notedLogs) SelectLabelNames(ctx context.Context) ([]string, error) {
-	ctx, n := withSkipNote(ctx)
-	out, err := s.Source.SelectLabelNames(ctx)
-	n.report(ctx, err)
-	return out, err
-}
-
-func (s notedLogs) SelectLabelValues(ctx context.Context, name string) ([]string, error) {
-	ctx, n := withSkipNote(ctx)
-	out, err := s.Source.SelectLabelValues(ctx, name)
-	n.report(ctx, err)
-	return out, err
-}
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
