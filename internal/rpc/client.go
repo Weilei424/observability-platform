@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
@@ -32,7 +33,9 @@ const errorBodyLimit = 1 << 20
 type Client struct {
 	peer string
 	base *url.URL
-	http *http.Client
+	// member is base as the ring spells it, sent as MemberHeader.
+	member string
+	http   *http.Client
 	// timeout bounds each request when positive; zero leaves a request to its
 	// own context.
 	timeout time.Duration
@@ -56,8 +59,9 @@ func NewClient(peer, base string, opts ...ClientOption) (*Client, error) {
 		return nil, fmt.Errorf("rpc: %s URL %q: %w", peer, base, err)
 	}
 	c := &Client{
-		peer: peer,
-		base: u,
+		peer:   peer,
+		base:   u,
+		member: strings.TrimSuffix(base, "/"),
 		http: &http.Client{Transport: &http.Transport{
 			DialContext:         (&net.Dialer{Timeout: DialTimeout, KeepAlive: 30 * time.Second}).DialContext,
 			MaxIdleConnsPerHost: 16,
@@ -72,8 +76,8 @@ func NewClient(peer, base string, opts ...ClientOption) (*Client, error) {
 }
 
 // do sends in (JSON, when non-nil) to /internal/v1/<path> and decodes the
-// 200 answer into out. A transport failure, a context deadline, or a 5xx is
-// ErrUnavailable — a deadline means the peer failed to answer in time, the
+// 200 answer into out. A transport failure, a context deadline, a 5xx, or a
+// 421 (a different member answered; see MemberHeader) is ErrUnavailable — a deadline means the peer failed to answer in time, the
 // same as any other timeout; any other status, 204 included, is a protocol
 // disagreement between two components and is returned as-is. On an error answer out is
 // still filled when the body decodes, so a partial result — compaction and
@@ -132,6 +136,7 @@ func (c *Client) callInto(ctx context.Context, method, path string, query url.Va
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set(chimiddleware.RequestIDHeader, requestID(ctx))
+	req.Header.Set(MemberHeader, c.member)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -159,6 +164,15 @@ func (c *Client) callInto(ctx context.Context, method, path string, query url.Va
 		_, _ = io.Copy(io.Discard, resp.Body)
 		if out != nil {
 			_ = json.Unmarshal(raw, out)
+		}
+		// A 421 is a different member answering: the connection reached the
+		// wrong process (MemberHeader). Drop it, and every other pooled one, so
+		// the next request dials and resolves afresh; to the caller it is the
+		// member it meant being unreachable.
+		if resp.StatusCode == http.StatusMisdirectedRequest {
+			_ = resp.Body.Close()
+			c.http.CloseIdleConnections()
+			return fmt.Errorf("%w: %s %s answered %d: %s", ErrUnavailable, c.peer, path, resp.StatusCode, errorMessage(raw))
 		}
 		// A 5xx is the peer failing; a 499 is the peer having seen this
 		// request as abandoned (statusClientClosedRequest) -- neither is the
