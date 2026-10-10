@@ -52,6 +52,13 @@ func liveDeployment(name string, count int, r rollout) map[string]any {
 	}
 }
 
+// cmRF is a 3-ingester ConfigMap whose OBS_REPLICATION_FACTOR is rf.
+func cmRF(rf int) map[string]any {
+	c := liveConfigMap(3)
+	c["data"].(map[string]any)["OBS_REPLICATION_FACTOR"] = strconv.Itoa(rf)
+	return c
+}
+
 func liveConfigMap(count int) map[string]any {
 	urls := make([]string, count)
 	for i := range urls {
@@ -125,7 +132,9 @@ func TestRingStagingReadsTheRunningRelease(t *testing.T) {
 		// gateway writes to 4. The pods win: lowering replicas to 3 would hide
 		// ingester-3's writes.
 		{"the running pods win over the ConfigMaps", live(4, 4, rolledOut, rolledOut), []string{"split.ingester.replicas=3", "split.ingester.writeReplicas=3"}, "unstaged ring change"},
-		{"a release without the annotation falls back to its ConfigMaps", live(-1, -1, rolledOut, rolledOut), []string{"split.ingester.replicas=4"}, "unstaged ring change"},
+		// RF 1: an unannotated Deployment counts as RF 1 (TestRingStagingOrdersReplicationFactorChanges),
+		// so this case keeps RF still and tests the count fallback alone.
+		{"a release without the annotation falls back to its ConfigMaps", live(-1, -1, rolledOut, rolledOut), []string{"split.ingester.replicas=4", "split.replicationFactor=1"}, "unstaged ring change"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := renderWithLive(t, tc.live, tc.set...)
@@ -193,6 +202,13 @@ func TestRingStagingOrdersReplicationFactorChanges(t *testing.T) {
 		{"6.2 release: staying at RF=1", live(-1, -1, rolledOut), []string{"split.replicationFactor=1"}, ""},
 		{"6.2 release: the RF=3 default in one step", live(-1, -1, rolledOut), nil, "unstaged replication factor change"},
 		{"6.2 release: gateway first", live(-1, -1, rolledOut), []string{"split.replicationFactor=3", "split.querier.replicationFactor=1"}, ""},
+		// An interrupted RF=1 upgrade: the ConfigMaps were applied (the gateway's
+		// now says RF 3) but neither Deployment rolled, so their pods still run
+		// RF 1. A ConfigMap is not what the pods loaded, so it is not trusted.
+		{"interrupted upgrade: ConfigMap says RF 3, pods unannotated", map[string]any{
+			"gateway": liveDeployment(gw, 3, rolledOut), "querier": liveDeployment(q, 3, rolledOut),
+			"gatewayConfig": cmRF(3), "querierConfig": cmRF(1),
+		}, []string{"split.replicationFactor=3"}, "unstaged replication factor change"},
 		{"6.2 release: an RF change waits out a querier rollout", live(-1, -1, rolling), []string{"split.replicationFactor=3", "split.querier.replicationFactor=1"}, "has not finished rolling out"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -360,9 +376,15 @@ func TestRingStagingTreatsAPartialReleaseAsLive(t *testing.T) {
 		{"only the ingester StatefulSet", map[string]any{"ingester": map[string]any{"metadata": map[string]any{"name": "observability-ingester"}}}, nil, "unstaged replication factor change"},
 		{"only kept ingester PVCs", map[string]any{"ingesterData": true}, nil, "unstaged replication factor change"},
 		{"only kept ingester PVCs, staged", map[string]any{"ingesterData": true}, stagedRaise, ""},
+		// The gateway's pods are gone, so their RF is unknown and counts as 1,
+		// whatever its ConfigMap says: the querier may not read at quorum 2
+		// until the gateway is back at RF 3 and the ingesters are drained.
 		{"6.3 release without its gateway Deployment", map[string]any{
 			"querier": withRF(liveDeployment(q, 3, rolledOut), 3), "gatewayConfig": cm(3), "querierConfig": cm(3),
-		}, nil, ""},
+		}, nil, "unstaged replication factor change"},
+		{"6.3 release without its gateway Deployment, staged", map[string]any{
+			"querier": withRF(liveDeployment(q, 3, rolledOut), 3), "gatewayConfig": cm(3), "querierConfig": cm(3),
+		}, []string{"split.replicationFactor=3", "split.querier.replicationFactor=1"}, ""},
 		{"a preview of a partial release", map[string]any{"gatewayConfig": cm(3), "querierConfig": cm(3)},
 			[]string{"split.ingester.previous.replicas=3", "split.ingester.previous.writeReplicas=3"}, "previews only"},
 	} {
