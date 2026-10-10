@@ -42,7 +42,22 @@ type Router struct {
 	// gateways, on their clocks).
 	genMu   sync.Mutex
 	nextGen int64
+
+	// genSupport records, per ingester client, what its last answer said
+	// about taking a sample's generation (PushGenerationsHeader): unknown
+	// until it has answered, then takes or legacy. A push to an unknown one
+	// asks first (an empty push), so the first writes carry generations to an
+	// ingester that takes them; a legacy one -- from before 6.3 -- is sent
+	// none and assigns its own, as in 6.2, so a rolling upgrade never sends it
+	// a sample it would refuse.
+	genSupport map[*Client]*atomic.Int32
 }
+
+const (
+	genUnknown int32 = iota
+	genTakes
+	genLegacy
+)
 
 // ErrRouterClosed refuses a batch that arrives after Close: the gateway is
 // shutting down. It is an outage to the client (503), which retries elsewhere.
@@ -55,6 +70,7 @@ type RouterOptions struct {
 	ObserveMember     func(member, outcome string)             // per push: ok, unavailable, error
 	ObserveBatch      func(ctx context.Context, b BatchReport) // per batch, once every push ended; ctx is the request's, detached
 	Clock             func() int64                             // Unix µs for write generations; nil means the wall clock
+	ProbeGenerations  bool                                     // at start, ask each ingester whether it takes generations
 }
 
 // BatchReport is a routed batch's final account, once every push ended.
@@ -95,15 +111,58 @@ func NewRouter(r *ring.Ring, opts RouterOptions) (*Router, error) {
 	if opts.Timeout > 0 {
 		copts = append(copts, WithRequestTimeout(opts.Timeout))
 	}
-	rt := &Router{ring: r, clients: map[string]*Client{}, rf: rf, opts: opts, nextGen: 1}
+	rt := &Router{ring: r, clients: map[string]*Client{}, rf: rf, opts: opts, nextGen: 1, genSupport: map[*Client]*atomic.Int32{}}
 	for _, m := range r.Members() {
 		c, err := NewClient("ingester "+MemberLabel(m), m, copts...)
 		if err != nil {
 			return nil, err
 		}
 		rt.clients[m] = c
+		rt.genSupport[c] = &atomic.Int32{}
+	}
+	if opts.ProbeGenerations {
+		// Ask every ingester at start, so a write rarely waits on the
+		// question. One down now stays unknown, and its first push asks.
+		for _, c := range rt.clients {
+			rt.wg.Add(1)
+			go func() {
+				defer rt.wg.Done()
+				rt.learnGenSupport(context.Background(), c)
+			}()
+		}
 	}
 	return rt, nil
+}
+
+// learnGenSupport asks c, with an empty push, whether it takes generations,
+// and records the answer. A failed ask leaves it unknown.
+func (rt *Router) learnGenSupport(ctx context.Context, c *Client) {
+	takes, err := c.PushSamplesGen(ctx, nil, false)
+	if err == nil {
+		rt.recordGenSupport(c, takes)
+	}
+}
+
+func (rt *Router) recordGenSupport(c *Client, takes bool) {
+	if takes {
+		rt.genSupport[c].Store(genTakes)
+	} else {
+		rt.genSupport[c].Store(genLegacy)
+	}
+}
+
+// pushTo sends g to c, with generations only if c has said it takes them, and
+// learns from the answer whether it does.
+func (rt *Router) pushTo(ctx context.Context, c *Client, g []metrics.PendingSample) error {
+	state := rt.genSupport[c]
+	if state.Load() == genUnknown {
+		rt.learnGenSupport(ctx, c)
+	}
+	takes, err := c.PushSamplesGen(ctx, g, state.Load() == genTakes)
+	if err == nil {
+		rt.recordGenSupport(c, takes)
+	}
+	return err
 }
 
 // Wait blocks until every push and batch observation started so far has
@@ -147,20 +206,43 @@ func MemberLabel(member string) string {
 }
 
 // PushSamples sends each sample to the RF ingesters that replicate its series,
-// stamped with the generation it was admitted at.
+// stamped with the generation its batch was admitted at.
 func (rt *Router) PushSamples(ctx context.Context, samples []metrics.PendingSample) error {
-	stamped := make([]metrics.PendingSample, len(samples))
-	copy(stamped, samples)
+	stamped := lastWritePerSample(samples)
 	rt.stamp(stamped)
 	return replicate(ctx, rt, "series", stamped, func(s metrics.PendingSample) uint64 { return s.Labels.Hash() },
-		func(ctx context.Context, c *Client, g []metrics.PendingSample) error { return c.PushSamples(ctx, g) })
+		func(ctx context.Context, c *Client, g []metrics.PendingSample) error { return rt.pushTo(ctx, c, g) })
 }
 
-// stamp gives each sample, in batch order, the next write generation:
-// max(nextGen, now in Unix µs). Generations increase with admission order, so
-// a later overwrite outranks the write it overwrites on every replica that
-// holds both, however late an earlier push lands. A gateway restarted on a
-// clock that stepped back can stamp lower generations than its previous run
+// lastWritePerSample copies samples keeping, for each series and timestamp,
+// only the batch's last sample: the batch shares one generation, so an
+// earlier duplicate could not otherwise lose to the later one it was
+// overwritten by.
+func lastWritePerSample(samples []metrics.PendingSample) []metrics.PendingSample {
+	type key struct {
+		series uint64
+		ts     int64
+	}
+	last := make(map[key]int, len(samples))
+	for i, s := range samples {
+		last[key{s.Labels.Hash(), s.TimestampMs}] = i
+	}
+	out := make([]metrics.PendingSample, 0, len(last))
+	for i, s := range samples {
+		if last[key{s.Labels.Hash(), s.TimestampMs}] == i {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// stamp gives the batch one write generation, max(nextGen, now in Unix µs),
+// and advances nextGen by one. One per batch, not per sample, keeps the
+// counter at the wall clock however large batches are, so a write admitted
+// later through another gateway with a synchronized clock still gets a higher
+// generation. Two gateways stamping in the same microsecond produce a tie,
+// which every read breaks the same way (chunk.Outranks). A gateway restarted
+// on a clock that stepped back stamps lower generations than its previous run
 // until the clock passes them (limitations.md).
 func (rt *Router) stamp(samples []metrics.PendingSample) {
 	now := rt.opts.Clock
@@ -168,10 +250,10 @@ func (rt *Router) stamp(samples []metrics.PendingSample) {
 		now = func() int64 { return time.Now().UnixMicro() }
 	}
 	rt.genMu.Lock()
-	defer rt.genMu.Unlock()
+	gen := max(rt.nextGen, now())
+	rt.nextGen = gen + 1
+	rt.genMu.Unlock()
 	for i := range samples {
-		gen := max(rt.nextGen, now())
-		rt.nextGen = gen + 1
 		samples[i].Gen = gen
 	}
 }
