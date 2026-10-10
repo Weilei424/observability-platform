@@ -150,6 +150,32 @@ func TestGatewayQuorumWarnNamesTheFailingIngesters(t *testing.T) {
 	}
 }
 
+// A quorum missed because a replica answered a protocol error is a 500 with
+// the generic body, but the log line must still say which ingesters failed
+// the write and why: the client-facing message carries neither.
+func TestGatewayProtocolQuorumErrorLogsItsCauseAndIngesters(t *testing.T) {
+	var buf bytes.Buffer
+	q, _ := url.Parse("http://127.0.0.1:1")
+	srv := api.New(api.Deps{
+		Config:    &config.Config{HTTPAddr: ":0", DataDir: t.TempDir(), LogLevel: "info"},
+		Logger:    slog.New(slog.NewJSONHandler(&buf, nil)),
+		Ingest:    observability.NewIngestMetrics(),
+		Upstreams: &api.Upstreams{Querier: q},
+		Writes: &fakeRouter{err: &rpc.QuorumError{Kind: "series", Failed: 1, Total: 4, Quorum: 2, RF: 3,
+			Ingesters: []string{"ingester-2:8080"}, Cause: errors.New("rpc: ingester ingester-2:8080 metrics/push answered 400: bad sample")}},
+	})
+	rr := post(t, srv, "/api/v1/ingest/metrics", okMetrics)
+	if rr.Code != http.StatusInternalServerError || !strings.Contains(rr.Body.String(), `"internal error"`) || strings.Contains(rr.Body.String(), "ingester-2") {
+		t.Fatalf("got %d %s, want 500 with the generic body", rr.Code, rr.Body)
+	}
+	logged := buf.String()
+	for _, want := range []string{`"level":"ERROR"`, `"msg":"write quorum not met"`, `"ingesters":["ingester-2:8080"]`, `answered 400: bad sample`} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("error line lacks %s: %s", want, logged)
+		}
+	}
+}
+
 func TestGatewayRequiresWrites(t *testing.T) {
 	defer func() {
 		if recover() == nil {
