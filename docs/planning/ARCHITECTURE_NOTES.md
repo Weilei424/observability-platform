@@ -558,7 +558,8 @@ records the decisions and the one place the code diverged from it.
   gateway decodes and validates with the same handler code as all-in-one
   (`TestGatewayValidationMatchesAllInOne`), then sends each owner its group over
   `POST /internal/v1/metrics/push` and `/logs/push`. Groups go out concurrently and the
-  worst outcome wins: `500` over `503` over `499`. The gateway owns the ingest rejection
+  worst outcome wins: `500` over `503` over `499` (6.3 replaces this with a per-key
+  quorum answered as soon as it is decided; see "Replication"). The gateway owns the ingest rejection
   counters. An already-expired write deadline is routed as an outage (`503`), matching
   `Client.do` (`TestRouterExpiredDeadlineIsUnavailable`).
 - **Divergence from the spec.** Spec 5.2 said the ingester push route keeps no
@@ -665,7 +666,8 @@ records the decisions and where the code corrected the spec.
   decision is still counted but does not change the answer
   (`TestRouterAnswersAtOnceWhenQuorumIsImpossible`). The `503` body is `write quorum not met: <k> of <n> series
   could not reach <W> of <RF> ingesters` (`streams` for Loki); the `500` body stays
-  `internal error` and the cause goes to the log at `error`. At RF=1 a failed
+  `internal error` and the cause and the failing ingesters go to the log at `error`
+  (`TestGatewayProtocolQuorumErrorLogsItsCauseAndIngesters`). At RF=1 a failed
   outage write carries that same quorum message. A plain `rpc.ErrUnavailable` elsewhere
   keeps `ingester
   unavailable`. A caller that cancels first gets `499`; the pushes go on regardless.
