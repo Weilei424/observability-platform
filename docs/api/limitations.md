@@ -148,8 +148,11 @@ These are properties of the whole system, not of the query languages.
   a querier quorum above the gateway's in the values, and, on an upgrade, a
   gateway quorum below the running querier's or a querier quorum above the
   running gateway's (read from each pod template's
-  `observability-platform.dev/replication-factor` annotation; a release from
-  before it is read from its ConfigMaps' `OBS_REPLICATION_FACTOR`, else as RF 1;
+  `observability-platform.dev/replication-factor` annotation, which is what the
+  pods loaded; a Deployment without it — a release from before 6.3, a deleted
+  Deployment, or pods that never rolled after an interrupted upgrade — counts as
+  RF 1, never as its ConfigMap says, since an upgrade applies the ConfigMap
+  before the pods roll;
   a release counts as live when either Deployment, either ConfigMap, the ingester
   StatefulSet, or kept ingester PVCs survive, so a recovery or a reinstall over
   kept PVCs is staged too),
