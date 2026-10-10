@@ -649,3 +649,16 @@ func (it *Iterator) decodeValue() (uint64, error) {
 
 func zigzagEncode(v int64) uint64 { return uint64((v << 1) ^ (v >> 63)) }
 func zigzagDecode(v uint64) int64 { return int64((v >> 1) ^ -(v & 1)) }
+
+// Outranks reports whether a sample written at generation genA with value valA
+// replaces one at genB with valB at the same timestamp: the higher generation
+// (the later write) wins, and an exact tie -- two writes stamped in the same
+// microsecond by different gateways -- goes to the larger value's bit pattern.
+// Every read and compaction path decides with it, so replicas holding the same
+// samples in any order always agree on the survivor.
+func Outranks(genA int64, valA float64, genB int64, valB float64) bool {
+	if genA != genB {
+		return genA > genB
+	}
+	return math.Float64bits(valA) > math.Float64bits(valB)
+}
