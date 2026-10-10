@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"math"
 	"sort"
+
+	"github.com/masonwheeler/observability-platform/internal/storage/chunk"
 )
 
 // Source is the read surface the query engine needs: one call per selector per
@@ -78,7 +80,7 @@ func dedupByGeneration(sorted []Sample) []Sample {
 	for i := 1; i < len(sorted); i++ {
 		last := &out[len(out)-1]
 		if sorted[i].TimestampMs == last.TimestampMs {
-			if sorted[i].Gen > last.Gen {
+			if chunk.Outranks(sorted[i].Gen, sorted[i].Value, last.Gen, last.Value) {
 				*last = sorted[i]
 			}
 			continue
@@ -102,7 +104,7 @@ func laterSample(a, b *Sample) *Sample {
 		return b
 	case b == nil:
 		return a
-	case b.TimestampMs > a.TimestampMs, b.TimestampMs == a.TimestampMs && b.Gen > a.Gen:
+	case b.TimestampMs > a.TimestampMs, b.TimestampMs == a.TimestampMs && chunk.Outranks(b.Gen, b.Value, a.Gen, a.Value):
 		return b
 	default:
 		return a
