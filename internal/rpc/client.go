@@ -92,7 +92,18 @@ func (c *Client) doNoContent(ctx context.Context, method, path string, in any) e
 	return c.call(ctx, method, path, nil, in, nil, http.StatusNoContent)
 }
 
+// callHeader is call that also hands back a successful answer's headers.
+func (c *Client) callHeader(ctx context.Context, method, path string, in any, want int) (http.Header, error) {
+	var hdr http.Header
+	err := c.callInto(ctx, method, path, nil, in, nil, want, &hdr)
+	return hdr, err
+}
+
 func (c *Client) call(ctx context.Context, method, path string, query url.Values, in, out any, want int) error {
+	return c.callInto(ctx, method, path, query, in, out, want, nil)
+}
+
+func (c *Client) callInto(ctx context.Context, method, path string, query url.Values, in, out any, want int, hdr *http.Header) error {
 	if c.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, c.timeout)
@@ -158,6 +169,9 @@ func (c *Client) call(ctx context.Context, method, path string, query url.Values
 		return fmt.Errorf("rpc: %s %s answered %d: %s", c.peer, path, resp.StatusCode, errorMessage(raw))
 	}
 
+	if hdr != nil {
+		*hdr = resp.Header
+	}
 	if want == http.StatusNoContent {
 		return nil
 	}
