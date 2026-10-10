@@ -152,6 +152,11 @@ and the two values must match: their `ring ready` lines carry
 - **Deadlines.** `OBS_INGESTER_TIMEOUT` (default 10s, at least 100ms) bounds
   each push and each ingester read; a timeout is an outage, so a hung ingester
   is a failed replica.
+- **Member identity.** Every internal request names the member it meant
+  (`X-Obs-Member`), and an ingester given `OBS_INGESTER_SELF_URL` refuses one
+  meant for another with `421`, an outage to the caller. A connection that
+  reaches the wrong ingester -- an address reused across a container restart,
+  held by keep-alive -- then never counts one ingester's acknowledgement twice.
 - **Metrics.** `obs_gateway_write_quorum_total{outcome}` (`full`, `degraded`,
   `failed`) and `obs_querier_ingester_reads_total{ingester,outcome}`; the
   internals dashboard plots them as "Write quorum" and "Ingester reads".
