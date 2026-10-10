@@ -84,7 +84,10 @@ Membership changes are in
 `OBS_TARGET`, `OBS_INGESTER_URL`, `OBS_STORE_URL`, and `OBS_QUERIER_URL` are
 rendered by the chart from `topology` and are refused under `config` — setting
 one there would emit the key twice and could contradict what the chart itself
-derives.
+derives. So is `OBS_INGESTER_SELF_URL`: each ingester pod gets its own URL,
+`http://<pod>.<ingester>-headless:<port>` from its pod name, so it refuses a
+request meant for another member (an address a restarted pod reused, held by
+keep-alive).
 
 Every `config.*` key must start with `OBS_` and correspond to a `v.SetDefault` in
 `internal/config/config.go` — Viper silently ignores env vars it has no default for, so a
