@@ -1942,3 +1942,82 @@ func TestNewBlockStore_EqualGenerationTieSourcesReclaimed(t *testing.T) {
 		t.Fatalf("m@1000 = %v (found=%v, err=%v), want the tie's winner 2", s.Value, found, err)
 	}
 }
+
+// writeTwoSampleBlock writes a block of one series, name, holding (1000, v1) and
+// (2000, v2), both at generation gen. Returns its ID.
+func writeTwoSampleBlock(t *testing.T, blocksDir, tmpDir, name string, v1, v2 float64, gen int64) string {
+	t.Helper()
+	c := chunk.NewChunk()
+	for _, s := range []struct {
+		ts int64
+		v  float64
+	}{{1000, v1}, {2000, v2}} {
+		if err := c.Append(s.ts, s.v, gen); err != nil {
+			t.Fatalf("chunk append: %v", err)
+		}
+	}
+	w, err := block.NewWriter(blocksDir, tmpDir)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	fp := uint64(metricFingerprint(t, name))
+	if err := w.AddSeries(fp, []block.LabelPair{{Name: "__name__", Value: name}}, []*chunk.Chunk{c}); err != nil {
+		t.Fatalf("AddSeries: %v", err)
+	}
+	meta, err := w.Commit()
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	return meta.BlockID
+}
+
+// A crash part way through retiring a tie's sources -- one already moved out to
+// tmp, the other still live -- converges on restart, even when each source holds
+// a winner the other lost to: the moved source still witnesses its winners, the
+// live one is reclaimed, and tmp is cleared.
+func TestNewBlockStore_TieSourceLeftByAPartialRetireIsReclaimed(t *testing.T) {
+	dir := t.TempDir()
+	blocksDir := filepath.Join(dir, "metrics", "blocks")
+	tmpDir := filepath.Join(dir, "metrics", "tmp")
+	for _, d := range []string{blocksDir, tmpDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	// a wins at 1000 (2 > 1), b wins at 2000.
+	a := writeTwoSampleBlock(t, blocksDir, tmpDir, "m", 2, 1, 5)
+	b := writeTwoSampleBlock(t, blocksDir, tmpDir, "m", 1, 2, 5)
+	merged := compactBlocks(t, blocksDir, tmpDir, a, b)
+	for _, gone := range []string{a, b} {
+		t.Run("moved "+map[string]string{a: "a", b: "b"}[gone], func(t *testing.T) {
+			run := t.TempDir()
+			if err := os.CopyFS(run, os.DirFS(dir)); err != nil {
+				t.Fatal(err)
+			}
+			rb, rt := filepath.Join(run, "metrics", "blocks"), filepath.Join(run, "metrics", "tmp")
+			if err := os.Rename(filepath.Join(rb, gone), filepath.Join(rt, gone)); err != nil {
+				t.Fatal(err)
+			}
+			bs, err := metrics.NewBlockStore(run)
+			if err != nil {
+				t.Fatalf("NewBlockStore: %v", err)
+			}
+			defer bs.Close()
+			if infos := bs.BlockInfos(); len(infos) != 1 || infos[0].ID != merged {
+				t.Fatalf("blocks = %+v, want only the survivor %s", infos, merged)
+			}
+			for _, src := range []string{a, b} {
+				if _, err := os.Stat(filepath.Join(rb, src)); !os.IsNotExist(err) {
+					t.Errorf("source %s still in blocks: %v", src, err)
+				}
+			}
+			if left, _ := os.ReadDir(rt); len(left) != 0 {
+				t.Errorf("tmp still holds %d entries after startup", len(left))
+			}
+			got, err := bs.QueryRange(metricFingerprint(t, "m"), 0, 3000)
+			if err != nil || len(got) != 2 || got[0].Value != 2 || got[1].Value != 2 {
+				t.Fatalf("m = %+v, %v; want the tie's winners 2 and 2", got, err)
+			}
+		})
+	}
+}
