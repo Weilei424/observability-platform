@@ -166,3 +166,26 @@ func TestQuerierWarnsOnlyWhenTheWholeReadSucceeds(t *testing.T) {
 		t.Errorf("a failed read logged that replication answered it: %s", logged)
 	}
 }
+
+// One request, one warning: /api/v1/series reads the sources once per
+// match[] selector, and every read skips the same down ingester, but the
+// request logs "read answered by replication" once, after it succeeded.
+func TestQuerierWarnsOncePerRequest(t *testing.T) {
+	cfg := testConfig(t, config.TargetQuerier)
+	cfg.IngesterURLs = []string{readsPeer(t), readsPeer(t), downPeer(t)}
+	cfg.StoreURL = readsPeer(t)
+	cfg.ReplicationFactor = 3
+	var buf bytes.Buffer
+	a, err := app.Build(cfg, slog.New(slog.NewJSONHandler(&buf, nil)))
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	q := url.Values{"match[]": {"a", "b"}}
+	rec := do(a.Handler, http.MethodGet, "/api/v1/series?"+q.Encode(), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("series with one ingester down: %d %s", rec.Code, rec.Body)
+	}
+	if n := strings.Count(buf.String(), "read answered by replication"); n != 1 {
+		t.Errorf("logged %d replication warnings for one request with two selectors, want 1:\n%s", n, buf.String())
+	}
+}
