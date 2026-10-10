@@ -6,8 +6,10 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/masonwheeler/observability-platform/internal/drain"
@@ -135,5 +137,35 @@ func TestPushToADrainingIngesterIsAnOutage(t *testing.T) {
 	}
 	if len(m.got) != 0 || len(l.got) != 0 {
 		t.Errorf("a draining ingester appended %d samples and %d lines", len(m.got), len(l.got))
+	}
+}
+
+// A push whose caller's deadline has passed applies nothing: the gateway has
+// given up on it, and a later push of the same keys may already be on its way.
+func TestPushPastItsDeadlineAppliesNothing(t *testing.T) {
+	m, l := &recordingMetrics{}, &recordingLogs{}
+	r := chi.NewRouter()
+	r.Route("/internal/v1", func(r chi.Router) { MountWrites(r, m, l, observability.NewIngestMetrics()) })
+	srv := httptest.NewServer(r)
+	t.Cleanup(srv.Close)
+	past := strconv.FormatInt(time.Now().Add(-time.Second).UnixMicro(), 10)
+	for path, body := range map[string]string{
+		"/internal/v1/metrics/push": `{"series":[{"labels":{"__name__":"late"},"samples":[[1000,"1"]]}]}`,
+		"/internal/v1/logs/push":    `{"streams":[{"labels":{"service":"late"},"entries":[[1000,"x"]]}]}`,
+	} {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(DeadlineHeader, past)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 499 {
+			t.Errorf("%s past its deadline = %d, want 499", path, resp.StatusCode)
+		}
+	}
+	if len(m.got) != 0 || len(l.got) != 0 {
+		t.Errorf("a push past its deadline appended %d samples and %d lines", len(m.got), len(l.got))
 	}
 }
