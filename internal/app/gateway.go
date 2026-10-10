@@ -44,6 +44,9 @@ func buildGateway(cfg *config.Config, log *slog.Logger) (*App, error) {
 	router, err := rpc.NewRouter(members, rpc.RouterOptions{
 		ReplicationFactor: rf,
 		Timeout:           timeout,
+		// Ask each ingester at start whether it takes stamped generations, so
+		// the first writes carry them; one from before 6.3 is sent none.
+		ProbeGenerations: true,
 		ObserveMember: func(member, outcome string) {
 			rm.IngesterRequests.WithLabelValues(member, outcome).Inc()
 		},
