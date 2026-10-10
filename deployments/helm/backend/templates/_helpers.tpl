@@ -185,6 +185,28 @@ observability-platform.dev/replication-factor
 {{- end -}}
 
 {{/*
+backend.ingesterDataOrdinals: one past the highest ingester ordinal with a kept
+PVC, from a PersistentVolumeClaim list's items. Called as (list $root items).
+The StatefulSet names its PVCs data-<ingester>-<ordinal>, so the ingesters 0 to
+the result minus 1 may hold writes even with nothing else of the release left;
+0 when there is no such PVC. Other components' PVCs and names whose suffix is
+not a number are ignored.
+*/}}
+{{- define "backend.ingesterDataOrdinals" -}}
+{{- $root := index . 0 -}}
+{{- $prefix := printf "data-%s-" (include "backend.componentName" (list $root "ingester")) -}}
+{{- $n := 0 -}}
+{{- range (index . 1) | default list -}}
+{{- $name := dig "metadata" "name" "" . -}}
+{{- if hasPrefix $prefix $name -}}
+{{- $ordinal := trimPrefix $prefix $name -}}
+{{- if regexMatch "^[0-9]+$" $ordinal -}}{{- $n = max $n (add1 (atoi $ordinal)) -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $n -}}
+{{- end -}}
+
+{{/*
 backend.ringStagingCheck: refuse a ring change that skips a stage. Called as
 (list $root $live), where $live holds the live "gateway" and "querier"
 Deployments and their "gatewayConfig" and "querierConfig" ConfigMaps, as
@@ -281,7 +303,13 @@ RF 1. Treating the unknown as RF 1 stages the change, never skips it.
 {{- $liveGwRF := dig "spec" "template" "metadata" "annotations" $rfKey "1" ($gwDep | default dict) -}}
 {{- $liveQRF := dig "spec" "template" "metadata" "annotations" $rfKey "1" ($qDep | default dict) -}}
 {{- $rfChanged := or (ne $gwRF (int $liveGwRF)) (ne $qRF (int $liveQRF)) -}}
-{{- if or $rfChanged (and $prev (or (ne $writeCount (int $prev.writeReplicas)) (ne $replicas (int $prev.replicas)))) -}}
+{{- /*
+Wait out a surviving Deployment's rollout before any ring or RF change, and
+always when the previous ring is not fully known: a recovery reads a
+survivor's count from its pod template, which is only what every pod runs
+once the rollout is done.
+*/}}
+{{- if or $rfChanged (not $prev) (and $prev (or (ne $writeCount (int $prev.writeReplicas)) (ne $replicas (int $prev.replicas)))) -}}
 {{- range $dep := list $gwDep $qDep -}}
 {{- if $dep -}}{{- /* a missing Deployment has no old pods to wait for */}}
 {{- $want := int (dig "spec" "replicas" 1 $dep) -}}
