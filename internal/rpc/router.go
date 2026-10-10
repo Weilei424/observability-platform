@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/masonwheeler/observability-platform/internal/logs"
@@ -32,6 +33,13 @@ type Router struct {
 	// while a slow handler has yet to reach the router.
 	mu     sync.Mutex
 	closed bool
+	// order holds, per member and key, the done channel of the latest push
+	// carrying that key to that member, under mu. A push waits for the ones
+	// before it on the same member and keys, so every replica applies a key's
+	// writes in the order their batches were admitted: an acknowledged write's
+	// late background push can never land after, and so outrank, an overwrite
+	// sent after it.
+	order map[string]map[uint64]chan struct{}
 }
 
 // ErrRouterClosed refuses a batch that arrives after Close: the gateway is
@@ -40,10 +48,18 @@ var ErrRouterClosed = fmt.Errorf("%w: write routing: the gateway is shutting dow
 
 // RouterOptions configures a Router.
 type RouterOptions struct {
-	ReplicationFactor int                          // <= 0 means 1
-	Timeout           time.Duration                // per push; <= 0 means none
-	ObserveMember     func(member, outcome string) // per push: ok, unavailable, error
-	ObserveBatch      func(outcome string)         // per batch, once every push ended: full, degraded, failed
+	ReplicationFactor int                                      // <= 0 means 1
+	Timeout           time.Duration                            // per push; <= 0 means none
+	ObserveMember     func(member, outcome string)             // per push: ok, unavailable, error
+	ObserveBatch      func(ctx context.Context, b BatchReport) // per batch, once every push ended; ctx is the request's, detached
+}
+
+// BatchReport is a routed batch's final account, once every push ended.
+type BatchReport struct {
+	Outcome    string   // full, degraded, or failed
+	Ingesters  []string // MemberLabel of every replica that failed a push, sorted
+	Err        *QuorumError
+	CallerGone bool // the caller left before the batch was decided, so it got no QuorumError to log
 }
 
 // QuorumError reports a write batch in which some key could not reach a
@@ -76,7 +92,7 @@ func NewRouter(r *ring.Ring, opts RouterOptions) (*Router, error) {
 	if opts.Timeout > 0 {
 		copts = append(copts, WithRequestTimeout(opts.Timeout))
 	}
-	rt := &Router{ring: r, clients: map[string]*Client{}, rf: rf, opts: opts}
+	rt := &Router{ring: r, clients: map[string]*Client{}, rf: rf, opts: opts, order: map[string]map[uint64]chan struct{}{}}
 	for _, m := range r.Members() {
 		c, err := NewClient("ingester "+MemberLabel(m), m, copts...)
 		if err != nil {
@@ -161,6 +177,7 @@ func replicate[T any](ctx context.Context, rt *Router, kind string, items []T, k
 		return callerErr(err)
 	}
 	keyIdx := map[uint64]int{}
+	var keys []uint64 // keys[ki] is the key of replicasOf[ki]
 	var replicasOf [][]string
 	groups := map[string][]T{}
 	memberKeys := map[string][]int{}
@@ -174,6 +191,7 @@ func replicate[T any](ctx context.Context, rt *Router, kind string, items []T, k
 			}
 			ki = len(replicasOf)
 			keyIdx[k] = ki
+			keys = append(keys, k)
 			replicasOf = append(replicasOf, reps)
 			for _, m := range reps {
 				memberKeys[m] = append(memberKeys[m], ki)
@@ -199,14 +217,48 @@ func replicate[T any](ctx context.Context, rt *Router, kind string, items []T, k
 		return ErrRouterClosed
 	}
 	rt.wg.Add(len(groups) + 1) // every push, and the collector below
+	// Take this batch's place in each member's per-key order, in the same
+	// critical section as admission, so two batches order the same way on
+	// every member.
+	type turn struct {
+		after []chan struct{} // pushes this one must not overtake
+		done  chan struct{}
+		keys  []uint64
+	}
+	turns := make(map[string]turn, len(groups))
+	for member := range groups {
+		byKey := rt.order[member]
+		if byKey == nil {
+			byKey = map[uint64]chan struct{}{}
+			rt.order[member] = byKey
+		}
+		tn := turn{done: make(chan struct{})}
+		seen := map[chan struct{}]bool{}
+		for _, ki := range memberKeys[member] {
+			k := keys[ki]
+			if prev, ok := byKey[k]; ok && !seen[prev] {
+				seen[prev] = true
+				tn.after = append(tn.after, prev)
+			}
+			byKey[k] = tn.done
+			tn.keys = append(tn.keys, k)
+		}
+		turns[member] = tn
+	}
 	rt.mu.Unlock()
 
 	results := make(chan result, len(groups)) // never blocks a push
 	bg := context.WithoutCancel(ctx)
+	var callerGone atomic.Bool // set when the caller leaves before the decision
 	for member, g := range groups {
+		tn := turns[member]
 		go func() {
 			defer rt.wg.Done()
-			err := send(bg, rt.clients[member], g) // the client's timeout bounds it
+			defer rt.finishTurn(member, tn.keys, tn.done)
+			err := rt.awaitTurn(member, tn.after)
+			if err == nil {
+				err = send(bg, rt.clients[member], g) // the client's timeout bounds it
+			}
 			if rt.opts.ObserveMember != nil && !errors.Is(err, context.Canceled) {
 				rt.opts.ObserveMember(MemberLabel(member), OutcomeOf(err))
 			}
@@ -282,16 +334,21 @@ func replicate[T any](ctx context.Context, rt *Router, kind string, items []T, k
 				decided <- nil
 			}
 		}
-		_, failed := quorumErr()
+		qe, failed := quorumErr()
 		if rt.opts.ObserveBatch != nil {
-			outcome := "full"
+			b := BatchReport{Outcome: "full", CallerGone: callerGone.Load()}
+			for ki := range replicasOf {
+				b.Ingesters = append(b.Ingesters, failedBy[ki]...)
+			}
+			slices.Sort(b.Ingesters)
+			b.Ingesters = slices.Compact(b.Ingesters)
 			switch {
 			case failed > 0:
-				outcome = "failed"
+				b.Outcome, b.Err = "failed", qe
 			case anyFailure:
-				outcome = "degraded"
+				b.Outcome = "degraded"
 			}
-			rt.opts.ObserveBatch(outcome)
+			rt.opts.ObserveBatch(bg, b)
 		}
 	}()
 
@@ -299,7 +356,50 @@ func replicate[T any](ctx context.Context, rt *Router, kind string, items []T, k
 	case err := <-decided:
 		return err
 	case <-ctx.Done():
+		callerGone.Store(true)
 		return callerErr(ctx.Err())
+	}
+}
+
+// awaitTurn waits for the earlier pushes to member that carry any of this
+// push's keys, so a replica never applies a key's writes out of order. The
+// wait is bounded by the router's timeout: if an earlier push is still
+// running by then the ingester is hung, and this push fails as an outage
+// rather than overtake it.
+func (rt *Router) awaitTurn(member string, after []chan struct{}) error {
+	if len(after) == 0 {
+		return nil
+	}
+	var expired <-chan time.Time
+	if rt.opts.Timeout > 0 {
+		t := time.NewTimer(rt.opts.Timeout)
+		defer t.Stop()
+		expired = t.C
+	}
+	for _, prev := range after {
+		select {
+		case <-prev:
+		case <-expired:
+			return fmt.Errorf("%w: ingester %s: an earlier push of the same keys is still running", ErrUnavailable, MemberLabel(member))
+		}
+	}
+	return nil
+}
+
+// finishTurn releases the pushes waiting on this one and forgets the keys it
+// is still the latest push for.
+func (rt *Router) finishTurn(member string, keys []uint64, done chan struct{}) {
+	close(done)
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	byKey := rt.order[member]
+	for _, k := range keys {
+		if byKey[k] == done {
+			delete(byKey, k)
+		}
+	}
+	if len(byKey) == 0 {
+		delete(rt.order, member)
 	}
 }
 
