@@ -541,7 +541,7 @@ func (bs *BlockStore) QueryInstant(id SeriesID, tMs int64) (Sample, bool, error)
 					continue
 				}
 				gen := it.Gen()
-				if !found || ts > best.TimestampMs || (ts == best.TimestampMs && gen > best.Gen) {
+				if !found || ts > best.TimestampMs || (ts == best.TimestampMs && chunk.Outranks(gen, val, best.Gen, best.Value)) {
 					best = Sample{SeriesID: id, TimestampMs: ts, Value: val, Gen: gen}
 					found = true
 				}
