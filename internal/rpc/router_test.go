@@ -1,7 +1,9 @@
 package rpc
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -593,7 +595,8 @@ func (g *genRecorder) newest() (float64, bool) {
 }
 
 // genIngester serves pushes into a genRecorder; with slowFirst, its first push
-// is held for that long before it is applied.
+// carrying samples (not the gateway's empty probe) is held for that long
+// before it is applied.
 func genIngester(t *testing.T, slowFirst time.Duration) (string, *genRecorder) {
 	t.Helper()
 	m := &genRecorder{}
@@ -601,7 +604,9 @@ func genIngester(t *testing.T, slowFirst time.Duration) (string, *genRecorder) {
 	r.Route("/internal/v1", func(r chi.Router) { MountWrites(r, m, &recordingLogs{}, observability.NewIngestMetrics()) })
 	var first atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if slowFirst > 0 && first.CompareAndSwap(false, true) {
+		body, _ := io.ReadAll(req.Body)
+		req.Body = io.NopCloser(bytes.NewReader(body))
+		if slowFirst > 0 && bytes.Contains(body, []byte(`"samples"`)) && first.CompareAndSwap(false, true) {
 			time.Sleep(slowFirst)
 		}
 		r.ServeHTTP(w, req)
@@ -610,18 +615,19 @@ func genIngester(t *testing.T, slowFirst time.Duration) (string, *genRecorder) {
 	return srv.URL, m
 }
 
-// The gateway stamps each sample's generation at admission, in batch order,
-// and never repeats one: max(previous + 1, now).
+// The gateway stamps each batch one generation at admission, never repeating
+// one: max(previous + 1, now). One per batch keeps the counter at the clock.
 func TestRouterStampsIncreasingGenerations(t *testing.T) {
 	u, m := genIngester(t, 0)
 	r, _ := ring.New([]string{u})
 	var clock atomic.Int64
 	clock.Store(1000)
-	rt, err := NewRouter(r, RouterOptions{Clock: clock.Load})
+	rt, err := NewRouter(r, RouterOptions{Clock: clock.Load, ProbeGenerations: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(rt.Wait)
+	rt.Wait() // the probe has heard the ingester takes generations
 	l, _ := metrics.NewLabels(map[string]string{"__name__": "g"})
 	in := []metrics.PendingSample{{Labels: l, TimestampMs: 1, Value: 1}, {Labels: l, TimestampMs: 2, Value: 2}}
 	if err := rt.PushSamples(context.Background(), in); err != nil {
@@ -634,7 +640,7 @@ func TestRouterStampsIncreasingGenerations(t *testing.T) {
 	rt.Wait()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if want := []int64{1000, 1001, 1002}; !slices.Equal(m.gens, want) {
+	if want := []int64{1000, 1000, 1001}; !slices.Equal(m.gens, want) {
 		t.Errorf("generations %v, want %v", m.gens, want)
 	}
 	if in[0].Gen != 0 {
@@ -652,16 +658,18 @@ func TestOverwriteThroughTwoGatewaysWinsOnEveryReplica(t *testing.T) {
 	ub, b := genIngester(t, 0)
 	uc, c := genIngester(t, 300*time.Millisecond) // v1's push lands here after v2's
 	r, _ := ring.New([]string{ua, ub, uc})
-	gw1, err := NewRouter(r, RouterOptions{ReplicationFactor: 3, Timeout: 2 * time.Second})
+	gw1, err := NewRouter(r, RouterOptions{ReplicationFactor: 3, Timeout: 2 * time.Second, ProbeGenerations: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	gw2, err := NewRouter(r, RouterOptions{ReplicationFactor: 3, Timeout: 2 * time.Second})
+	gw2, err := NewRouter(r, RouterOptions{ReplicationFactor: 3, Timeout: 2 * time.Second, ProbeGenerations: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(gw1.Wait)
 	t.Cleanup(gw2.Wait)
+	gw1.Wait() // both probes heard every ingester takes generations
+	gw2.Wait()
 	l, _ := metrics.NewLabels(map[string]string{"__name__": "over"})
 	if err := gw1.PushSamples(context.Background(), []metrics.PendingSample{{Labels: l, TimestampMs: 1000, Value: 1}}); err != nil {
 		t.Fatal(err)
@@ -680,6 +688,129 @@ func TestOverwriteThroughTwoGatewaysWinsOnEveryReplica(t *testing.T) {
 	for name, m := range map[string]*genRecorder{"a": a, "b": b, "c (v1 landed last)": c} {
 		if v, ok := m.newest(); !ok || v != 2 {
 			t.Errorf("replica %s: the highest generation holds %v, want the overwrite 2", name, v)
+		}
+	}
+}
+
+// A large batch does not push a gateway's counter ahead of its clock: the
+// batch takes one generation, so a write admitted a microsecond later through
+// another gateway still outranks it.
+func TestALargeBatchDoesNotOutrankALaterWriteElsewhere(t *testing.T) {
+	u, m := genIngester(t, 0)
+	r, _ := ring.New([]string{u})
+	gw1, err := NewRouter(r, RouterOptions{Clock: func() int64 { return 1000 }, ProbeGenerations: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw2, err := NewRouter(r, RouterOptions{Clock: func() int64 { return 1001 }, ProbeGenerations: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(gw1.Wait)
+	t.Cleanup(gw2.Wait)
+	gw1.Wait()
+	gw2.Wait()
+	l, _ := metrics.NewLabels(map[string]string{"__name__": "big"})
+	big := make([]metrics.PendingSample, 10000)
+	for i := range big {
+		big[i] = metrics.PendingSample{Labels: l, TimestampMs: int64(i), Value: 1}
+	}
+	if err := gw1.PushSamples(context.Background(), big); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw2.PushSamples(context.Background(), []metrics.PendingSample{{Labels: l, TimestampMs: 0, Value: 2}}); err != nil {
+		t.Fatal(err)
+	}
+	gw1.Wait()
+	gw2.Wait()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if last := m.gens[len(m.gens)-1]; last != 1001 || m.gens[0] != 1000 {
+		t.Errorf("big batch stamped %d.., the later write %d; want 1000 and 1001", m.gens[0], last)
+	}
+}
+
+// A batch repeating one series and timestamp keeps only its last sample: the
+// batch shares a generation, so an earlier duplicate could not lose otherwise.
+func TestRouterKeepsTheLastDuplicateInABatch(t *testing.T) {
+	u, m := genIngester(t, 0)
+	r, _ := ring.New([]string{u})
+	rt, err := NewRouter(r, RouterOptions{ProbeGenerations: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(rt.Wait)
+	rt.Wait()
+	l, _ := metrics.NewLabels(map[string]string{"__name__": "dup"})
+	in := []metrics.PendingSample{{Labels: l, TimestampMs: 5, Value: 1}, {Labels: l, TimestampMs: 6, Value: 7}, {Labels: l, TimestampMs: 5, Value: 2}}
+	if err := rt.PushSamples(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	rt.Wait()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !slices.Equal(m.vals, []float64{7, 2}) {
+		t.Errorf("applied %v, want [7 2]: the earlier duplicate at ts 5 dropped", m.vals)
+	}
+}
+
+// legacyIngester answers like an ingester from before 6.3: it refuses a push
+// sample carrying a third element (400) and never says it takes generations.
+func legacyIngester(t *testing.T) (string, *atomic.Int64) {
+	t.Helper()
+	var refused atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var body struct {
+			Series []struct {
+				Samples [][]json.RawMessage `json:"samples"`
+			} `json:"series"`
+		}
+		_ = json.NewDecoder(req.Body).Decode(&body)
+		for _, s := range body.Series {
+			for _, smp := range s.Samples {
+				if len(smp) != 2 {
+					refused.Add(1)
+					http.Error(w, "push sample must be [timestamp, value]", http.StatusBadRequest)
+					return
+				}
+			}
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, &refused
+}
+
+// A rolling upgrade: a new gateway before two of three ingesters are new. It
+// sends generations only to the ingester that says it takes them, so the old
+// ones never refuse a sample and the write meets quorum.
+func TestNewGatewayOverOldIngestersMeetsQuorum(t *testing.T) {
+	o1, r1 := legacyIngester(t)
+	o2, r2 := legacyIngester(t)
+	n, m := genIngester(t, 0)
+	r, _ := ring.New([]string{o1, o2, n})
+	rt, err := NewRouter(r, RouterOptions{ReplicationFactor: 3, Timeout: 2 * time.Second, ProbeGenerations: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(rt.Wait)
+	rt.Wait()
+	l, _ := metrics.NewLabels(map[string]string{"__name__": "upgrade"})
+	for i := range 3 {
+		if err := rt.PushSamples(context.Background(), []metrics.PendingSample{{Labels: l, TimestampMs: int64(i), Value: 1}}); err != nil {
+			t.Fatalf("write %d during the upgrade: %v", i, err)
+		}
+	}
+	rt.Wait()
+	if r1.Load()+r2.Load() != 0 {
+		t.Errorf("old ingesters refused %d samples: the gateway sent them generations", r1.Load()+r2.Load())
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, g := range m.gens {
+		if g == 0 {
+			t.Errorf("the new ingester got a sample without the gateway's generation: %v", m.gens)
+			break
 		}
 	}
 }
