@@ -21,6 +21,14 @@ type Ingester interface {
 	Append(labels Labels, timestampMs int64, value float64) error
 }
 
+// GenIngester accepts a sample with the write generation its writer already
+// assigned. The gateway stamps a generation once per write and every replica
+// stores exactly that one, so replicas agree on which of two writes to one
+// series and timestamp is newer whatever order the writes reach them in.
+type GenIngester interface {
+	AppendWithGeneration(labels Labels, timestampMs int64, value float64, gen int64) error
+}
+
 // Querier retrieves metric samples from storage.
 type Querier interface {
 	QueryRange(id SeriesID, startMs, endMs int64) ([]Sample, error)
