@@ -246,3 +246,58 @@ func TestReplicationDuplicatesNeverChangeAnswers(t *testing.T) {
 		}
 	}
 }
+
+// Every replica stores the generation the gateway stamped, so replicas agree
+// on which of two writes is newer; an overwrite sent through a second gateway
+// wins on every replica.
+func TestReplicasStoreTheGatewaysGeneration(t *testing.T) {
+	c := startClusterRF(t, 3, 3)
+	base := time.Now().UnixMilli()
+	c.ingest(t, "split_metric", base, 1)
+	// The 204 comes at quorum; the third replica's push may land a moment later.
+	eventually(t, "every replica holds the write", func() bool {
+		for _, u := range c.ingesterURLs {
+			if len(metricSelectFrom(t, "ingester", u, base, base)) != 1 {
+				return false
+			}
+		}
+		return true
+	})
+	var gens []int64
+	for _, u := range c.ingesterURLs {
+		gens = append(gens, metricSelectFrom(t, "ingester", u, base, base)[0].Gen)
+	}
+	if gens[0] <= 0 || gens[0] != gens[1] || gens[1] != gens[2] {
+		t.Fatalf("replicas hold generations %v, want one positive generation everywhere", gens)
+	}
+
+	// A second gateway pod over the same ring.
+	cfg := *c.gateway.cfg
+	cfg.HTTPAddr = freeAddr(t)
+	gw2 := &process{t: t, cfg: &cfg}
+	gw2.start()
+	t.Cleanup(gw2.stop)
+	body := fmt.Sprintf(`{"metrics":[{"name":"split_metric","labels":{"run":"split"},"timestamp_ms":%d,"value":2}]}`, base)
+	resp, err := httpClient.Post("http://"+cfg.HTTPAddr+"/api/v1/ingest/metrics", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("overwrite through the second gateway = %d", resp.StatusCode)
+	}
+	if v, code, _ := c.instant(t, "split_metric", base); v != "2" {
+		t.Errorf("after the overwrite through the second gateway: %q (%d), want 2", v, code)
+	}
+	// Each replica's answer is its highest generation (a head read dedups by
+	// it); once the third replica's push lands, every one holds the overwrite.
+	eventually(t, "every replica's highest generation holds the overwrite", func() bool {
+		for _, u := range c.ingesterURLs {
+			s := metricSelectFrom(t, "ingester", u, base, base)
+			if len(s) != 1 || s[0].Value != 2 {
+				return false
+			}
+		}
+		return true
+	})
+}
