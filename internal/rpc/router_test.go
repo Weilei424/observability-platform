@@ -3,11 +3,13 @@ package rpc
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -474,5 +476,81 @@ func TestRouterProtocolErrorWinsWithinAFailedKey(t *testing.T) {
 	var qe *QuorumError
 	if !errors.As(err, &qe) || errors.Is(err, ErrUnavailable) {
 		t.Fatalf("err = %v, want a QuorumError whose cause is the protocol error", err)
+	}
+}
+
+// countingIngester counts the pushes it accepts, safely across goroutines.
+func countingIngester(t *testing.T) (string, *atomic.Int64) {
+	t.Helper()
+	var n atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		n.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, &n
+}
+
+// After Close a write is refused as an outage, and nothing reaches an ingester.
+func TestRouterRefusesBatchesAfterClose(t *testing.T) {
+	u1, n1 := countingIngester(t)
+	u2, n2 := countingIngester(t)
+	u3, n3 := countingIngester(t)
+	r, _ := ring.New([]string{u1, u2, u3})
+	rt, err := NewRouter(r, RouterOptions{ReplicationFactor: 3, Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	err = rt.PushSamples(context.Background(), samplesFor(t, 5))
+	if !errors.Is(err, ErrRouterClosed) || !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("push after Close: err = %v, want ErrRouterClosed (an outage)", err)
+	}
+	if got := n1.Load() + n2.Load() + n3.Load(); got != 0 {
+		t.Errorf("%d pushes reached an ingester after Close", got)
+	}
+}
+
+// Close racing writes: every write is either admitted before Close (and
+// waited for) or refused, so nothing lands after Close returns, and a
+// WaitGroup Add never races Close's Wait (run under -race).
+func TestRouterCloseRacingWritesAdmitsNothingAfterward(t *testing.T) {
+	u1, n1 := countingIngester(t)
+	u2, n2 := countingIngester(t)
+	u3, n3 := countingIngester(t)
+	r, _ := ring.New([]string{u1, u2, u3})
+	rt, err := NewRouter(r, RouterOptions{ReplicationFactor: 3, Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	var writers sync.WaitGroup
+	for range 8 {
+		writers.Add(1)
+		go func() {
+			defer writers.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_ = rt.PushSamples(context.Background(), samplesFor(t, 3))
+			}
+		}()
+	}
+	time.Sleep(50 * time.Millisecond)
+	if err := rt.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	landed := n1.Load() + n2.Load() + n3.Load()
+	time.Sleep(100 * time.Millisecond) // writers keep trying, and are refused
+	close(stop)
+	writers.Wait()
+	if after := n1.Load() + n2.Load() + n3.Load(); after != landed {
+		t.Errorf("%d pushes landed after Close returned", after-landed)
 	}
 }
