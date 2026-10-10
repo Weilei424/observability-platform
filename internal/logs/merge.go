@@ -119,9 +119,11 @@ type HeadsOptions struct {
 	// Observe is called once per head read with the head's index; err is nil
 	// on success.
 	Observe func(head int, err error)
-	// OnSkip is called, once, with the skipped head indexes when a read
-	// succeeded only by skipping.
-	OnSkip func(skipped []int)
+	// OnSkip is called, once, with the read's context and the skipped head
+	// indexes when the heads were read only by skipping. It runs when the
+	// heads are done, before an outer Merge reads the store, so it records
+	// the skip; whoever sees the whole read succeed reports it.
+	OnSkip func(ctx context.Context, skipped []int)
 }
 
 // MergeHeadsWith is MergeHeads that may skip up to opts.Tolerate failed heads.
@@ -198,7 +200,7 @@ func collect[T any](ctx context.Context, t tolerantHeads, readHead func(Source) 
 		return zero, err
 	}
 	if len(skipped) > 0 && t.opts.OnSkip != nil {
-		t.opts.OnSkip(skipped)
+		t.opts.OnSkip(ctx, skipped)
 	}
 	return out, nil
 }
