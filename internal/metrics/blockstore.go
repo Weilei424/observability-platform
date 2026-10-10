@@ -57,20 +57,33 @@ func NewBlockStore(dataDir string) (*BlockStore, error) {
 		}
 	}
 
-	// Clean up orphaned temp directories.
+	// Blocks a crash left in tmpDir part way through retiring superseded sources
+	// (retireBlocks) are read as witnesses, never served: a survivor's
+	// equal-generation tie winner may live only in a source already moved there,
+	// and its losing sources still in blockDir need that witness to be reclaimed.
+	// tmpDir is wiped once reclamation is done.
 	entries, err := os.ReadDir(tmpDir)
 	if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("blockstore: read tmp dir: %w", err)
 	}
+	witnesses := make(map[string]*block.Reader)
 	for _, e := range entries {
 		if e.IsDir() {
-			_ = os.RemoveAll(filepath.Join(tmpDir, e.Name()))
+			if r := openWitness(filepath.Join(tmpDir, e.Name())); r != nil {
+				witnesses[e.Name()] = r
+			}
+		}
+	}
+	closeWitnesses := func() {
+		for _, r := range witnesses {
+			_ = r.Close()
 		}
 	}
 
 	// Load existing blocks.
 	blockEntries, err := os.ReadDir(blockDir)
 	if err != nil && !os.IsNotExist(err) {
+		closeWitnesses()
 		return nil, fmt.Errorf("blockstore: read block dir: %w", err)
 	}
 
@@ -172,6 +185,7 @@ func NewBlockStore(dataDir string) (*BlockStore, error) {
 		for _, r := range opened {
 			_ = r.Close()
 		}
+		closeWitnesses()
 		return nil, fmt.Errorf("blockstore: block %s: %w", name, ferr)
 	}
 
@@ -207,7 +221,8 @@ func NewBlockStore(dataDir string) (*BlockStore, error) {
 	}
 
 	// A survivor's equal-generation tie winner must be held by one of its own
-	// listed sources that opened (survivorSupersedesSource).
+	// listed sources that opened, or that a crash left in tmpDir
+	// (survivorSupersedesSource).
 	attestCache := make(map[string]attestor)
 	survivorAttest := func(sv *block.Reader) attestor {
 		id := sv.Meta().BlockID
@@ -217,6 +232,8 @@ func NewBlockStore(dataDir string) (*BlockStore, error) {
 		var srcs []*block.Reader
 		for _, name := range sv.Meta().Sources {
 			if r, ok := opened[name]; ok {
+				srcs = append(srcs, r)
+			} else if r, ok := witnesses[name]; ok {
 				srcs = append(srcs, r)
 			}
 		}
@@ -270,7 +287,10 @@ func NewBlockStore(dataDir string) (*BlockStore, error) {
 	}
 
 	// Phase 3: delete. Present blocks only when marked reclaimable; corrupt/absent
-	// superseded sources are reclaimed on trust (as before).
+	// superseded sources are reclaimed on trust (as before). The witnesses go with
+	// tmpDir only once every reclaimed block is out of blockDir: a block a failed
+	// move left behind may still need one.
+	var retire []string
 	for name := range superseded {
 		if r, ok := opened[name]; ok {
 			if !reclaim[name] {
@@ -279,12 +299,13 @@ func NewBlockStore(dataDir string) (*BlockStore, error) {
 			_ = r.Close()
 			delete(opened, name)
 		}
-		src := filepath.Join(blockDir, name)
-		dst := filepath.Join(tmpDir, name)
-		_ = os.RemoveAll(dst)
-		if err := os.Rename(src, dst); err == nil {
-			_ = os.RemoveAll(dst)
-		}
+		retire = append(retire, name)
+	}
+	sort.Strings(retire)
+	allMoved, _ := retireBlocks(blockDir, tmpDir, retire)
+	closeWitnesses()
+	if allMoved {
+		sweepTmpDir(tmpDir)
 	}
 
 	readers := make([]*block.Reader, 0, len(opened))
@@ -915,12 +936,13 @@ func (bs *BlockStore) CompactOnce(plan func([]block.BlockInfo) [][]string) (int,
 		bs.blocks = kept
 		bs.mu.Unlock()
 
+		ids := make([]string, 0, len(removed))
 		for _, r := range removed {
-			id := r.Meta().BlockID
 			_ = r.Close()
-			if err := bs.safeDeleteBlock(id); err != nil {
-				return compacted, fmt.Errorf("blockstore: delete source block %s: %w", id, err)
-			}
+			ids = append(ids, r.Meta().BlockID)
+		}
+		if _, err := retireBlocks(bs.blockDir, bs.tmpDir, ids); err != nil {
+			return compacted, fmt.Errorf("blockstore: delete source blocks: %w", err)
 		}
 		compacted++
 	}
@@ -1052,6 +1074,57 @@ func (bs *BlockStore) readerByID(id string) *block.Reader {
 		}
 	}
 	return nil
+}
+
+// retireBlocks removes the superseded source blocks ids from blockDir: it moves
+// every one into tmpDir before removing any, so a crash part way leaves each
+// either still in blockDir or in tmpDir, where startup reads it as a witness for
+// the sources still in blockDir — the one holding a survivor's equal-generation
+// tie winner may go first. If a move fails, the blocks already moved go back,
+// allMoved is false, and the error is returned. A missing block is skipped.
+// allMoved is true once every block is out of blockDir; err may then still
+// report a removal that failed, whose leftover the next tmpDir sweep clears.
+func retireBlocks(blockDir, tmpDir string, ids []string) (allMoved bool, err error) {
+	var moved []string
+	for _, id := range ids {
+		dst := filepath.Join(tmpDir, id)
+		_ = os.RemoveAll(dst)
+		if err := os.Rename(filepath.Join(blockDir, id), dst); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			for _, m := range moved {
+				_ = os.Rename(filepath.Join(tmpDir, m), filepath.Join(blockDir, m))
+			}
+			return false, fmt.Errorf("blockstore: rename block %s to tmp: %w", id, err)
+		}
+		moved = append(moved, id)
+	}
+	for _, id := range moved {
+		if rerr := os.RemoveAll(filepath.Join(tmpDir, id)); rerr != nil && err == nil {
+			err = fmt.Errorf("blockstore: remove tmp block %s: %w", id, rerr)
+		}
+	}
+	return true, err
+}
+
+// openWitness opens the block at dir for reading its samples only, or returns
+// nil when it is not a whole, valid block — a half-written flush or compaction
+// output in tmpDir is skipped.
+func openWitness(dir string) *block.Reader {
+	r, err := block.OpenReader(dir)
+	if err != nil {
+		return nil
+	}
+	if err := r.ValidateChunkRefs(); err != nil {
+		_ = r.Close()
+		return nil
+	}
+	if _, err := validateBlockChunks(r); err != nil {
+		_ = r.Close()
+		return nil
+	}
+	return r
 }
 
 // safeDeleteBlock removes a block directory crash-safely: rename into tmpDir
