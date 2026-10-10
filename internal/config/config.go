@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"slices"
@@ -346,14 +347,20 @@ func validatePeerURL(env string, target Target, raw string) (string, error) {
 	return canonicalURL(u), nil
 }
 
-// canonicalURL is u's scheme and host in one spelling: lowercase, and without
-// the scheme's default port. Two spellings of one peer -- http://INGESTER:8080
-// and http://ingester:8080, or http://ingester and http://ingester:80 -- reach
-// the same process, so they must compare equal: an ingester listed twice under
-// two spellings would otherwise count as two replicas toward a write quorum.
+// canonicalURL is u's scheme and host in one spelling: lowercase, no trailing
+// dot on a name, an IP address in its canonical form (an IPv4-mapped IPv6
+// address as IPv4), and no default port for the scheme. Spellings of one peer
+// -- http://INGESTER:8080, http://ingester.:8080, http://[0:0:0:0:0:0:0:1]:8080
+// beside http://[::1]:8080 -- reach the same process, so they must compare
+// equal: an ingester listed twice would otherwise count as two replicas toward
+// a write quorum. Two different DNS names for one host still look like two
+// peers; telling them apart would take resolving them (limitations.md).
 func canonicalURL(u *url.URL) string {
 	scheme := strings.ToLower(u.Scheme)
-	host, port := strings.ToLower(u.Hostname()), u.Port()
+	host, port := strings.TrimSuffix(strings.ToLower(u.Hostname()), "."), u.Port()
+	if ip, err := netip.ParseAddr(host); err == nil {
+		host = ip.Unmap().String()
+	}
 	if (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
 		port = ""
 	}
