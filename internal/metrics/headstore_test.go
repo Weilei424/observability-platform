@@ -364,3 +364,50 @@ func TestHeadStore_FlushBlockContextHonorsItsDeadlineWhileAnotherFlushRuns(t *te
 		t.Fatalf("FlushBlockContext waited %v past its 50ms deadline", d)
 	}
 }
+
+// A sample appended with the gateway's generation keeps exactly that one, in
+// the head and through WAL replay, and the head's own counter moves past it.
+func TestWALStore_AppendWithGenerationKeepsTheGivenGeneration(t *testing.T) {
+	dataDir := t.TempDir()
+	h, err := metrics.OpenHeadStore(dataDir, &recordingSink{target: newSinkTarget(t)}, metrics.HeadStoreOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	walDir := filepath.Join(dataDir, "metrics", "wal")
+	w, err := wal.Open(walDir, 1<<20, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := metrics.NewWALStore(w, h, dataDir)
+	l, _ := metrics.NewLabels(map[string]string{"__name__": "stamped"})
+	const gen = int64(1758600000000123)
+	if err := ws.AppendWithGeneration(l, 1000, 7, gen); err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.AppendWithGeneration(l, 1000, 9, gen-5); err != nil { // an older write landing late
+		t.Fatal(err)
+	}
+	read := func(src metrics.Source) []metrics.Sample {
+		sds, err := src.Select(context.Background(), metrics.SelectParams{Selector: metrics.Selector{MetricName: "stamped"}, MinT: 0, MaxT: 1 << 40})
+		if err != nil || len(sds) != 1 {
+			t.Fatalf("select = %+v, %v", sds, err)
+		}
+		return sds[0].Samples
+	}
+	if got := read(h); len(got) != 1 || got[0].Gen != gen || got[0].Value != 7 {
+		t.Fatalf("head holds %+v, want value 7 at generation %d: the higher generation wins, not the later arrival", got, gen)
+	}
+	if next, err := h.ReserveGeneration(); err != nil || next <= gen {
+		t.Errorf("head's next generation %d (%v) did not move past %d", next, err, gen)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var replayed []int64
+	if err := wal.ReplayFromGen(walDir, -1, func(_ []wal.LabelPair, _ int64, _ float64, g int64) { replayed = append(replayed, g) }); err != nil {
+		t.Fatal(err)
+	}
+	if len(replayed) != 2 || replayed[0] != gen || replayed[1] != gen-5 {
+		t.Errorf("WAL replays generations %v, want [%d %d]", replayed, gen, gen-5)
+	}
+}
