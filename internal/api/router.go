@@ -15,6 +15,7 @@ func (s *Server) buildRouter() chi.Router {
 	r.Use(chimiddleware.RequestID)
 	r.Use(middleware.Logger(s.log))
 	r.Use(middleware.Metrics(s.http))
+	r.Use(s.middleware...)
 
 	r.Get("/healthz", s.handleHealthz)
 	r.Get("/readyz", s.handleReadyz)
