@@ -154,10 +154,11 @@ These are properties of the whole system, not of the query languages.
   RF 1, never as its ConfigMap says, since an upgrade applies the ConfigMap
   before the pods roll;
   a release counts as live when either Deployment, either ConfigMap, the ingester
-  StatefulSet, or kept ingester PVCs survive, so a recovery or a reinstall over
+  StatefulSet, or kept ingester PVCs survive (and a recovery waits for a surviving
+  gateway or querier to finish rolling out), so a recovery or a reinstall over
   kept PVCs is staged too),
   or any RF change while either Deployment is still
-  rolling out. It cannot see the flush, so waiting for it is the operator's
+  rolling out. It cannot see the ingester drains, so running them is the operator's
   part, and `split.ingester.previous` previews carry no RF. In Compose the
   shared `x-ring-env` anchor is edited and the two services recreated one at a
   time ([../runbooks/split-demo.md](../runbooks/split-demo.md)).
