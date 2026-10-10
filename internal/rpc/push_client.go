@@ -21,7 +21,7 @@ func (c *Client) PushSamples(ctx context.Context, samples []metrics.PendingSampl
 			pos[h] = i
 			req.Series = append(req.Series, wirePushSeries{Labels: s.Labels.Map()})
 		}
-		req.Series[i].Samples = append(req.Series[i].Samples, wirePushSample{T: s.TimestampMs, V: s.Value})
+		req.Series[i].Samples = append(req.Series[i].Samples, wirePushSample{T: s.TimestampMs, V: s.Value, G: s.Gen})
 	}
 	return c.doNoContent(ctx, http.MethodPost, "metrics/push", req)
 }
