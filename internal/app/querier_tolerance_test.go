@@ -53,9 +53,14 @@ func downPeer(t *testing.T) string {
 
 func labelsStatus(t *testing.T, rf int, ingesters ...string) (int, string) {
 	t.Helper()
+	return labelsStatusWithStore(t, readsPeer(t), rf, ingesters...)
+}
+
+func labelsStatusWithStore(t *testing.T, store string, rf int, ingesters ...string) (int, string) {
+	t.Helper()
 	cfg := testConfig(t, config.TargetQuerier)
 	cfg.IngesterURLs = ingesters
-	cfg.StoreURL = readsPeer(t)
+	cfg.StoreURL = store
 	cfg.ReplicationFactor = rf
 	var buf bytes.Buffer
 	a, err := app.Build(cfg, slog.New(slog.NewJSONHandler(&buf, nil)))
@@ -73,8 +78,8 @@ func TestQuerierToleratesIngestersUpToQuorum(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("one of three down, rf 3: status %d", code)
 	}
-	if !strings.Contains(logged, "read answered by replication") {
-		t.Errorf("no replication warn line: %s", logged)
+	if !strings.Contains(logged, "read answered by replication") || !strings.Contains(logged, `"request_id"`) {
+		t.Errorf("no request-scoped replication warn line: %s", logged)
 	}
 	if code, _ := labelsStatus(t, 3, up1, down1, down2); code != http.StatusServiceUnavailable {
 		t.Errorf("two of three down, rf 3: status %d, want 503", code)
@@ -146,5 +151,18 @@ func TestQuerierCountsIngesterReadsButNotCancellations(t *testing.T) {
 		if after[key] != v {
 			t.Errorf("a cancelled read moved reads{%s} from %s to %s", key, v, after[key])
 		}
+	}
+}
+
+// The replication warning describes a read that succeeded: a read that
+// skipped an ingester but then failed at the store answers an error and says
+// nothing about being answered by replication.
+func TestQuerierWarnsOnlyWhenTheWholeReadSucceeds(t *testing.T) {
+	code, logged := labelsStatusWithStore(t, downPeer(t), 3, readsPeer(t), readsPeer(t), downPeer(t))
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("store down: status %d, want 503", code)
+	}
+	if strings.Contains(logged, "read answered by replication") {
+		t.Errorf("a failed read logged that replication answered it: %s", logged)
 	}
 }
