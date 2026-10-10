@@ -374,11 +374,28 @@ func TestRingStagingTreatsAPartialReleaseAsLive(t *testing.T) {
 		}, stagedRaise, ""},
 		{"6.2 release with only its ConfigMaps", map[string]any{"gatewayConfig": cm(0), "querierConfig": cm(0)}, nil, "unstaged replication factor change"},
 		{"only the ingester StatefulSet", map[string]any{"ingester": map[string]any{"metadata": map[string]any{"name": "observability-ingester"}}}, nil, "unstaged replication factor change"},
-		{"only kept ingester PVCs", map[string]any{"ingesterData": true}, nil, "unstaged replication factor change"},
-		{"only kept ingester PVCs, staged", map[string]any{"ingesterData": true}, stagedRaise, ""},
+		{"only kept ingester PVCs", map[string]any{"ingesterData": 3}, nil, "unstaged replication factor change"},
+		{"only kept ingester PVCs, staged", map[string]any{"ingesterData": 3}, stagedRaise, ""},
 		// The gateway's pods are gone, so their RF is unknown and counts as 1,
 		// whatever its ConfigMap says: the querier may not read at quorum 2
 		// until the gateway is back at RF 3 and the ingesters are drained.
+		// The previous ring is unknown here, so a shrink is refused: dropping an
+		// ordinal whose PVC survives would hide its acknowledged RF=1 writes.
+		{"only kept ingester PVCs: an RF=1 shrink", map[string]any{"ingesterData": 3},
+			[]string{"split.ingester.replicas=2", "split.replicationFactor=1"}, "ring change refused"},
+		{"only kept ingester PVCs: the full ring", map[string]any{"ingesterData": 3},
+			[]string{"split.ingester.replicas=3", "split.replicationFactor=1"}, ""},
+		{"only kept ingester PVCs: growing is fine", map[string]any{"ingesterData": 3},
+			[]string{"split.ingester.replicas=4", "split.replicationFactor=1"}, ""},
+		{"only the ingester StatefulSet: a shrink", map[string]any{"ingester": map[string]any{
+			"metadata": map[string]any{"name": "observability-ingester"}, "spec": map[string]any{"replicas": 3}}},
+			[]string{"split.ingester.replicas=2", "split.replicationFactor=1"}, "ring change refused"},
+		{"querier survives alone: the gateway may not outgrow it", map[string]any{
+			"querier": withRF(liveDeployment(q, 3, rolledOut), 1), "querierConfig": cm(1),
+		}, []string{"split.ingester.replicas=4", "split.replicationFactor=1"}, "unstaged ring change"},
+		{"querier survives alone: staged growth", map[string]any{
+			"querier": withRF(liveDeployment(q, 3, rolledOut), 1), "querierConfig": cm(1),
+		}, []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=3", "split.replicationFactor=1"}, ""},
 		{"6.3 release without its gateway Deployment", map[string]any{
 			"querier": withRF(liveDeployment(q, 3, rolledOut), 3), "gatewayConfig": cm(3), "querierConfig": cm(3),
 		}, nil, "unstaged replication factor change"},
