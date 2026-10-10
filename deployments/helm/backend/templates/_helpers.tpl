@@ -209,9 +209,10 @@ at most the gateway's. Each pod template records its RF too
 (backend.replicationFactorAnnotation), and the check refuses a new gateway
 quorum below the running querier's and a new querier quorum above the running
 gateway's, so an RF rises gateway first and falls querier first. An RF change
-counts as a ring change for the rollout rule. A release whose templates predate
-the RF annotation is read from its ConfigMaps' OBS_REPLICATION_FACTOR, else as
-RF 1 (a Phase 6.2 release), so its upgrade to a higher RF is staged too.
+counts as a ring change for the rollout rule. A Deployment without the RF
+annotation (a release from before 6.3, or pods that never rolled after an
+interrupted upgrade) counts as RF 1, never as its ConfigMap says, so its upgrade
+to a higher RF is staged too.
 split.ingester.previous carries no RF: a preview checks the ingester counts
 only.
 */}}
@@ -253,15 +254,15 @@ lower RF. Only a render with none of these is a fresh install (or a preview).
 {{- end -}}
 {{- $rfKey := include "backend.replicationFactorAnnotation" $root -}}
 {{- /*
-The running RF: the pod-template annotation, else the live ConfigMap's
-OBS_REPLICATION_FACTOR, else 1 -- a release from before 6.3 has neither and
-ran RF=1, so its heads may hold writes on one ingester only and its RF change
-is staged like any other.
+The running RF is what the pods loaded: each Deployment's pod-template
+annotation. Without one -- a release from before 6.3, a deleted Deployment, or
+pods that never rolled after an interrupted upgrade -- it counts as RF 1. The
+ConfigMap is not trusted for it: an upgrade applies the ConfigMap before the
+Deployment rolls, so a ConfigMap saying RF 3 can sit beside pods still running
+RF 1. Treating the unknown as RF 1 stages the change, never skips it.
 */}}
-{{- $liveGwRF := dig "spec" "template" "metadata" "annotations" $rfKey "" ($gwDep | default dict) -}}
-{{- if not $liveGwRF -}}{{- $liveGwRF = dig "data" "OBS_REPLICATION_FACTOR" "1" ($gw | default dict) -}}{{- end -}}
-{{- $liveQRF := dig "spec" "template" "metadata" "annotations" $rfKey "" ($qDep | default dict) -}}
-{{- if not $liveQRF -}}{{- $liveQRF = dig "data" "OBS_REPLICATION_FACTOR" "1" ($q | default dict) -}}{{- end -}}
+{{- $liveGwRF := dig "spec" "template" "metadata" "annotations" $rfKey "1" ($gwDep | default dict) -}}
+{{- $liveQRF := dig "spec" "template" "metadata" "annotations" $rfKey "1" ($qDep | default dict) -}}
 {{- $rfChanged := or (ne $gwRF (int $liveGwRF)) (ne $qRF (int $liveQRF)) -}}
 {{- if or $rfChanged (and $prev (or (ne $writeCount (int $prev.writeReplicas)) (ne $replicas (int $prev.replicas)))) -}}
 {{- range $dep := list $gwDep $qDep -}}
