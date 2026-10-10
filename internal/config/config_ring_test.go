@@ -74,6 +74,11 @@ func TestIngesterURLAliasesAreDuplicates(t *testing.T) {
 		"http://ingester,http://ingester:80",
 		"https://ingester:443,https://Ingester",
 		"HTTP://ingester:8080,http://ingester:8080/",
+		"http://ingester.:8080,http://ingester:8080",
+		"http://ingester-0.svc.cluster.local.:8080,http://ingester-0.svc.cluster.local:8080",
+		"http://[0:0:0:0:0:0:0:1]:8080,http://[::1]:8080",
+		"http://[::ffff:127.0.0.1]:8080,http://127.0.0.1:8080",
+		"http://[2001:DB8::1]:8080,http://[2001:db8:0:0::1]:8080",
 	} {
 		t.Setenv("OBS_DATA_DIR", t.TempDir())
 		t.Setenv("OBS_TARGET", "querier")
