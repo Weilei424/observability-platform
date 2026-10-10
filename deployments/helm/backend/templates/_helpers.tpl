@@ -305,11 +305,14 @@ RF 1. Treating the unknown as RF 1 stages the change, never skips it.
 {{- $rfChanged := or (ne $gwRF (int $liveGwRF)) (ne $qRF (int $liveQRF)) -}}
 {{- /*
 Wait out a surviving Deployment's rollout before any ring or RF change, and
-always when the previous ring is not fully known: a recovery reads a
-survivor's count from its pod template, which is only what every pod runs
-once the rollout is done.
+always during a recovery -- either Deployment missing, or the previous ring
+not fully known: a survivor's count comes from its pod template, which is
+only what every pod runs once the rollout is done. A kept ConfigMap of the
+missing Deployment can make the previous counts look known, so a missing
+Deployment alone is enough.
 */}}
-{{- if or $rfChanged (not $prev) (and $prev (or (ne $writeCount (int $prev.writeReplicas)) (ne $replicas (int $prev.replicas)))) -}}
+{{- $recovering := or (not $gwDep) (not $qDep) (not $prev) -}}
+{{- if or $rfChanged $recovering (and $prev (or (ne $writeCount (int $prev.writeReplicas)) (ne $replicas (int $prev.replicas)))) -}}
 {{- range $dep := list $gwDep $qDep -}}
 {{- if $dep -}}{{- /* a missing Deployment has no old pods to wait for */}}
 {{- $want := int (dig "spec" "replicas" 1 $dep) -}}
