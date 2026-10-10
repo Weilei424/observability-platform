@@ -156,7 +156,10 @@ POST /internal/v1/metrics/push
 ```
 
 `{"series":[{"labels":{"__name__":"http_requests_total"},"samples":[[1758600000000,"1"]]}]}` —
-each sample is `[timestamp_ms, "value"]`; the ingester assigns generations.
+each sample is `[timestamp_ms, "value", generation]`: the write generation the
+gateway stamped when it admitted the write, which every replica stores exactly.
+A sample without one, `[timestamp_ms, "value"]`, has the ingester assign its
+own; a generation must be positive.
 
 ```http
 POST /internal/v1/logs/push
@@ -174,17 +177,9 @@ so the cap never stops a valid push. A body over it is `413`.
 |---|---|
 | `204` | accepted |
 | `400` | a malformed body, or labels the ingester refuses on its second validation |
-| `499` | the gateway gave up on the push — its connection closed, or the deadline in `X-Obs-Deadline` passed — before every sample or entry was applied; the rest are not applied |
 | `500` | the append failed |
 | `503` | the ingester is draining and takes no new writes |
 
-The gateway sends `X-Obs-Deadline` (Unix microseconds) on every push, and the
-ingester checks it, and the connection, before each append. A push the
-gateway timed out on therefore stops instead of landing later, after a newer
-push of the same keys: the gateway sends a key's next push to an ingester only
-once the previous one has ended, so each replica applies a key's writes in
-the order the gateway admitted them, and ingesters stamp generations when they
-apply.
 
 The ingester counts what it ingests, and counts only an append failure as a
 rejection (reason `append`); the gateway already counted any validation
