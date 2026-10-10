@@ -169,16 +169,21 @@ These are properties of the whole system, not of the query languages.
   resolve to the same host are not detected: listed both ways, one ingester
   would count as two replicas toward a write quorum. List each ingester once.
 - **Overwrites through different gateways follow their clocks.** The gateway
-  stamps each write's generation, `max(previous + 1, now in Unix
+  stamps each batch one generation, `max(previous + 1, now in Unix
   microseconds)`, when it admits it, and every replica stores that one, so how
   late a push reaches a replica never matters: an overwrite admitted after the
   write it overwrites wins on every replica that holds it. Through one gateway
-  that is exact. Through different gateway pods, two writes to the same series
-  and timestamp are ordered by the pods' clocks, so an overwrite within their
-  clock skew of the original can lose to it; a gateway restarted on a clock
-  that stepped back stamps lower generations until the clock passes its last
-  run's. A write sent straight to an ingester, or in all-in-one, takes that
-  process's own generation.
+  that is exact. One generation per batch keeps a gateway's counter at its
+  clock however large its batches are; within a batch, a series and timestamp
+  given twice keeps its last sample. Through different gateway pods, two
+  writes to the same series and timestamp are ordered by the pods' clocks, so
+  an overwrite within their clock skew of the original can lose to it; two
+  stamped in the same microsecond tie, and every read breaks the tie the same
+  way (by value), so replicas still agree. A gateway restarted on a clock that
+  stepped back stamps lower generations until the clock passes its last run's.
+  A write sent straight to an ingester, or in all-in-one, takes that process's
+  own generation, and so does a write to an ingester from before 6.3 during a
+  rolling upgrade, which the gateway sends no generations.
 - **Log chunks are stored RF times.** Every replica flushes its own copy to the
   store. Reads deduplicate by `(timestamp, line)`, so answers never change, but
   disk use is RF times a single copy. Metrics compaction merges the copies.
