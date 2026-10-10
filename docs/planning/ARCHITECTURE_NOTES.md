@@ -652,7 +652,12 @@ records the decisions and where the code corrected the spec.
 - **Answer at quorum, finish in the background.** The router answers `204` as soon as
   every key has W acks. Pushes still running finish on a context detached from the
   request (`context.WithoutCancel`), still bounded by the timeout and still counted,
-  so a hung replica costs one bounded goroutine per push. The moment a key can no
+  so a hung replica costs one bounded goroutine per push. At shutdown the gateway
+  closes the router before waiting on those pushes: a write reaching it afterwards
+  (a slow handler can outlive the HTTP server's 10 s shutdown) answers `503`
+  instead of starting pushes nothing waits for (`TestRouterCloseRacingWritesAdmitsNothingAfterward`,
+  `TestGatewayRefusesWritesOnceClosing`). The Compose gateway gets a 30 s stop grace
+  to cover the drain plus one push timeout. The moment a key can no
   longer reach W, the router answers `503` if every failure seen so far was an
   outage or `500` if any was a protocol error, without waiting for replicas still
   running (a Codex review found the first cut waiting for every push, so two down
