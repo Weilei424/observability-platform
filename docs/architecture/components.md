@@ -72,20 +72,27 @@ the body with the same code all-in-one and an ingester's public routes run, so
 every topology refuses the same input with the same `400` body and counts it in
 `obs_samples_rejected_total` or `obs_log_lines_rejected_total`. It then groups
 samples and streams by owner (by its RF replicas when
-[replication](#replication-63) is on; the table below is the RF=1 rule) and sends each group to its ingester concurrently
-over `POST /internal/v1/metrics/push` or `/logs/push`
+[replication](#replication-63) is on; the table below is the RF=1 rule) and
+sends each group to its ingester concurrently over `POST
+/internal/v1/metrics/push` or `/logs/push`
 ([../api/internal.md](../api/internal.md)), each carrying the inbound
-`X-Request-Id`. The answer is the worst outcome among the groups:
+`X-Request-Id`. It answers `204` once every key has its quorum of
+acknowledgements, and otherwise the moment some key can no longer reach it,
+without waiting for groups still running:
 
 | Outcome | Status |
 |---|---|
 | every group answered `204` | `204` |
 | a transport error, a deadline, or a `5xx` | `503` `{"error":"write quorum not met: <k> of <n> series could not reach 1 of 1 ingesters"}` (`streams` on the Loki route) |
-| a `4xx` from an ingester | `500` `{"error":"internal error"}`, logged at ERROR: the gateway validated the body, so the two disagree about the protocol |
+| a `4xx` from an ingester | `500` `{"error":"internal error"}`, logged at ERROR with the cause and the failing ingesters: the gateway validated the body, so the two disagree about the protocol |
 | the client went away | `499`; sends already started run on, detached from the request, each bounded by `OBS_INGESTER_TIMEOUT` |
 
-When groups differ, `500` outranks `503`, which outranks `499`. A `503` can
-leave some groups written. Retrying the whole batch is safe: a metrics retry
+The failures seen when the answer is decided set the code: a protocol error
+among them makes it `500`, else `503`. A group that fails later, after the
+answer, is still counted and logged but does not change it, so when one group
+gets an outage and another a protocol error, which arrives first decides
+between `503` and `500` ([../api/limitations.md](../api/limitations.md)). A
+`503` can leave some groups written. Retrying the whole batch is safe: a metrics retry
 rewrites the same values at the same timestamps, and reads already collapse
 duplicate log entries by `(timestamp, line)`.
 
@@ -106,7 +113,7 @@ sequenceDiagram
   I1-->>G: 204
   I2-->>G: 204
   IN-->>G: 204
-  G-->>P: 204 (worst outcome of the groups)
+  G-->>P: 204 at quorum, or 503/500 once a key cannot reach it
 ```
 
 An ingester validates a push again and answers `400` for a malformed body or
