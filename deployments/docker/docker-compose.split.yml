@@ -44,6 +44,10 @@ x-ingester: &ingester
 services:
   gateway:
     restart: unless-stopped
+    # Docker's default 10s grace is shorter than the gateway's stop: up to 10s
+    # of HTTP drain, then background replica pushes already running, each
+    # bounded by OBS_INGESTER_TIMEOUT (10s). Kubernetes' default 30s covers it.
+    stop_grace_period: 30s
     build:
       context: ../../
       dockerfile: deployments/docker/Dockerfile
