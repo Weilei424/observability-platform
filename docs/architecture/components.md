@@ -195,8 +195,12 @@ read would answer `200` with those writes missing):
 ### Generations
 
 Last-write-wins between two samples at one timestamp is decided by write
-generation. Each ingester assigns `gen = max(previous + 1, now in Unix µs)`, in
-every target including all-in-one. That is strictly increasing on one ingester
+generation, `gen = max(previous + 1, now in Unix µs)`. A write routed by the
+gateway carries the generation the gateway stamped when it admitted it, and
+every replica stores exactly that one, so replicas agree on which of two
+writes is newer however late a push lands; a write sent straight to an
+ingester, and every write in all-in-one, gets one from the process that
+stores it. An ingester's own counter is strictly increasing
 (the persisted `genfloor` keeps it so across a restart, even if the clock steps
 back) and comparable across ingesters up to their clock skew, so a write
 accepted later on any ingester outranks an earlier one. Counter-era
