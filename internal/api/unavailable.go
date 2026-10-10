@@ -73,14 +73,26 @@ func writeLokiEvalError(w http.ResponseWriter, r *http.Request, logMsg string, e
 // outcome counter records them.
 func (s *Server) writeRouteError(w http.ResponseWriter, r *http.Request, component string, err error) {
 	var qe *rpc.QuorumError
-	if errors.As(err, &qe) && isUnavailable(err) {
-		// A replicated write that could not reach quorum because of an outage:
-		// say how far it fell short, and log which ingesters failed it (spec
-		// section 5.4); the body keeps the plain message. A QuorumError with a protocol cause falls
-		// through to the 500 branch below.
-		observability.Component(observability.FromContext(r.Context()), component).Warn(
-			"write quorum not met", slog.String("error", qe.Error()), slog.Any("ingesters", qe.Ingesters))
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": qe.Error()})
+	if errors.As(err, &qe) {
+		// A replicated write that could not reach quorum. The log line says
+		// which ingesters failed it and why (spec section 5.4); the body keeps
+		// the plain message for an outage (503) and stays generic for a
+		// protocol error (500), which is a bug for operators, not the client.
+		log := observability.Component(observability.FromContext(r.Context()), component)
+		attrs := []any{slog.String("error", qe.Error()), slog.Any("ingesters", qe.Ingesters)}
+		if qe.Cause != nil {
+			attrs = append(attrs, slog.String("cause", qe.Cause.Error()))
+		}
+		switch {
+		case isUnavailable(err):
+			log.Warn("write quorum not met", attrs...)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": qe.Error()})
+		case isCanceled(err):
+			w.WriteHeader(statusClientClosedConnection)
+		default:
+			log.Error("write quorum not met", attrs...)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		}
 		return
 	}
 	switch {
