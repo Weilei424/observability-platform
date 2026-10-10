@@ -163,12 +163,18 @@ These are properties of the whole system, not of the query languages.
   shared `x-ring-env` anchor is edited and the two services recreated one at a
   time ([../runbooks/split-demo.md](../runbooks/split-demo.md)).
 - **Replicated overwrites have a skew window.** Each ingester assigns its own
-  generation, `max(previous + 1, now in Unix microseconds)`. An overwrite of
-  the same series and timestamp can lose to the older value only when the
-  replica whose clock runs furthest ahead missed the overwrite (a
-  partial-quorum write) and that replica's old write carries a higher
-  generation than the overwrite's on the replicas that got it. If every
-  replica holds both writes, the overwrite always wins.
+  generation, `max(previous + 1, now in Unix microseconds)`, when it applies a
+  write. The gateway keeps a key's writes in order on every replica: it sends a
+  key's next push to an ingester only once the previous one has ended, and an
+  ingester stops applying a push the gateway has given up on (`X-Obs-Deadline`,
+  [internal.md](internal.md)), so a slow replica never applies an
+  acknowledged write after the overwrite that followed it. An overwrite of the
+  same series and timestamp can still lose to the older value when the replica
+  whose clock runs furthest ahead missed the overwrite (a partial-quorum write)
+  and its old write carries a higher generation than the overwrite's on the
+  replicas that got it, or, for a push that timed out, within the clock skew
+  between the gateway and that ingester. If every replica holds both writes,
+  the overwrite wins.
 - **Log chunks are stored RF times.** Every replica flushes its own copy to the
   store. Reads deduplicate by `(timestamp, line)`, so answers never change, but
   disk use is RF times a single copy. Metrics compaction merges the copies.
