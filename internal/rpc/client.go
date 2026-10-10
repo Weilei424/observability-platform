@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
@@ -121,6 +122,12 @@ func (c *Client) call(ctx context.Context, method, path string, query url.Values
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set(chimiddleware.RequestIDHeader, requestID(ctx))
+	if dl, ok := ctx.Deadline(); ok {
+		// The peer stops applying a push once this passes (abandonedPush): the
+		// caller has given up on it, and a later push of the same keys may
+		// already be on its way.
+		req.Header.Set(DeadlineHeader, strconv.FormatInt(dl.UnixMicro(), 10))
+	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {
