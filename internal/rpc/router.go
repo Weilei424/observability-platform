@@ -152,10 +152,17 @@ func (rt *Router) recordGenSupport(c *Client, takes bool) {
 }
 
 // pushTo sends g to c, with generations only if c has said it takes them, and
-// learns from the answer whether it does.
+// learns from the answer whether it does. When c hasn't said yet, it is asked
+// first, and the ask and the push share the one client timeout, so a hung
+// ingester costs one timeout rather than two.
 func (rt *Router) pushTo(ctx context.Context, c *Client, g []metrics.PendingSample) error {
 	state := rt.genSupport[c]
 	if state.Load() == genUnknown {
+		if c.timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, c.timeout)
+			defer cancel()
+		}
 		rt.learnGenSupport(ctx, c)
 	}
 	takes, err := c.PushSamplesGen(ctx, g, state.Load() == genTakes)
