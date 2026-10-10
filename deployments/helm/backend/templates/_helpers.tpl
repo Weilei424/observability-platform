@@ -251,6 +251,23 @@ lower RF. Only a render with none of these is a fresh install (or a preview).
 {{- end -}}
 {{- if and $gwCount $qCount -}}
 {{- $prev = dict "replicas" (int $qCount) "writeReplicas" (int $gwCount) -}}
+{{- else -}}
+{{- /*
+The previous ring is not fully known -- a gateway or querier is gone along
+with its ConfigMap, or only ingester state survives -- so a membership change
+cannot be staged against it. Fail closed: the querier must still read every
+ingester that may hold acknowledged writes (the ingester StatefulSet's
+replicas, every ordinal with a kept PVC, and the surviving gateway's write
+list), and a new gateway may write only to ingesters a surviving querier
+reads. Once both are running again, the usual staged checks apply.
+*/}}
+{{- $floor := max (int (dig "spec" "replicas" 0 ($live.ingester | default dict))) (int ($live.ingesterData | default 0)) (int ($gwCount | default "0")) -}}
+{{- if lt $replicas $floor -}}
+{{- fail (printf "ring change refused: the previous gateway and querier lists are not both known (a Deployment and its ConfigMap are gone), and ingesters 0 to %d may hold acknowledged writes, so the querier must read all %d: render with split.ingester.replicas=%d (got %d) until the gateway and querier are running again, then remove an ingester in stages" (sub $floor 1) $floor $floor $replicas) -}}
+{{- end -}}
+{{- if and $qCount (gt $writeCount (int $qCount)) -}}
+{{- fail (printf "unstaged ring change: the gateway would write to %d ingesters while the running querier reads only %d. Keep split.ingester.writeReplicas at %d until the querier reads the new ingesters" $writeCount (int $qCount) (int $qCount)) -}}
+{{- end -}}
 {{- end -}}
 {{- $rfKey := include "backend.replicationFactorAnnotation" $root -}}
 {{- /*
