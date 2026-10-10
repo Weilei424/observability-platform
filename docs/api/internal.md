@@ -39,12 +39,24 @@ Errors are `{"error": "..."}`:
 |---|---|
 | `400` | A malformed or invalid request |
 | `413` | A flush body over 64 MiB, or any other body over 1 MiB. The public API caps a selector at 128 KiB, which JSON escaping cannot grow past 768 KiB, so a query never meets this limit |
+| `421` | An ingester was addressed as another member (see below) |
 | `500` | The component failed while serving the request |
 
-A caller treats a refused connection, a timeout, or any `5xx` as the component
-being unavailable, which a query answers with `503` `unavailable`. A `4xx`
-means the two components disagree about this protocol — a bug — and a query
-answers `500`.
+A caller treats a refused connection, a timeout, any `5xx`, or a `421` as the
+component being unavailable, which a query answers with `503` `unavailable`.
+Any other `4xx` means the two components disagree about this protocol — a bug —
+and a query answers `500`.
+
+Every request carries `X-Obs-Member`: the base URL the caller meant to reach,
+as the ring lists it. An ingester given its own URL (`OBS_INGESTER_SELF_URL`)
+refuses, with `421`, a request whose header names another member; one without
+the header passes. A connection can reach a different ingester than its URL
+names — when containers restart, Docker's DNS can briefly answer one member's
+name with an address another has just taken, and keep-alive then holds that
+connection — and without the check that ingester's one acknowledgement would
+count twice toward a write quorum. On a `421` the caller drops its pooled
+connections, so its next request dials and resolves afresh. The Compose split
+file and the Helm chart set each ingester's own URL.
 
 ## Reads — ingester and store
 
