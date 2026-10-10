@@ -97,10 +97,12 @@ func TestRingStagingReadsTheRunningRelease(t *testing.T) {
 	const gw, q = "observability-backend", "observability-querier"
 	rolling := rollout{spec: 2, generation: 4, observed: 4, total: 3, updated: 1, available: 2}
 	unobserved := rollout{spec: 2, generation: 5, observed: 4, total: 2, updated: 2, available: 2}
-	// live is a release running the chart's default RF 3, so these ring cases
-	// test the ingester counts alone. A count below 0 leaves out the pod
-	// annotations, as a release from before them has; its ConfigMaps still
-	// carry the RF, which the check falls back to.
+	// live is a release whose pods run the chart's default RF 3, so these ring
+	// cases test the ingester counts alone. A count below 0 leaves out the pod
+	// annotations, as a release from before them has: the check then takes the
+	// ingester counts from its ConfigMaps, but never the RF -- an unannotated
+	// Deployment counts as RF 1 (TestRingStagingOrdersReplicationFactorChanges),
+	// since a ConfigMap is applied before the pods roll.
 	live := func(gwCount, qCount int, gwR, qR rollout) map[string]any {
 		g, qq := liveDeployment(gw, gwCount, gwR), liveDeployment(q, qCount, qR)
 		if gwCount >= 0 {
@@ -109,10 +111,7 @@ func TestRingStagingReadsTheRunningRelease(t *testing.T) {
 		if qCount >= 0 {
 			withRF(qq, 3)
 		}
-		gc, qc := liveConfigMap(3), liveConfigMap(3)
-		gc["data"].(map[string]any)["OBS_REPLICATION_FACTOR"] = "3"
-		qc["data"].(map[string]any)["OBS_REPLICATION_FACTOR"] = "3"
-		return map[string]any{"gateway": g, "querier": qq, "gatewayConfig": gc, "querierConfig": qc}
+		return map[string]any{"gateway": g, "querier": qq, "gatewayConfig": liveConfigMap(3), "querierConfig": liveConfigMap(3)}
 	}
 	for _, tc := range []struct {
 		name               string
@@ -132,9 +131,10 @@ func TestRingStagingReadsTheRunningRelease(t *testing.T) {
 		// gateway writes to 4. The pods win: lowering replicas to 3 would hide
 		// ingester-3's writes.
 		{"the running pods win over the ConfigMaps", live(4, 4, rolledOut, rolledOut), []string{"split.ingester.replicas=3", "split.ingester.writeReplicas=3"}, "unstaged ring change"},
-		// RF 1: an unannotated Deployment counts as RF 1 (TestRingStagingOrdersReplicationFactorChanges),
-		// so this case keeps RF still and tests the count fallback alone.
-		{"a release without the annotation falls back to its ConfigMaps", live(-1, -1, rolledOut, rolledOut), []string{"split.ingester.replicas=4", "split.replicationFactor=1"}, "unstaged ring change"},
+		// The counts fall back to the ConfigMaps; the RF does not, so the
+		// unannotated pods count as RF 1 and this case keeps RF at 1 to test
+		// the count fallback alone.
+		{"a release without the annotation takes its ingester counts from its ConfigMaps", live(-1, -1, rolledOut, rolledOut), []string{"split.ingester.replicas=4", "split.replicationFactor=1"}, "unstaged ring change"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := renderWithLive(t, tc.live, tc.set...)
