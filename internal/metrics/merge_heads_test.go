@@ -196,3 +196,38 @@ func TestMergeHeadsWithSkipsPerRequestTimeoutWhileCallerIsLive(t *testing.T) {
 		t.Fatalf("label values: %v", err)
 	}
 }
+
+// Two writes stamped the same generation -- two gateways in one microsecond --
+// resolve to the same survivor on every replica, whatever order each replica
+// received them in, alone and merged.
+func TestEqualGenerationsResolveTheSameEverywhere(t *testing.T) {
+	l, _ := metrics.NewLabels(map[string]string{"__name__": "tie"})
+	const gen = 1758600000000000
+	replica := func(vals ...float64) *metrics.MemoryStore {
+		s := metrics.NewMemoryStore()
+		for _, v := range vals {
+			if err := s.AppendGen(l, 1000, v, gen); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return s
+	}
+	value := func(src metrics.Source) float64 {
+		sds, err := src.Select(context.Background(), allParams)
+		if err != nil || len(sds) != 1 || len(sds[0].Samples) != 1 {
+			t.Fatalf("select: %v %+v", err, sds)
+		}
+		return sds[0].Samples[0].Value
+	}
+	a, b := replica(1, 2), replica(2, 1)
+	va, vb := value(a), value(b)
+	if va != vb {
+		t.Fatalf("replicas that got the tie in opposite orders answer %v and %v", va, vb)
+	}
+	if m := value(metrics.MergeHeads(a, b)); m != va {
+		t.Errorf("merged answer %v, want the replicas' %v", m, va)
+	}
+	if m := value(metrics.MergeHeads(b, a)); m != va {
+		t.Errorf("merged the other way %v, want %v", m, va)
+	}
+}
