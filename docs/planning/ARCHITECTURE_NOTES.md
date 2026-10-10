@@ -711,10 +711,17 @@ records the decisions and where the code corrected the spec.
   read and compaction path (`chunk.Outranks`), so replicas agree
   (`TestRouterStampsIncreasingGenerations`, `TestOverwriteThroughTwoGatewaysWinsOnEveryReplica`,
   `TestALargeBatchDoesNotOutrankALaterWriteElsewhere`, `TestEqualGenerationsResolveTheSameEverywhere`,
-  `TestReplicasStoreTheGatewaysGeneration`). An ingester advertises generation support
+  `TestReplicasStoreTheGatewaysGeneration`). Compaction's check that a survivor
+  supersedes its sources accepts a tie's winner in place of a source's equal-generation
+  value only when another of the survivor's sources holds it, so a tie compacts and
+  reclaims its sources while a survivor whose value no source holds still counts as
+  corrupt (`TestBlockStore_EqualGenerationTie_ConsistentAcrossRuntimeRestartCompaction`,
+  `TestNewBlockStore_EqualGenerationTieSourcesReclaimed`,
+  `TestNewBlockStore_EqualGenValueCorruptionKeepsSource`). An ingester advertises generation support
   (`X-Obs-Push-Generations`), and the gateway sends generations only to one that has, so
   a rolling upgrade from 6.2 never sends an old ingester a sample it would refuse
-  (`TestNewGatewayOverOldIngestersMeetsQuorum`).
+  (`TestNewGatewayOverOldIngestersMeetsQuorum`); asking an ingester it hasn't heard from
+  shares the push's one timeout (`TestRouterAskAndPushToAnUnknownIngesterShareOneTimeout`).
   Writes sent straight to an ingester still take its own generation;
   `TestMergeHeadsOverwriteSkewWindow` pins that rule for ingester-assigned generations.
 - **RF changes.** `OBS_REPLICATION_FACTOR` must be equal on the gateway and querier
