@@ -1836,3 +1836,109 @@ func TestBlockStore_Deletion_LeavesNoPartialDir(t *testing.T) {
 		t.Fatalf("after retention tmp/ has %d dirs, want 0", got)
 	}
 }
+
+// flushGenBlock appends 120 samples of name, every one valued val at generation
+// gen, then flushes them as one block.
+func flushGenBlock(t *testing.T, bs *metrics.BlockStore, name string, base int64, val float64, gen int64) {
+	t.Helper()
+	lbls := makeLabels(t, map[string]string{"__name__": name})
+	for i := 0; i < 120; i++ {
+		if err := bs.AppendGen(lbls, base+int64(i)*1000, val, gen); err != nil {
+			t.Fatalf("AppendGen: %v", err)
+		}
+	}
+	if ok, err := bs.FlushBlock(); err != nil || !ok {
+		t.Fatalf("FlushBlock = %v, %v; want a sealed flush", ok, err)
+	}
+}
+
+// Two blocks holding the same samples at the same generation but different values
+// -- two gateways stamping one microsecond -- compact into the tie's winner, the
+// compaction reclaims both sources, and the winner holds at runtime, after a
+// restart, after the compaction, and after a restart again.
+func TestBlockStore_EqualGenerationTie_ConsistentAcrossRuntimeRestartCompaction(t *testing.T) {
+	dir := t.TempDir()
+	const T, gen = int64(1_000_000), int64(1_758_600_000_000_000)
+	id := metricFingerprint(t, "m")
+	assertWins := func(bs *metrics.BlockStore, phase string) {
+		t.Helper()
+		s, found, err := bs.QueryInstant(id, T)
+		if err != nil || !found || s.Value != 2 {
+			t.Fatalf("%s: QueryInstant(T) = %v (found=%v, err=%v), want the tie's winner 2", phase, s.Value, found, err)
+		}
+		rng, err := bs.QueryRange(id, T, T)
+		if err != nil || len(rng) != 1 || rng[0].Value != 2 {
+			t.Fatalf("%s: QueryRange(T,T) = %v, %v; want the single value 2", phase, rng, err)
+		}
+	}
+
+	bs1, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+	flushGenBlock(t, bs1, "m", T, 2, gen) // the winner lands first
+	flushGenBlock(t, bs1, "m", T, 1, gen)
+	assertWins(bs1, "runtime")
+	_ = bs1.Close()
+
+	bs2, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	assertWins(bs2, "restart")
+	infos := bs2.BlockInfos()
+	if len(infos) != 2 {
+		t.Fatalf("want 2 blocks before compaction, got %d", len(infos))
+	}
+	group := []string{infos[0].ID, infos[1].ID}
+	if n, err := bs2.CompactOnce(func([]block.BlockInfo) [][]string { return [][]string{group} }); err != nil || n != 1 {
+		t.Fatalf("CompactOnce = %d, %v; want 1, nil", n, err)
+	}
+	if got := len(bs2.BlockInfos()); got != 1 {
+		t.Fatalf("after compaction blocks = %d, want 1 (both sources reclaimed)", got)
+	}
+	assertWins(bs2, "post-compaction")
+	_ = bs2.Close()
+
+	bs3, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("reopen after compaction: %v", err)
+	}
+	defer bs3.Close()
+	if got := len(bs3.BlockInfos()); got != 1 {
+		t.Fatalf("after compaction+restart blocks = %d, want 1", got)
+	}
+	assertWins(bs3, "post-compaction restart")
+}
+
+// A crash after compacting an equal-generation tie but before deleting its sources
+// leaves the survivor beside both; startup verifies the survivor holds the tie's
+// winner, attested by one source, and reclaims both.
+func TestNewBlockStore_EqualGenerationTieSourcesReclaimed(t *testing.T) {
+	dir := t.TempDir()
+	blocksDir := filepath.Join(dir, "metrics", "blocks")
+	tmpDir := filepath.Join(dir, "metrics", "tmp")
+	for _, d := range []string{blocksDir, tmpDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	a := writeSingleSampleBlock(t, blocksDir, tmpDir, "m", 1000, 1.0, 5, nil)
+	b := writeSingleSampleBlock(t, blocksDir, tmpDir, "m", 1000, 2.0, 5, nil)
+	merged := compactBlocks(t, blocksDir, tmpDir, a, b)
+
+	bs, err := metrics.NewBlockStore(dir)
+	if err != nil {
+		t.Fatalf("NewBlockStore: %v", err)
+	}
+	defer bs.Close()
+	for _, src := range []string{a, b} {
+		if _, err := os.Stat(filepath.Join(blocksDir, src)); !os.IsNotExist(err) {
+			t.Errorf("source %s survived beside the tie's survivor %s: %v", src, merged, err)
+		}
+	}
+	s, found, err := bs.QueryInstant(metricFingerprint(t, "m"), 1000)
+	if err != nil || !found || s.Value != 2 {
+		t.Fatalf("m@1000 = %v (found=%v, err=%v), want the tie's winner 2", s.Value, found, err)
+	}
+}
