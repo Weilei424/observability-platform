@@ -717,7 +717,11 @@ records the decisions and where the code corrected the spec.
   reclaims its sources while a survivor whose value no source holds still counts as
   corrupt (`TestBlockStore_EqualGenerationTie_ConsistentAcrossRuntimeRestartCompaction`,
   `TestNewBlockStore_EqualGenerationTieSourcesReclaimed`,
-  `TestNewBlockStore_EqualGenValueCorruptionKeepsSource`). An ingester advertises generation support
+  `TestNewBlockStore_EqualGenValueCorruptionKeepsSource`). Since the source holding a
+  winner may be deleted before the one holding its loser, superseded sources all move
+  into `tmp/` before any is removed, and startup reads blocks a crash left there as
+  witnesses before it clears `tmp/`, so the live loser is still reclaimed
+  (`TestNewBlockStore_TieSourceLeftByAPartialRetireIsReclaimed`). An ingester advertises generation support
   (`X-Obs-Push-Generations`), and the gateway sends generations only to one that has, so
   a rolling upgrade from 6.2 never sends an old ingester a sample it would refuse
   (`TestNewGatewayOverOldIngestersMeetsQuorum`); asking an ingester it hasn't heard from
