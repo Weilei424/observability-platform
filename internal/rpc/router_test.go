@@ -233,7 +233,7 @@ func TestRouterQuorumMetWithOneDown(t *testing.T) {
 	ings := startIngesters(t, 3, map[int]int{1: http.StatusServiceUnavailable}, nil)
 	var batches []string
 	rt, _ := newTestRouterOpts(t, ings, RouterOptions{ReplicationFactor: 3, Timeout: 2 * time.Second,
-		ObserveBatch: func(o string) { batches = append(batches, o) }})
+		ObserveBatch: func(_ context.Context, b BatchReport) { batches = append(batches, b.Outcome) }})
 	if err := rt.PushSamples(context.Background(), samplesFor(t, 60)); err != nil {
 		t.Fatalf("one of three down at RF=3: %v, want success", err)
 	}
@@ -247,7 +247,7 @@ func TestRouterBatchOutcomeFull(t *testing.T) {
 	ings := startIngesters(t, 3, nil, nil)
 	var batches []string
 	rt, _ := newTestRouterOpts(t, ings, RouterOptions{ReplicationFactor: 3, Timeout: 2 * time.Second,
-		ObserveBatch: func(o string) { batches = append(batches, o) }})
+		ObserveBatch: func(_ context.Context, b BatchReport) { batches = append(batches, b.Outcome) }})
 	if err := rt.PushSamples(context.Background(), samplesFor(t, 30)); err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +261,7 @@ func TestRouterQuorumMissedWithTwoDown(t *testing.T) {
 	ings := startIngesters(t, 3, map[int]int{0: http.StatusServiceUnavailable, 2: http.StatusServiceUnavailable}, nil)
 	var batches []string
 	rt, _ := newTestRouterOpts(t, ings, RouterOptions{ReplicationFactor: 3, Timeout: 2 * time.Second,
-		ObserveBatch: func(o string) { batches = append(batches, o) }})
+		ObserveBatch: func(_ context.Context, b BatchReport) { batches = append(batches, b.Outcome) }})
 	err := rt.PushSamples(context.Background(), samplesFor(t, 10))
 	var qe *QuorumError
 	if !errors.As(err, &qe) || !errors.Is(err, ErrUnavailable) || qe.Quorum != 2 || qe.RF != 3 || qe.Kind != "series" || qe.Failed < 1 || qe.Total != 10 {
@@ -321,7 +321,7 @@ func TestRouterCallerCancelDoesNotCancelPushes(t *testing.T) {
 	var batches []string
 	rt, _ := newTestRouterOpts(t, ings, RouterOptions{ReplicationFactor: 3, Timeout: 200 * time.Millisecond,
 		ObserveMember: func(_, o string) { mu.Lock(); outcomes[o]++; mu.Unlock() },
-		ObserveBatch:  func(o string) { batches = append(batches, o) }})
+		ObserveBatch:  func(_ context.Context, b BatchReport) { batches = append(batches, b.Outcome) }})
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	ctx, cancelNow := context.WithCancel(ctx)
@@ -440,7 +440,7 @@ func TestRouterAnswersAtOnceWhenQuorumIsImpossible(t *testing.T) {
 	outcomes := map[string]int{}
 	rt, _ := newTestRouterOpts(t, ings, RouterOptions{ReplicationFactor: 3, Timeout: 2 * time.Second,
 		ObserveMember: func(_, o string) { mu.Lock(); outcomes[o]++; mu.Unlock() },
-		ObserveBatch:  func(o string) { mu.Lock(); batches = append(batches, o); mu.Unlock() }})
+		ObserveBatch:  func(_ context.Context, b BatchReport) { mu.Lock(); batches = append(batches, b.Outcome); mu.Unlock() }})
 	start := time.Now()
 	err := rt.PushSamples(context.Background(), samplesFor(t, 10))
 	var qe *QuorumError
@@ -552,5 +552,122 @@ func TestRouterCloseRacingWritesAdmitsNothingAfterward(t *testing.T) {
 	writers.Wait()
 	if after := n1.Load() + n2.Load() + n3.Load(); after != landed {
 		t.Errorf("%d pushes landed after Close returned", after-landed)
+	}
+}
+
+// orderedMetrics records appended values in arrival order, safely across
+// goroutines.
+type orderedMetrics struct {
+	mu   sync.Mutex
+	vals []float64
+}
+
+func (o *orderedMetrics) Append(_ metrics.Labels, _ int64, v float64) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.vals = append(o.vals, v)
+	return nil
+}
+
+func (o *orderedMetrics) got() []float64 {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return slices.Clone(o.vals)
+}
+
+// orderedIngester serves pushes into an orderedMetrics; with slowFirst, its
+// first push is held for that long before it is applied.
+func orderedIngester(t *testing.T, slowFirst time.Duration) (string, *orderedMetrics) {
+	t.Helper()
+	m := &orderedMetrics{}
+	r := chi.NewRouter()
+	r.Route("/internal/v1", func(r chi.Router) { MountWrites(r, m, &recordingLogs{}, observability.NewIngestMetrics()) })
+	var first atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if slowFirst > 0 && first.CompareAndSwap(false, true) {
+			time.Sleep(slowFirst)
+		}
+		r.ServeHTTP(w, req)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, m
+}
+
+// An overwrite never loses to the write it overwrites. v1 is acknowledged at
+// quorum while its push to a slow replica still runs; v2, sent right after,
+// must reach that replica after v1, or the replica would give the late v1 the
+// newer generation and reads would regress to it.
+func TestRouterAppliesAKeysWritesInOrderOnEveryReplica(t *testing.T) {
+	ua, a := orderedIngester(t, 0)
+	ub, b := orderedIngester(t, 0)
+	uc, c := orderedIngester(t, 300*time.Millisecond)
+	r, _ := ring.New([]string{ua, ub, uc})
+	rt, err := NewRouter(r, RouterOptions{ReplicationFactor: 3, Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(rt.Wait)
+	l, _ := metrics.NewLabels(map[string]string{"__name__": "over"})
+	for _, v := range []float64{1, 2} {
+		if err := rt.PushSamples(context.Background(), []metrics.PendingSample{{Labels: l, TimestampMs: 1000, Value: v}}); err != nil {
+			t.Fatalf("write %v: %v", v, err)
+		}
+	}
+	rt.Wait()
+	for name, m := range map[string]*orderedMetrics{"a": a, "b": b, "c (slow first push)": c} {
+		if got := m.got(); !slices.Equal(got, []float64{1, 2}) {
+			t.Errorf("ingester %s applied %v, want [1 2]: v1 then its overwrite", name, got)
+		}
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if len(rt.order) != 0 {
+		t.Errorf("per-key order still holds %d members after every push ended", len(rt.order))
+	}
+}
+
+// A push the gateway timed out on is abandoned by the ingester rather than
+// applied late: past its deadline it applies nothing, so it cannot land after,
+// and outrank, the overwrite sent next.
+func TestRouterTimedOutPushIsAbandonedNotAppliedLate(t *testing.T) {
+	ua, a := orderedIngester(t, 0)
+	ub, _ := orderedIngester(t, 0)
+	uc, c := orderedIngester(t, 2*time.Second) // first push outlives the 300ms timeout
+	r, _ := ring.New([]string{ua, ub, uc})
+	var mu sync.Mutex
+	outcomes := map[string]int{}
+	rt, err := NewRouter(r, RouterOptions{ReplicationFactor: 3, Timeout: 300 * time.Millisecond,
+		ObserveMember: func(m, o string) {
+			if m == MemberLabel(uc) {
+				mu.Lock()
+				outcomes[o]++
+				mu.Unlock()
+			}
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(rt.Wait)
+	l, _ := metrics.NewLabels(map[string]string{"__name__": "over"})
+	for _, v := range []float64{1, 2} {
+		if err := rt.PushSamples(context.Background(), []metrics.PendingSample{{Labels: l, TimestampMs: 1000, Value: v}}); err != nil {
+			t.Fatalf("write %v: %v", v, err)
+		}
+	}
+	rt.Wait()
+	if got := a.got(); !slices.Equal(got, []float64{1, 2}) {
+		t.Errorf("healthy ingester applied %v, want [1 2]", got)
+	}
+	time.Sleep(2 * time.Second) // the slow handler wakes and sees v1's deadline passed
+	// v1 is never applied there. v2 either follows once v1's push ended, or —
+	// when its own wait for v1 runs out first — is not sent to that replica at
+	// all (counted unavailable; the write already had quorum). Never v1 last.
+	if got := c.got(); slices.Contains(got, 1) {
+		t.Errorf("slow ingester applied %v: the timed-out v1 landed late", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if outcomes["unavailable"] < 1 || outcomes["unavailable"]+outcomes["ok"] != 2 {
+		t.Errorf("slow ingester outcomes %v, want v1 unavailable and v2 ok or unavailable", outcomes)
 	}
 }
