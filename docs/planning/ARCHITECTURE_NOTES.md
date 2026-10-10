@@ -722,10 +722,27 @@ records the decisions and where the code corrected the spec.
 - **Surfacing.** `obs_gateway_write_quorum_total{outcome=full|degraded|failed}` counts
   each routed batch; per-replica results stay in `obs_gateway_ingester_requests_total`,
   including background pushes. `obs_querier_ingester_reads_total{ingester,outcome}`
-  counts each ingester read (`ok`, `unavailable`, `error`). A degraded batch is only
-  counted, so an outage does not log once per batch; a `503` quorum failure logs `write
-  quorum not met` at `warn` with the failing ingesters. A read the caller cancels is
-  not counted. The self-observability dashboard gains "Write
+  counts each ingester read (`ok`, `unavailable`, `error`). A degraded batch logs at
+  `debug` with the failing ingesters, so an outage does not log once per batch at a
+  visible level; a quorum failure logs `write quorum not met` with the cause and the
+  failing ingesters, at `warn` (outage) or `error` (protocol), from the handler, or from
+  the gateway's batch report when the client left before the decision. Each line
+  carries the request ID. A read that skipped ingesters logs `read answered by
+  replication` with the request ID only once the whole read, store included, has
+  succeeded. A read the caller cancels is not counted.
+- **Per-key order on every replica.** A replica stamps a generation when it applies a
+  write, so a late background push of an acknowledged write could outrank the
+  overwrite sent after it (a Codex review found this). The router therefore sends a
+  key's next push to an ingester only once the previous push of that key there has
+  ended (bounded by the timeout; a push still stuck by then fails as unavailable
+  rather than overtake), and the gateway sends each push's deadline in
+  `X-Obs-Deadline`, which the ingester checks, with the connection, before every
+  append, so a timed-out push stops instead of landing late
+  (`TestRouterAppliesAKeysWritesInOrderOnEveryReplica`,
+  `TestRouterTimedOutPushIsAbandonedNotAppliedLate`,
+  `TestPushPastItsDeadlineAppliesNothing`). Peer URLs are canonicalized (lowercase
+  host, default port dropped), so one ingester cannot appear twice under two
+  spellings and count as two replicas (`TestIngesterURLAliasesAreDuplicates`). The self-observability dashboard gains "Write
   quorum" and "Ingester reads" panels.
 - **Deployment.** Compose split runs RF=3 through one env anchor shared by the gateway
   and querier (smoke 108/0 on 2026-10-07). Helm `split.replicationFactor` (default 3)
