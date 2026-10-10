@@ -157,9 +157,14 @@ POST /internal/v1/metrics/push
 
 `{"series":[{"labels":{"__name__":"http_requests_total"},"samples":[[1758600000000,"1"]]}]}` —
 each sample is `[timestamp_ms, "value", generation]`: the write generation the
-gateway stamped when it admitted the write, which every replica stores exactly.
+gateway stamped when it admitted the batch, which every replica stores exactly.
 A sample without one, `[timestamp_ms, "value"]`, has the ingester assign its
-own; a generation must be positive.
+own; a generation must be positive. The ingester's answer carries
+`X-Obs-Push-Generations: 1` when it takes generations. The gateway sends
+generations only to an ingester that has said so — it asks each one with an
+empty push at start, and again before the first push to one it has not heard
+from — so during a rolling upgrade an ingester from before 6.3, which refuses
+a three-element sample, is sent the two-element form.
 
 ```http
 POST /internal/v1/logs/push
