@@ -206,6 +206,25 @@ func NewBlockStore(dataDir string) (*BlockStore, error) {
 		return g, nil
 	}
 
+	// A survivor's equal-generation tie winner must be held by one of its own
+	// listed sources that opened (survivorSupersedesSource).
+	attestCache := make(map[string]attestor)
+	survivorAttest := func(sv *block.Reader) attestor {
+		id := sv.Meta().BlockID
+		if a, ok := attestCache[id]; ok {
+			return a
+		}
+		var srcs []*block.Reader
+		for _, name := range sv.Meta().Sources {
+			if r, ok := opened[name]; ok {
+				srcs = append(srcs, r)
+			}
+		}
+		a := blocksAttest(srcs, id)
+		attestCache[id] = a
+		return a
+	}
+
 	// Phase 1 (readers open): for each present source, record which survivors
 	// verifiably supersede it. verifiedBy[name] empty (or name absent) means the
 	// block is a retention root — no proven superseder, so it must be kept.
@@ -220,7 +239,7 @@ func NewBlockStore(dataDir string) (*BlockStore, error) {
 			if err != nil {
 				continue // cannot verify against this survivor; try the next
 			}
-			ok, err := survivorSupersedesSource(gens, sv.Meta().BlockID, r)
+			ok, err := survivorSupersedesSource(gens, sv.Meta().BlockID, r, survivorAttest(sv))
 			if err == nil && ok {
 				verifiedBy[name] = append(verifiedBy[name], sv.Meta().BlockID)
 			}
@@ -863,8 +882,9 @@ func (bs *BlockStore) CompactOnce(plan func([]block.BlockInfo) [][]string) (int,
 			_ = bs.safeDeleteBlock(meta.BlockID)
 			return compacted, fmt.Errorf("blockstore: compacted block %s decode: %w", meta.BlockID, err)
 		}
+		attested := blocksAttest(sources, meta.BlockID)
 		for _, src := range sources {
-			ok, err := survivorSupersedesSource(newGens, meta.BlockID, src)
+			ok, err := survivorSupersedesSource(newGens, meta.BlockID, src, attested)
 			if err != nil {
 				_ = newReader.Close()
 				_ = bs.safeDeleteBlock(meta.BlockID)
@@ -1209,7 +1229,8 @@ func reconcileBlockMeta(r *block.Reader, st blockChunkStats) error {
 	return r.SetReconciledMeta(want)
 }
 
-// sampleGV is the winning generation and its raw value bits for one (series, ts).
+// sampleGV is the winning generation and its raw value bits for one (series, ts),
+// the winner chosen by chunk.Outranks.
 type sampleGV struct {
 	gen  int64
 	bits uint64
@@ -1233,7 +1254,7 @@ func decodeBlockGens(r *block.Reader) (map[uint64]map[int64]sampleGV, error) {
 			for it.Next() {
 				ts, val := it.At()
 				g := it.Gen()
-				if cur, ok := m[ts]; !ok || g > cur.gen {
+				if cur, ok := m[ts]; !ok || chunk.Outranks(g, val, cur.gen, math.Float64frombits(cur.bits)) {
 					m[ts] = sampleGV{gen: g, bits: math.Float64bits(val)}
 				}
 			}
@@ -1247,8 +1268,11 @@ func decodeBlockGens(r *block.Reader) (map[uint64]map[int64]sampleGV, error) {
 // copy of every sample in source — the only condition under which deleting source
 // cannot lose data or resurrect a stale/corrupt value under last-write-wins. For
 // each source sample the survivor must hold the same (series, ts) with either a
-// strictly higher generation (a legitimately newer write, value may differ) or the
-// same generation AND identical value bits (a faithful copy). survivorGens must be
+// strictly higher generation (a legitimately newer write, value may differ), the
+// same generation AND identical value bits (a faithful copy), or the same
+// generation and a value that outranks the source's (chunk.Outranks) AND that
+// attested says one of the survivor's other sources holds — two gateways stamping
+// one microsecond, which compaction resolves by value. survivorGens must be
 // decodeBlockGens(survivor).
 //
 // This is deliberately stricter than metadata/time/series-ID heuristics, which are
@@ -1258,11 +1282,12 @@ func decodeBlockGens(r *block.Reader) (map[uint64]map[int64]sampleGV, error) {
 //   - an older block cannot supersede a newer same-series correction (the higher
 //     generation is absent from the older block);
 //   - an equal-generation but value-corrupted survivor cannot delete the intact
-//     source, because the value bits disagree.
+//     source: its value is held by none of its sources, so nothing attests it.
 //
 // A genuine compaction survivor is built from its sources with last-write-wins, so
-// it always holds every source sample faithfully at ≥ its generation and this passes.
-func survivorSupersedesSource(survivorGens map[uint64]map[int64]sampleGV, survivorID string, source *block.Reader) (bool, error) {
+// it always holds every source sample faithfully, or the tie's winner from another
+// source, at ≥ its generation and this passes.
+func survivorSupersedesSource(survivorGens map[uint64]map[int64]sampleGV, survivorID string, source *block.Reader, attested attestor) (bool, error) {
 	if survivorID == source.Meta().BlockID {
 		return false, nil // a block can never be its own source
 	}
@@ -1284,12 +1309,46 @@ func survivorSupersedesSource(survivorGens map[uint64]map[int64]sampleGV, surviv
 					return false, nil // sample missing, or survivor's is older
 				}
 				if sv.gen == it.Gen() && sv.bits != math.Float64bits(val) {
-					return false, nil // same generation but conflicting value: not a faithful copy
+					// Same generation, different value: only the tie's rightful
+					// winner, held by another of the survivor's sources, supersedes.
+					if !chunk.Outranks(sv.gen, math.Float64frombits(sv.bits), it.Gen(), val) || !attested(se.ID, ts, sv) {
+						return false, nil // not a faithful copy, nor the tie's winner
+					}
 				}
 			}
 		}
 	}
 	return true, nil
+}
+
+// attestor reports whether some block in a set holds the sample (series, ts) at
+// exactly gv.
+type attestor func(series uint64, ts int64, gv sampleGV) bool
+
+// blocksAttest is an attestor over readers, minus the block excludeID (the
+// survivor, which can't attest its own values). Each reader is decoded the first
+// time a conflict needs it; one that fails to decode attests nothing.
+func blocksAttest(readers []*block.Reader, excludeID string) attestor {
+	var decoded []map[uint64]map[int64]sampleGV
+	return func(series uint64, ts int64, gv sampleGV) bool {
+		if decoded == nil {
+			decoded = make([]map[uint64]map[int64]sampleGV, 0, len(readers))
+			for _, r := range readers {
+				if r.Meta().BlockID == excludeID {
+					continue
+				}
+				if g, err := decodeBlockGens(r); err == nil {
+					decoded = append(decoded, g)
+				}
+			}
+		}
+		for _, g := range decoded {
+			if got, ok := g[series][ts]; ok && got == gv {
+				return true
+			}
+		}
+		return false
+	}
 }
 
 func blockPairsToLabels(pairs []block.LabelPair) (Labels, error) {
