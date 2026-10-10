@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/masonwheeler/observability-platform/internal/storage/chunk"
 	"github.com/masonwheeler/observability-platform/internal/storage/wal"
 )
 
@@ -84,6 +85,28 @@ func (s *WALStore) Append(labels Labels, tsMs int64, value float64) error {
 	if err != nil {
 		return err
 	}
+	walSeg := s.w.SegmentIndex()
+	if err := s.w.WriteRecordGen(labelsToWALPairs(labels), tsMs, value, gen); err != nil {
+		return err
+	}
+	return s.store.AppendTrackedGen(labels, tsMs, value, gen, walSeg)
+}
+
+var _ GenIngester = (*WALStore)(nil)
+
+// AppendWithGeneration is Append with a generation the writer assigned (the
+// gateway, which stamps one per write so every replica stores the same).
+// The WAL record carries it, so replay restores it exactly, and the head
+// raises its own counter past it. gen 0 assigns one, as Append does.
+func (s *WALStore) AppendWithGeneration(labels Labels, tsMs int64, value float64, gen int64) error {
+	if gen == 0 {
+		return s.Append(labels, tsMs, value)
+	}
+	if gen < 0 || gen > chunk.MaxGeneration {
+		return fmt.Errorf("metrics: write generation %d out of range [1, %d]", gen, int64(chunk.MaxGeneration))
+	}
+	s.appendMu.Lock()
+	defer s.appendMu.Unlock()
 	walSeg := s.w.SegmentIndex()
 	if err := s.w.WriteRecordGen(labelsToWALPairs(labels), tsMs, value, gen); err != nil {
 		return err
