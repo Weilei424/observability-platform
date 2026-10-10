@@ -82,18 +82,26 @@ services:
       # Demo-only, as in docker-compose.yml: at demo volume the 8 MiB default
       # would never flush, and the store's chunk path would never run.
       OBS_LOGS_FLUSH_THRESHOLD_BYTES: "16384"
+      # Each ingester's own URL as OBS_INGESTER_URL lists it: it refuses a
+      # request meant for another member, which a connection held across a
+      # restart that reshuffled container addresses could otherwise deliver.
+      OBS_INGESTER_SELF_URL: http://ingester-1:8080
     volumes:
       - obs-ingester-1-data:/data
 
   ingester-2:
     <<: *ingester
-    environment: *ingester-env
+    environment:
+      <<: *ingester-env
+      OBS_INGESTER_SELF_URL: http://ingester-2:8080
     volumes:
       - obs-ingester-2-data:/data
 
   ingester-3:
     <<: *ingester
-    environment: *ingester-env
+    environment:
+      <<: *ingester-env
+      OBS_INGESTER_SELF_URL: http://ingester-3:8080
     volumes:
       - obs-ingester-3-data:/data
 
