@@ -384,3 +384,22 @@ func TestClientRequestTimeoutIsAnOutage(t *testing.T) {
 		t.Fatalf("took %v with a 100ms timeout", d)
 	}
 }
+
+// A peer answering 499 saw the request as abandoned: that is an outage to the
+// caller, not a protocol disagreement (which a write quorum would turn into a
+// 500 instead of a 503).
+func TestClientTreatsA499AsAnOutage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(499)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := rpc.NewClient("ingester", srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, _ := metrics.NewLabels(map[string]string{"__name__": "m"})
+	err = c.PushSamples(context.Background(), []metrics.PendingSample{{Labels: l, TimestampMs: 1, Value: 1}})
+	if !errors.Is(err, rpc.ErrUnavailable) {
+		t.Fatalf("a 499 answer: err = %v, want ErrUnavailable", err)
+	}
+}
