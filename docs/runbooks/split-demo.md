@@ -127,8 +127,9 @@ avoids.
 To add `ingester-4`:
 
 1. Add an `ingester-4` service beside `ingester-3` (same `<<: *ingester` and
-   `*ingester-env`, with its own `obs-ingester-4-data` volume, declared under
-   `volumes:`), and add it to the producers' `depends_on`. Add an
+   `*ingester-env`, with `OBS_INGESTER_SELF_URL: http://ingester-4:8080` and
+   its own `obs-ingester-4-data` volume, declared under `volumes:`), and add it
+   to the producers' `depends_on`. Add an
    `ingester-4:8080` target with `component: ingester` to
    `observability/prometheus/prometheus.split.yml`.
 2. Start it, then append `,http://ingester-4:8080` to the anchor's
