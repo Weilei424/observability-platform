@@ -431,6 +431,21 @@ func TestRingStagingTreatsAPartialReleaseAsLive(t *testing.T) {
 			"querier":       withRF(liveDeployment(q, 4, rollout{spec: 2, generation: 4, observed: 4, total: 3, updated: 1, available: 2}), 1),
 			"querierConfig": liveConfigMap(4), "ingesterData": 4,
 		}, []string{"split.ingester.replicas=4", "split.replicationFactor=1"}, "has not finished rolling out"},
+		// The usual recovery: the Deployment is gone but its ConfigMap stays, so
+		// the previous counts look known. A survivor still rolling may yet run
+		// an older list, so the recovery still waits for it.
+		{"gateway recovery with its ConfigMap kept, querier still rolls", map[string]any{
+			"querier":       withRF(liveDeployment(q, 4, rollout{spec: 2, generation: 4, observed: 4, total: 3, updated: 1, available: 2}), 1),
+			"gatewayConfig": liveConfigMap(4), "querierConfig": liveConfigMap(4), "ingesterData": 4,
+		}, []string{"split.ingester.replicas=4", "split.replicationFactor=1"}, "deployment/observability-querier has not finished rolling out"},
+		{"querier recovery with its ConfigMap kept, gateway still rolls", map[string]any{
+			"gateway":       withRF(liveDeployment("observability-backend", 4, rollout{spec: 2, generation: 4, observed: 4, total: 3, updated: 1, available: 2}), 1),
+			"gatewayConfig": liveConfigMap(4), "querierConfig": liveConfigMap(4), "ingesterData": 4,
+		}, []string{"split.ingester.replicas=4", "split.replicationFactor=1"}, "deployment/observability-backend has not finished rolling out"},
+		{"gateway recovery with its ConfigMap kept, querier rolled out", map[string]any{
+			"querier":       withRF(liveDeployment(q, 4, rolledOut), 1),
+			"gatewayConfig": liveConfigMap(4), "querierConfig": liveConfigMap(4), "ingesterData": 4,
+		}, []string{"split.ingester.replicas=4", "split.replicationFactor=1"}, ""},
 		{"6.3 release without its gateway Deployment", map[string]any{
 			"querier": withRF(liveDeployment(q, 3, rolledOut), 3), "gatewayConfig": cm(3), "querierConfig": cm(3),
 		}, nil, "unstaged replication factor change"},
