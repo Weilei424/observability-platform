@@ -117,7 +117,7 @@ func rechunk(samples []sample) []*chunk.Chunk {
 	for i := 1; i < len(samples); i++ {
 		last := &deduped[len(deduped)-1]
 		if samples[i].ts == last.ts {
-			if samples[i].gen > last.gen {
+			if chunk.Outranks(samples[i].gen, samples[i].val, last.gen, last.val) {
 				*last = samples[i]
 			}
 		} else {
