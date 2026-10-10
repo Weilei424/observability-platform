@@ -215,3 +215,27 @@ func TestWireEncodingIsNeverHTMLEscaped(t *testing.T) {
 	writeJSON(rec, http.StatusOK, resp)
 	assertLiteral(t, "writeJSON", rec.Body.Bytes())
 }
+
+// A push sample carries the gateway's generation as a third element, and an
+// older gateway's two-element sample still decodes (the ingester assigns one).
+func TestPushSampleCarriesTheGatewaysGeneration(t *testing.T) {
+	b, err := wirePushSample{T: 5, V: 1.5, G: 1758600000000001}.MarshalJSON()
+	if err != nil || string(b) != `[5,"1.5",1758600000000001]` {
+		t.Fatalf("marshal = %s, %v", b, err)
+	}
+	var s wirePushSample
+	if err := s.UnmarshalJSON(b); err != nil || s != (wirePushSample{T: 5, V: 1.5, G: 1758600000000001}) {
+		t.Fatalf("round trip = %+v, %v", s, err)
+	}
+	if err := s.UnmarshalJSON([]byte(`[5,"2"]`)); err != nil || s.G != 0 || s.V != 2 {
+		t.Fatalf("two elements = %+v, %v; want no generation", s, err)
+	}
+	if b, _ := (wirePushSample{T: 5, V: 2}).MarshalJSON(); string(b) != `[5,"2"]` {
+		t.Errorf("no generation marshals as %s, want [5,\"2\"]", b)
+	}
+	for _, bad := range []string{`[5,"2",0]`, `[5,"2",-1]`, `[5,"2","x"]`, `[5,"2",1,2]`} {
+		if err := s.UnmarshalJSON([]byte(bad)); err == nil {
+			t.Errorf("%s decoded, want an error", bad)
+		}
+	}
+}
