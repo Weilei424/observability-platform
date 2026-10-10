@@ -163,8 +163,9 @@ own; a generation must be positive. The ingester's answer carries
 `X-Obs-Push-Generations: 1` when it takes generations. The gateway sends
 generations only to an ingester that has said so — it asks each one with an
 empty push at start, and again before the first push to one it has not heard
-from — so during a rolling upgrade an ingester from before 6.3, which refuses
-a three-element sample, is sent the two-element form.
+from, within that push's one timeout — so during a rolling upgrade an
+ingester from before 6.3, which refuses a three-element sample, is sent the
+two-element form.
 
 ```http
 POST /internal/v1/logs/push
