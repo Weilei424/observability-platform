@@ -10,7 +10,7 @@ import (
 func clearTopologyEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("OBS_DATA_DIR", "data")
-	for _, k := range []string{"OBS_TARGET", "OBS_INGESTER_URL", "OBS_STORE_URL", "OBS_QUERIER_URL"} {
+	for _, k := range []string{"OBS_TARGET", "OBS_INGESTER_URL", "OBS_STORE_URL", "OBS_QUERIER_URL", "OBS_INGESTER_SELF_URL"} {
 		t.Setenv(k, "")
 	}
 }
