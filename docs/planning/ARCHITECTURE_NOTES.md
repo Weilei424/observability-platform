@@ -728,6 +728,20 @@ records the decisions and where the code corrected the spec.
   shares the push's one timeout (`TestRouterAskAndPushToAnUnknownIngesterShareOneTimeout`).
   Writes sent straight to an ingester still take its own generation;
   `TestMergeHeadsOverwriteSkewWindow` pins that rule for ingester-assigned generations.
+- **Member identity (found by the Compose smoke).** The two-down drill sometimes
+  answered `204`: after earlier restarts reshuffled container addresses, one
+  member's pooled keep-alive connection had reached ingester-1, which then
+  acknowledged one write twice and met quorum alone. Fresh connections were
+  correct, so DNS at the moment of the dial was the culprit, not the ring. Every
+  internal request now names the member it meant (`X-Obs-Member`); an ingester
+  given its own URL (`OBS_INGESTER_SELF_URL` -- per service in Compose, from the
+  pod name in Helm) refuses another member's request with `421`, which the
+  client counts as an outage and answers by dropping its pooled connections
+  (`TestRouterDoesNotCountOneIngesterTwice`,
+  `TestClientTreatsMisdirectedAsUnavailableAndRedials`,
+  `TestIngesterRefusesAnotherMembersRequest`). A request without the header
+  passes, so a rolling upgrade keeps working; an ingester without a self URL
+  checks nothing.
 - **RF changes.** `OBS_REPLICATION_FACTOR` must be equal on the gateway and querier
   at rest; compare the `replication_factor` and `quorum` fields of the two `ring ready`
   lines. A change is staged so the querier's quorum never exceeds the gateway's while
