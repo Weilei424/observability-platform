@@ -64,6 +64,10 @@ type Config struct {
 	IngesterURLs []string
 	StoreURL     string
 	QuerierURL   string
+	// IngesterSelfURL is OBS_INGESTER_SELF_URL, normalized: this ingester's own
+	// URL as the ring lists it. When set, the ingester refuses an internal
+	// request addressed to another member. Ingester only; optional.
+	IngesterSelfURL string
 
 	ReplicationFactor int           // OBS_REPLICATION_FACTOR: replicas per series/stream; gateway and querier (Phase 6.3)
 	IngesterTimeout   time.Duration // OBS_INGESTER_TIMEOUT: bounds each routed write and ingester read
@@ -105,6 +109,7 @@ func Load() (*Config, error) {
 	v.SetDefault("ingester_url", "")
 	v.SetDefault("store_url", "")
 	v.SetDefault("querier_url", "")
+	v.SetDefault("ingester_self_url", "")
 	v.SetDefault("replication_factor", 1)
 	v.SetDefault("ingester_timeout", DefaultIngesterTimeout.String())
 
@@ -162,6 +167,7 @@ func Load() (*Config, error) {
 		IngesterURL:             v.GetString("ingester_url"),
 		StoreURL:                v.GetString("store_url"),
 		QuerierURL:              v.GetString("querier_url"),
+		IngesterSelfURL:         v.GetString("ingester_self_url"),
 		ReplicationFactor:       v.GetInt("replication_factor"),
 		IngesterTimeout:         ingesterTimeout,
 		MaintenanceInterval:     maintenanceInterval,
@@ -296,6 +302,16 @@ func (c *Config) validateTopology() error {
 			}
 			*fields[p] = normalized
 		}
+	}
+	if c.IngesterSelfURL != "" {
+		if c.Target != TargetIngester {
+			return fmt.Errorf("config: OBS_INGESTER_SELF_URL is set but target %s does not use it; unset it", c.Target)
+		}
+		self, err := validatePeerURL("OBS_INGESTER_SELF_URL", c.Target, c.IngesterSelfURL)
+		if err != nil {
+			return err
+		}
+		c.IngesterSelfURL = self
 	}
 	if (c.Target == TargetGateway || c.Target == TargetQuerier) && c.ReplicationFactor > len(c.IngesterURLs) {
 		return fmt.Errorf("config: OBS_REPLICATION_FACTOR %d is larger than the %d ingesters in OBS_INGESTER_URL", c.ReplicationFactor, len(c.IngesterURLs))
