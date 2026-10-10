@@ -80,6 +80,10 @@ type Deps struct {
 
 	// Writes, required with Upstreams, routes the gateway's validated writes.
 	Writes WriteRouter
+
+	// Middleware wraps every route after the request ID and the request's
+	// logger are set, so it can log with them.
+	Middleware []func(http.Handler) http.Handler
 }
 
 // WriteRouter sends validated writes onward: the gateway's ring router. When
@@ -106,6 +110,7 @@ type Server struct {
 	ready       func() error
 	gateway     *gatewayProxies
 	writes      WriteRouter
+	middleware  []func(http.Handler) http.Handler
 }
 
 func New(d Deps) *Server {
@@ -139,6 +144,7 @@ func New(d Deps) *Server {
 		reg:         d.Registry,
 		logIngester: d.LogIngester,
 		logQuery:    d.LogQuery,
+		middleware:  d.Middleware,
 		http:        d.HTTP,
 		ingest:      d.Ingest,
 		routes:      d.Routes,
