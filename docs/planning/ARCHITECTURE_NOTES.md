@@ -701,12 +701,20 @@ records the decisions and where the code corrected the spec.
   acknowledged write could reach a slow replica after the overwrite that followed it,
   take the newer generation there and win the read; per-key ordering in the router fixed
   that for one gateway but not across gateway pods. So the gateway now stamps each
-  sample `max(previous + 1, now in Unix µs)` at admission (`Router.stamp`), the push
-  carries it (`[timestamp_ms, "value", generation]`), and every replica stores it
-  exactly (`WALStore.AppendWithGeneration`; the WAL records it, replay restores it, the
-  head's counter moves past it). Arrival order stops mattering; overwrites through
-  different gateway pods order by the pods' clocks (`TestRouterStampsIncreasingGenerations`,
-  `TestOverwriteThroughTwoGatewaysWinsOnEveryReplica`, `TestReplicasStoreTheGatewaysGeneration`).
+  batch one generation, `max(previous + 1, now in Unix µs)`, at admission
+  (`Router.stamp`; one per batch keeps the counter at the clock, and a batch's
+  duplicate series and timestamp keeps its last sample), the push carries it
+  (`[timestamp_ms, "value", generation]`), and every replica stores it exactly
+  (`WALStore.AppendWithGeneration`; the WAL records it, replay restores it, the head's
+  counter moves past it). Arrival order stops mattering; overwrites through different
+  gateway pods order by the pods' clocks, and an exact tie is broken by value on every
+  read and compaction path (`chunk.Outranks`), so replicas agree
+  (`TestRouterStampsIncreasingGenerations`, `TestOverwriteThroughTwoGatewaysWinsOnEveryReplica`,
+  `TestALargeBatchDoesNotOutrankALaterWriteElsewhere`, `TestEqualGenerationsResolveTheSameEverywhere`,
+  `TestReplicasStoreTheGatewaysGeneration`). An ingester advertises generation support
+  (`X-Obs-Push-Generations`), and the gateway sends generations only to one that has, so
+  a rolling upgrade from 6.2 never sends an old ingester a sample it would refuse
+  (`TestNewGatewayOverOldIngestersMeetsQuorum`).
   Writes sent straight to an ingester still take its own generation;
   `TestMergeHeadsOverwriteSkewWindow` pins that rule for ingester-assigned generations.
 - **RF changes.** `OBS_REPLICATION_FACTOR` must be equal on the gateway and querier
