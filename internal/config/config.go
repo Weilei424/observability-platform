@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"slices"
@@ -342,5 +343,24 @@ func validatePeerURL(env string, target Target, raw string) (string, error) {
 	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery || strings.Contains(raw, "#") {
 		return "", fmt.Errorf("config: %s %q must be a base URL with no path, query, or fragment for target %s", env, raw, target)
 	}
-	return strings.TrimSuffix(raw, "/"), nil
+	return canonicalURL(u), nil
+}
+
+// canonicalURL is u's scheme and host in one spelling: lowercase, and without
+// the scheme's default port. Two spellings of one peer -- http://INGESTER:8080
+// and http://ingester:8080, or http://ingester and http://ingester:80 -- reach
+// the same process, so they must compare equal: an ingester listed twice under
+// two spellings would otherwise count as two replicas toward a write quorum.
+func canonicalURL(u *url.URL) string {
+	scheme := strings.ToLower(u.Scheme)
+	host, port := strings.ToLower(u.Hostname()), u.Port()
+	if (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
+		port = ""
+	}
+	if port != "" {
+		host = net.JoinHostPort(host, port)
+	} else if strings.Contains(host, ":") {
+		host = "[" + host + "]" // a bare IPv6 address keeps its brackets
+	}
+	return scheme + "://" + host
 }
