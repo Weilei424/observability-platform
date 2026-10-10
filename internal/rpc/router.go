@@ -25,7 +25,18 @@ type Router struct {
 	rf      int
 	opts    RouterOptions
 	wg      sync.WaitGroup // pushes and batch observations still running
+
+	// mu guards closed and every wg.Add, so Close can stop admitting batches
+	// and then wait: no Add can follow the Wait it starts. Shutdown cannot
+	// rely on the HTTP server for that, since http.Server.Shutdown can give up
+	// while a slow handler has yet to reach the router.
+	mu     sync.Mutex
+	closed bool
 }
+
+// ErrRouterClosed refuses a batch that arrives after Close: the gateway is
+// shutting down. It is an outage to the client (503), which retries elsewhere.
+var ErrRouterClosed = fmt.Errorf("%w: write routing: the gateway is shutting down", ErrUnavailable)
 
 // RouterOptions configures a Router.
 type RouterOptions struct {
@@ -95,6 +106,16 @@ func (rt *Router) WaitContext(ctx context.Context) error {
 	case <-ctx.Done():
 		return fmt.Errorf("rpc: background replica pushes still running: %w", ctx.Err())
 	}
+}
+
+// Close stops admitting batches — a write arriving from now on answers
+// ErrRouterClosed — and then waits, within ctx, for the background pushes and
+// batch observations already running. The gateway runs it at shutdown.
+func (rt *Router) Close(ctx context.Context) error {
+	rt.mu.Lock()
+	rt.closed = true
+	rt.mu.Unlock()
+	return rt.WaitContext(ctx)
 }
 
 // MemberLabel is a member URL's host:port, the ingester label on gateway metrics.
@@ -170,10 +191,19 @@ func replicate[T any](ctx context.Context, rt *Router, kind string, items []T, k
 		member string
 		err    error
 	}
+	// Admit the batch, or refuse it once Close has started: every Add happens
+	// under mu before closed is set, so Close's Wait can never race one.
+	rt.mu.Lock()
+	if rt.closed {
+		rt.mu.Unlock()
+		return ErrRouterClosed
+	}
+	rt.wg.Add(len(groups) + 1) // every push, and the collector below
+	rt.mu.Unlock()
+
 	results := make(chan result, len(groups)) // never blocks a push
 	bg := context.WithoutCancel(ctx)
 	for member, g := range groups {
-		rt.wg.Add(1)
 		go func() {
 			defer rt.wg.Done()
 			err := send(bg, rt.clients[member], g) // the client's timeout bounds it
@@ -190,7 +220,6 @@ func replicate[T any](ctx context.Context, rt *Router, kind string, items []T, k
 	// the batch once every push has ended.
 	decided := make(chan error, 1)
 	need, maxFail := quorum(rt.rf), rt.rf-quorum(rt.rf)
-	rt.wg.Add(1)
 	go func() {
 		defer rt.wg.Done()
 		acks := make([]int, len(replicasOf))
