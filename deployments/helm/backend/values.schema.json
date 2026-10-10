@@ -29,6 +29,10 @@
           "$comment": "A real config key, but templates/configmap.yaml rejects it: the chart renders peer URLs from its own Services.",
           "type": ["string"]
         },
+        "OBS_INGESTER_SELF_URL": {
+          "$comment": "A real config key, but templates/configmap.yaml rejects it: the chart sets each ingester pod's own URL from its pod name.",
+          "type": ["string"]
+        },
         "OBS_REPLICATION_FACTOR": { "type": ["string", "integer"] },
         "OBS_INGESTER_TIMEOUT": { "type": ["string"] },
         "OBS_DATA_DIR": { "type": ["string"] },
