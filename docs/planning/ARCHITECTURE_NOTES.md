@@ -690,19 +690,25 @@ records the decisions and where the code corrected the spec.
   ingester read, and a skipped ingester's flushed data is already in the store. RF=1
   gives `Tolerate = 0`: 6.2's fail-closed reads. The argument does not cover an RF
   change while heads hold data (below).
-- **Duplicates.** Each ingester still assigns its own generation, so copies of one
-  sample differ only in generation and collapse to one value on read (`sortAndDedup`);
+- **Duplicates.** Every replica stores the generation the gateway stamped, so copies
+  of one sample are identical and collapse to one value on read (`sortAndDedup`);
   log lines dedup by `(timestamp, line)`. Dedup is proven for `sum`, `rate`, an instant
   series count and `count_over_time` plus raw lines, from heads, from the store after a
   flush has put RF copies there, and after compaction (`count()` is not in the PromQL
   engine). Metrics compaction merges the copies; log chunks stay RF x on disk.
-- **Overwrite skew.** Two writes to one series and timestamp are ordered by the highest
-  generation across all replicas. An overwrite can lose to the older value only when the
-  replica whose clock runs furthest ahead missed the overwrite (a partial-quorum write)
-  and that replica's old write carries a higher generation than the overwrite's on the
-  replicas that got it. If every replica holds both writes, the overwrite always wins.
-  The design spec words this as any overwrite inside the clock skew; the code is
-  narrower, and `TestMergeHeadsOverwriteSkewWindow` pins the narrower rule.
+- **Gateway-stamped generations (reversed after review).** The design had each ingester
+  assign its own generation. Codex reviews then found a late background push of an
+  acknowledged write could reach a slow replica after the overwrite that followed it,
+  take the newer generation there and win the read; per-key ordering in the router fixed
+  that for one gateway but not across gateway pods. So the gateway now stamps each
+  sample `max(previous + 1, now in Unix µs)` at admission (`Router.stamp`), the push
+  carries it (`[timestamp_ms, "value", generation]`), and every replica stores it
+  exactly (`WALStore.AppendWithGeneration`; the WAL records it, replay restores it, the
+  head's counter moves past it). Arrival order stops mattering; overwrites through
+  different gateway pods order by the pods' clocks (`TestRouterStampsIncreasingGenerations`,
+  `TestOverwriteThroughTwoGatewaysWinsOnEveryReplica`, `TestReplicasStoreTheGatewaysGeneration`).
+  Writes sent straight to an ingester still take its own generation;
+  `TestMergeHeadsOverwriteSkewWindow` pins that rule for ingester-assigned generations.
 - **RF changes.** `OBS_REPLICATION_FACTOR` must be equal on the gateway and querier
   at rest; compare the `replication_factor` and `quorum` fields of the two `ring ready`
   lines. A change is staged so the querier's quorum never exceeds the gateway's while
@@ -727,22 +733,14 @@ records the decisions and where the code corrected the spec.
   visible level; a quorum failure logs `write quorum not met` with the cause and the
   failing ingesters, at `warn` (outage) or `error` (protocol), from the handler, or from
   the gateway's batch report when the client left before the decision. Each line
-  carries the request ID. A read that skipped ingesters logs `read answered by
-  replication` with the request ID only once the whole read, store included, has
-  succeeded. A read the caller cancels is not counted.
-- **Per-key order on every replica.** A replica stamps a generation when it applies a
-  write, so a late background push of an acknowledged write could outrank the
-  overwrite sent after it (a Codex review found this). The router therefore sends a
-  key's next push to an ingester only once the previous push of that key there has
-  ended (bounded by the timeout; a push still stuck by then fails as unavailable
-  rather than overtake), and the gateway sends each push's deadline in
-  `X-Obs-Deadline`, which the ingester checks, with the connection, before every
-  append, so a timed-out push stops instead of landing late
-  (`TestRouterAppliesAKeysWritesInOrderOnEveryReplica`,
-  `TestRouterTimedOutPushIsAbandonedNotAppliedLate`,
-  `TestPushPastItsDeadlineAppliesNothing`). Peer URLs are canonicalized (lowercase
-  host, default port dropped), so one ingester cannot appear twice under two
-  spellings and count as two replicas (`TestIngesterURLAliasesAreDuplicates`). The self-observability dashboard gains "Write
+  carries the request ID. A request that skipped ingesters logs `read answered by
+  replication` once, with the request ID, after its response succeeded, however many
+  reads it made (`TestQuerierWarnsOncePerRequest`). A read the caller cancels is not counted.
+- **One ingester, one replica.** Peer URLs are canonicalized (lowercase host, no
+  trailing dot, canonical IP form, no default port), so one ingester cannot appear
+  twice under two spellings and count as two replicas toward quorum
+  (`TestIngesterURLAliasesAreDuplicates`); two DNS names for one host are not
+  detected. A peer answering `499` is an outage to the client, not a protocol error. The self-observability dashboard gains "Write
   quorum" and "Ingester reads" panels.
 - **Deployment.** Compose split runs RF=3 through one env anchor shared by the gateway
   and querier (smoke 108/0 on 2026-10-07). Helm `split.replicationFactor` (default 3)
