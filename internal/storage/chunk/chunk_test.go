@@ -543,3 +543,20 @@ func TestChunk_SealClosesAnOpenChunk(t *testing.T) {
 		t.Fatalf("round trip = %v samples %d maxTs %d", err, back.NumSamples(), back.MaxTs())
 	}
 }
+
+// A higher generation wins; an exact tie goes to the larger value bits, the
+// same way whichever order the two arrive in.
+func TestOutranks(t *testing.T) {
+	if !chunk.Outranks(2, 1, 1, 9) || chunk.Outranks(1, 9, 2, 1) {
+		t.Error("the higher generation must win regardless of value")
+	}
+	if chunk.Outranks(5, 1, 5, 2) == chunk.Outranks(5, 2, 5, 1) {
+		t.Error("a tie must have exactly one winner, whichever side is asked")
+	}
+	if !chunk.Outranks(5, 2, 5, 1) {
+		t.Error("a tie goes to the larger value bits")
+	}
+	if chunk.Outranks(5, 3, 5, 3) {
+		t.Error("a sample does not outrank an identical one")
+	}
+}
