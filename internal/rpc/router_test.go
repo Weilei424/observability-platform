@@ -314,6 +314,23 @@ func TestRouterAnswersAtQuorumWhileAReplicaHangs(t *testing.T) {
 	}
 }
 
+// Asking an ingester the router hasn't heard from whether it takes generations
+// shares the push's one timeout: a hung unknown ingester costs one timeout, not
+// one for the ask and another for the push.
+func TestRouterAskAndPushToAnUnknownIngesterShareOneTimeout(t *testing.T) {
+	ings := startIngesters(t, 1, nil, map[int]bool{0: true})
+	const timeout = 300 * time.Millisecond
+	rt, _ := newTestRouterOpts(t, ings, RouterOptions{ReplicationFactor: 1, Timeout: timeout})
+	start := time.Now()
+	if err := rt.PushSamples(context.Background(), samplesFor(t, 3)); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("err = %v, want ErrUnavailable", err)
+	}
+	rt.Wait()
+	if d := time.Since(start); d > timeout*3/2 {
+		t.Errorf("the write and its pushes took %v, want about one %v timeout", d, timeout)
+	}
+}
+
 // A caller that gives up does not cancel the replicas still pushing: they
 // finish in the background and are observed.
 func TestRouterCallerCancelDoesNotCancelPushes(t *testing.T) {
