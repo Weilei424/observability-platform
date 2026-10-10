@@ -166,8 +166,11 @@ These are properties of the whole system, not of the query languages.
   compared in one spelling (lowercase, no trailing dot, canonical IP form, no
   default port), so `http://INGESTER:8080` and `http://ingester:8080` are one
   member and the duplicate is refused at startup. Two different names that
-  resolve to the same host are not detected: listed both ways, one ingester
-  would count as two replicas toward a write quorum. List each ingester once.
+  resolve to the same host are not detected at startup. An ingester given its
+  own URL (`OBS_INGESTER_SELF_URL`, which Compose and the chart set) refuses
+  requests made under the other name, so that name only ever looks down;
+  without one, listed both ways, one ingester would count as two replicas
+  toward a write quorum. List each ingester once.
 - **Overwrites through different gateways follow their clocks.** The gateway
   stamps each batch one generation, `max(previous + 1, now in Unix
   microseconds)`, when it admits it, and every replica stores that one, so how
