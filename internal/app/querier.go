@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
 
 	"github.com/masonwheeler/observability-platform/internal/api"
 	"github.com/masonwheeler/observability-platform/internal/config"
@@ -63,9 +64,9 @@ func buildQuerier(cfg *config.Config, log *slog.Logger) (*App, error) {
 		}
 		rm.IngesterReads.WithLabelValues(labels[i], rpc.OutcomeOf(err)).Inc()
 	}
-	// The head merge records a skip on the read's note; the note logs it,
-	// with the request's ID, only once the whole read -- store included --
-	// has succeeded (replication_note.go).
+	// The head merge records a skip on the request's note; the request logs
+	// it once, with its ID, only if its response succeeded
+	// (replication_note.go).
 	onSkip := func(ctx context.Context, skipped []int) {
 		names := make([]string, len(skipped))
 		for j, i := range skipped {
@@ -78,15 +79,16 @@ func buildQuerier(cfg *config.Config, log *slog.Logger) (*App, error) {
 		Config: cfg,
 		Logger: log,
 		Routes: api.RoutesRead,
-		Engine: metrics.NewQueryEngineFromSource(notedMetrics{metrics.Merge(metrics.MergeHeadsWith(
+		Engine: metrics.NewQueryEngineFromSource(metrics.Merge(metrics.MergeHeadsWith(
 			metrics.HeadsOptions{Tolerate: tolerate, Skippable: skippable, Observe: observe, OnSkip: onSkip}, metricHeads...),
-			rpc.NewMetricsSource(store))}),
-		LogQuery: logs.NewQueryEngineFromSource(notedLogs{logs.Merge(logs.MergeHeadsWith(
+			rpc.NewMetricsSource(store))),
+		LogQuery: logs.NewQueryEngineFromSource(logs.Merge(logs.MergeHeadsWith(
 			logs.HeadsOptions{Tolerate: tolerate, Skippable: skippable, Observe: observe, OnSkip: onSkip}, logHeads...),
-			rpc.NewLogsSource(store))}),
-		Registry: reg,
-		HTTP:     inst.HTTP,
-		Ready:    alwaysReady,
+			rpc.NewLogsSource(store))),
+		Middleware: []func(http.Handler) http.Handler{replicationNotes},
+		Registry:   reg,
+		HTTP:       inst.HTTP,
+		Ready:      alwaysReady,
 	})
 	return &App{Target: config.TargetQuerier, Handler: srv, log: log}, nil
 }
