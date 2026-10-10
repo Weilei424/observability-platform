@@ -89,10 +89,12 @@ without waiting for groups still running:
 
 The failures seen when the answer is decided set the code: a protocol error
 among them makes it `500`, else `503`. A group that fails later, after the
-answer, is still counted and logged but does not change it, so when one group
-gets an outage and another a protocol error, which arrives first decides
-between `503` and `500` ([../api/limitations.md](../api/limitations.md)). A
-`503` can leave some groups written. Retrying the whole batch is safe: a metrics retry
+answer, is still counted (`obs_gateway_ingester_requests_total`, and the
+batch's `obs_gateway_write_quorum_total` outcome) but not logged, and does not
+change the answer, so when one group gets an outage and another a protocol
+error, which arrives first decides between `503` and `500`
+([../api/limitations.md](../api/limitations.md)). A `503` can leave some
+groups written. Retrying the whole batch is safe: a metrics retry
 rewrites the same values at the same timestamps, and reads already collapse
 duplicate log entries by `(timestamp, line)`.
 
