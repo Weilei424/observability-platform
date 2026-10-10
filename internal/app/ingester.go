@@ -139,6 +139,12 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 		HTTP:        inst.HTTP,
 		Ingest:      inst.Ingest,
 		Internal: func(r chi.Router) {
+			// Refuse a request meant for another member, so a connection that
+			// reached this ingester under another's name never counts as that
+			// member's replica (rpc.MemberHeader).
+			if cfg.IngesterSelfURL != "" {
+				r.Use(rpc.RequireMember(cfg.IngesterSelfURL))
+			}
 			rpc.MountDrain(r, drainHeads, ingesterDrainTimeout)
 			rpc.MountReads(r, head, logs.AsSource(logHead))
 			rpc.MountWrites(r, gate.Metrics(writes), gate.Logs(logHead), inst.Ingest)
