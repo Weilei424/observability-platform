@@ -54,7 +54,6 @@ func buildQuerier(cfg *config.Config, log *slog.Logger) (*App, error) {
 	rm := observability.NewRingMetrics()
 	rm.Register(reg, labels, false)
 	logRing(mainLog, r, rf)
-	queryLog := observability.Component(log, "querier")
 	skippable := func(err error) bool { return errors.Is(err, rpc.ErrUnavailable) }
 	// A read the caller cancelled says nothing about the ingester, so it is
 	// not counted, as the gateway's ObserveMember skips a cancelled push.
@@ -64,20 +63,27 @@ func buildQuerier(cfg *config.Config, log *slog.Logger) (*App, error) {
 		}
 		rm.IngesterReads.WithLabelValues(labels[i], rpc.OutcomeOf(err)).Inc()
 	}
-	onSkip := func(skipped []int) {
+	// The head merge records a skip on the read's note; the note logs it,
+	// with the request's ID, only once the whole read -- store included --
+	// has succeeded (replication_note.go).
+	onSkip := func(ctx context.Context, skipped []int) {
 		names := make([]string, len(skipped))
 		for j, i := range skipped {
 			names[j] = labels[i]
 		}
-		queryLog.Warn("read answered by replication", slog.Any("skipped", names))
+		recordSkip(ctx, names)
 	}
 	tolerate := config.Quorum(rf) - 1
 	srv := api.New(api.Deps{
-		Config:   cfg,
-		Logger:   log,
-		Routes:   api.RoutesRead,
-		Engine:   metrics.NewQueryEngineFromSource(metrics.Merge(metrics.MergeHeadsWith(metrics.HeadsOptions{Tolerate: tolerate, Skippable: skippable, Observe: observe, OnSkip: onSkip}, metricHeads...), rpc.NewMetricsSource(store))),
-		LogQuery: logs.NewQueryEngineFromSource(logs.Merge(logs.MergeHeadsWith(logs.HeadsOptions{Tolerate: tolerate, Skippable: skippable, Observe: observe, OnSkip: onSkip}, logHeads...), rpc.NewLogsSource(store))),
+		Config: cfg,
+		Logger: log,
+		Routes: api.RoutesRead,
+		Engine: metrics.NewQueryEngineFromSource(notedMetrics{metrics.Merge(metrics.MergeHeadsWith(
+			metrics.HeadsOptions{Tolerate: tolerate, Skippable: skippable, Observe: observe, OnSkip: onSkip}, metricHeads...),
+			rpc.NewMetricsSource(store))}),
+		LogQuery: logs.NewQueryEngineFromSource(notedLogs{logs.Merge(logs.MergeHeadsWith(
+			logs.HeadsOptions{Tolerate: tolerate, Skippable: skippable, Observe: observe, OnSkip: onSkip}, logHeads...),
+			rpc.NewLogsSource(store))}),
 		Registry: reg,
 		HTTP:     inst.HTTP,
 		Ready:    alwaysReady,
