@@ -156,7 +156,17 @@ func MountWrites(r chi.Router, m metrics.Ingester, l logs.Ingester, ingest *obse
 	r.Post("/logs/push", func(w http.ResponseWriter, req *http.Request) { logsPush(w, req, l, ingest) })
 }
 
+// PushGenerationsHeader, set to "1" on the metrics push route's answers, says
+// this ingester takes a sample's gateway-stamped generation
+// ([timestamp_ms, "value", generation]). A gateway sends generations only to
+// an ingester that has said so, so a mixed-version rollout never sends one to
+// an ingester from before 6.3, which would refuse the sample.
+const PushGenerationsHeader = "X-Obs-Push-Generations"
+
 func metricsPush(w http.ResponseWriter, r *http.Request, ing metrics.Ingester, im *observability.IngestMetrics) {
+	if _, ok := ing.(metrics.GenIngester); ok {
+		w.Header().Set(PushGenerationsHeader, "1")
+	}
 	body, ok := readBody(w, r, FlushBodyLimit)
 	if !ok {
 		return
