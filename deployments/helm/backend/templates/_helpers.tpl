@@ -382,6 +382,18 @@ ports:
 envFrom:
   - configMapRef:
       name: {{ include "backend.componentName" (list $root $component) }}-config
+{{- if eq $component "ingester" }}
+env:
+  # This pod's own URL, spelled as backend.ingesterURLs lists it: the ingester
+  # refuses a request meant for another member, which a connection held across
+  # a pod restart that reused an address could otherwise deliver.
+  - name: POD_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: metadata.name
+  - name: OBS_INGESTER_SELF_URL
+    value: {{ printf "http://$(POD_NAME).%s-headless:%d" (include "backend.componentName" (list $root "ingester")) ($root.Values.service.port | int) | quote }}
+{{- end }}
 startupProbe:
   httpGet:
     path: /readyz
