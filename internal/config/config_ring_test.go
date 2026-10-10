@@ -1,6 +1,7 @@
 package config
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -62,5 +63,41 @@ func TestSingleURLPeersRefuseAComma(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "single URL") {
 			t.Errorf("%+v: err = %v, want a single-URL refusal", c, err)
 		}
+	}
+}
+
+// Two spellings of one ingester are one member: the host's case and the
+// scheme's default port do not make a second replica toward quorum.
+func TestIngesterURLAliasesAreDuplicates(t *testing.T) {
+	for _, list := range []string{
+		"http://INGESTER:8080,http://ingester:8080",
+		"http://ingester,http://ingester:80",
+		"https://ingester:443,https://Ingester",
+		"HTTP://ingester:8080,http://ingester:8080/",
+	} {
+		t.Setenv("OBS_DATA_DIR", t.TempDir())
+		t.Setenv("OBS_TARGET", "querier")
+		t.Setenv("OBS_STORE_URL", "http://store:8080")
+		t.Setenv("OBS_INGESTER_URL", list)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "duplicate") {
+			t.Errorf("OBS_INGESTER_URL=%s: err = %v, want a duplicate", list, err)
+		}
+	}
+}
+
+func TestPeerURLsAreCanonical(t *testing.T) {
+	t.Setenv("OBS_DATA_DIR", t.TempDir())
+	t.Setenv("OBS_TARGET", "querier")
+	t.Setenv("OBS_STORE_URL", "HTTP://Store:80/")
+	t.Setenv("OBS_INGESTER_URL", "http://Ingester-0:8080,https://[::1]:443")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.StoreURL != "http://store" {
+		t.Errorf("StoreURL = %q, want http://store", cfg.StoreURL)
+	}
+	if want := []string{"http://ingester-0:8080", "https://[::1]"}; !slices.Equal(cfg.IngesterURLs, want) {
+		t.Errorf("IngesterURLs = %q, want %q", cfg.IngesterURLs, want)
 	}
 }
