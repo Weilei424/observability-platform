@@ -22,8 +22,15 @@ import (
 // The real split-configmaps.yaml still runs the check over empty lookups,
 // which passes, so a failure here comes from the fixture.
 
+// A fixture's pvcs, a PersistentVolumeClaim list's items as lookup returns
+// them, go through backend.ingesterDataOrdinals exactly as
+// split-configmaps.yaml sends the live ones.
 const stagingFixtureTemplate = `{{- if eq .Values.topology "split" }}
-{{- include "backend.ringStagingCheck" (list . (fromYaml (.Files.Get "live.yaml"))) }}
+{{- $live := fromYaml (.Files.Get "live.yaml") }}
+{{- if hasKey $live "pvcs" }}
+{{- $_ := set $live "ingesterData" (int (include "backend.ingesterDataOrdinals" (list . $live.pvcs))) }}
+{{- end }}
+{{- include "backend.ringStagingCheck" (list . $live) }}
 {{- end }}
 `
 
@@ -50,6 +57,15 @@ func liveDeployment(name string, count int, r rollout) map[string]any {
 			"updatedReplicas": r.updated, "availableReplicas": r.available,
 		},
 	}
+}
+
+// pvcs is a PersistentVolumeClaim list's items with these names.
+func pvcs(names ...string) []any {
+	out := make([]any, len(names))
+	for i, n := range names {
+		out[i] = map[string]any{"metadata": map[string]any{"name": n}}
+	}
+	return out
 }
 
 // cmRF is a 3-ingester ConfigMap whose OBS_REPLICATION_FACTOR is rf.
@@ -381,6 +397,17 @@ func TestRingStagingTreatsAPartialReleaseAsLive(t *testing.T) {
 		// until the gateway is back at RF 3 and the ingesters are drained.
 		// The previous ring is unknown here, so a shrink is refused: dropping an
 		// ordinal whose PVC survives would hide its acknowledged RF=1 writes.
+		// Real PVC names through the same parsing the chart applies to lookup's
+		// answer: the store's PVC and a non-numeric suffix are ignored, and a gap
+		// in the ordinals still counts up to the highest one.
+		{"PVC names: a shrink past the highest ordinal", map[string]any{"pvcs": pvcs(
+			"data-observability-ingester-0", "data-observability-ingester-1", "data-observability-ingester-3",
+			"data-observability-store-0", "data-observability-ingester-tmp")},
+			[]string{"split.ingester.replicas=3", "split.replicationFactor=1"}, "ingesters 0 to 3 may hold acknowledged writes"},
+		{"PVC names: the ring that keeps every ordinal", map[string]any{"pvcs": pvcs(
+			"data-observability-ingester-0", "data-observability-ingester-1", "data-observability-ingester-3")},
+			[]string{"split.ingester.replicas=4", "split.replicationFactor=1"}, ""},
+		{"PVC names: only another component's PVC is a fresh install", map[string]any{"pvcs": pvcs("data-observability-store-0")}, nil, ""},
 		{"only kept ingester PVCs: an RF=1 shrink", map[string]any{"ingesterData": 3},
 			[]string{"split.ingester.replicas=2", "split.replicationFactor=1"}, "ring change refused"},
 		{"only kept ingester PVCs: the full ring", map[string]any{"ingesterData": 3},
@@ -396,6 +423,14 @@ func TestRingStagingTreatsAPartialReleaseAsLive(t *testing.T) {
 		{"querier survives alone: staged growth", map[string]any{
 			"querier": withRF(liveDeployment(q, 3, rolledOut), 1), "querierConfig": cm(1),
 		}, []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=3", "split.replicationFactor=1"}, ""},
+		// The querier survives but is still rolling from a 3- to a 4-ingester
+		// list, so its old pods may read only 3: recreating the gateway at 4
+		// now could route a write to ingester 3 that an old querier pod never
+		// reads. A recovery waits for the survivor to finish rolling out.
+		{"querier survives alone but still rolls", map[string]any{
+			"querier":       withRF(liveDeployment(q, 4, rollout{spec: 2, generation: 4, observed: 4, total: 3, updated: 1, available: 2}), 1),
+			"querierConfig": liveConfigMap(4), "ingesterData": 4,
+		}, []string{"split.ingester.replicas=4", "split.replicationFactor=1"}, "has not finished rolling out"},
 		{"6.3 release without its gateway Deployment", map[string]any{
 			"querier": withRF(liveDeployment(q, 3, rolledOut), 3), "gatewayConfig": cm(3), "querierConfig": cm(3),
 		}, nil, "unstaged replication factor change"},
