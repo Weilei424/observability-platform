@@ -555,31 +555,48 @@ func TestRouterCloseRacingWritesAdmitsNothingAfterward(t *testing.T) {
 	}
 }
 
-// orderedMetrics records appended values in arrival order, safely across
-// goroutines.
-type orderedMetrics struct {
+// genRecorder records, per value, the generation each push carried, safely
+// across goroutines. It takes generations (metrics.GenIngester), as an
+// ingester's WALStore does.
+type genRecorder struct {
 	mu   sync.Mutex
 	vals []float64
+	gens []int64
 }
 
-func (o *orderedMetrics) Append(_ metrics.Labels, _ int64, v float64) error {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	o.vals = append(o.vals, v)
+func (g *genRecorder) Append(_ metrics.Labels, _ int64, v float64) error {
+	return g.AppendWithGeneration(metrics.Labels{}, 0, v, 0)
+}
+
+func (g *genRecorder) AppendWithGeneration(_ metrics.Labels, _ int64, v float64, gen int64) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.vals = append(g.vals, v)
+	g.gens = append(g.gens, gen)
 	return nil
 }
 
-func (o *orderedMetrics) got() []float64 {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	return slices.Clone(o.vals)
+// newest is the value with the highest generation, as a read's dedup picks it.
+func (g *genRecorder) newest() (float64, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	best := -1
+	for i := range g.vals {
+		if best < 0 || g.gens[i] > g.gens[best] {
+			best = i
+		}
+	}
+	if best < 0 {
+		return 0, false
+	}
+	return g.vals[best], true
 }
 
-// orderedIngester serves pushes into an orderedMetrics; with slowFirst, its
-// first push is held for that long before it is applied.
-func orderedIngester(t *testing.T, slowFirst time.Duration) (string, *orderedMetrics) {
+// genIngester serves pushes into a genRecorder; with slowFirst, its first push
+// is held for that long before it is applied.
+func genIngester(t *testing.T, slowFirst time.Duration) (string, *genRecorder) {
 	t.Helper()
-	m := &orderedMetrics{}
+	m := &genRecorder{}
 	r := chi.NewRouter()
 	r.Route("/internal/v1", func(r chi.Router) { MountWrites(r, m, &recordingLogs{}, observability.NewIngestMetrics()) })
 	var first atomic.Bool
@@ -593,81 +610,76 @@ func orderedIngester(t *testing.T, slowFirst time.Duration) (string, *orderedMet
 	return srv.URL, m
 }
 
-// An overwrite never loses to the write it overwrites. v1 is acknowledged at
-// quorum while its push to a slow replica still runs; v2, sent right after,
-// must reach that replica after v1, or the replica would give the late v1 the
-// newer generation and reads would regress to it.
-func TestRouterAppliesAKeysWritesInOrderOnEveryReplica(t *testing.T) {
-	ua, a := orderedIngester(t, 0)
-	ub, b := orderedIngester(t, 0)
-	uc, c := orderedIngester(t, 300*time.Millisecond)
-	r, _ := ring.New([]string{ua, ub, uc})
-	rt, err := NewRouter(r, RouterOptions{ReplicationFactor: 3, Timeout: 2 * time.Second})
+// The gateway stamps each sample's generation at admission, in batch order,
+// and never repeats one: max(previous + 1, now).
+func TestRouterStampsIncreasingGenerations(t *testing.T) {
+	u, m := genIngester(t, 0)
+	r, _ := ring.New([]string{u})
+	var clock atomic.Int64
+	clock.Store(1000)
+	rt, err := NewRouter(r, RouterOptions{Clock: clock.Load})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(rt.Wait)
-	l, _ := metrics.NewLabels(map[string]string{"__name__": "over"})
-	for _, v := range []float64{1, 2} {
-		if err := rt.PushSamples(context.Background(), []metrics.PendingSample{{Labels: l, TimestampMs: 1000, Value: v}}); err != nil {
-			t.Fatalf("write %v: %v", v, err)
-		}
+	l, _ := metrics.NewLabels(map[string]string{"__name__": "g"})
+	in := []metrics.PendingSample{{Labels: l, TimestampMs: 1, Value: 1}, {Labels: l, TimestampMs: 2, Value: 2}}
+	if err := rt.PushSamples(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	clock.Store(500) // a clock that stepped back
+	if err := rt.PushSamples(context.Background(), in[:1]); err != nil {
+		t.Fatal(err)
 	}
 	rt.Wait()
-	for name, m := range map[string]*orderedMetrics{"a": a, "b": b, "c (slow first push)": c} {
-		if got := m.got(); !slices.Equal(got, []float64{1, 2}) {
-			t.Errorf("ingester %s applied %v, want [1 2]: v1 then its overwrite", name, got)
-		}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if want := []int64{1000, 1001, 1002}; !slices.Equal(m.gens, want) {
+		t.Errorf("generations %v, want %v", m.gens, want)
 	}
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	if len(rt.order) != 0 {
-		t.Errorf("per-key order still holds %d members after every push ended", len(rt.order))
+	if in[0].Gen != 0 {
+		t.Error("PushSamples stamped the caller's slice")
 	}
 }
 
-// A push the gateway timed out on is abandoned by the ingester rather than
-// applied late: past its deadline it applies nothing, so it cannot land after,
-// and outrank, the overwrite sent next.
-func TestRouterTimedOutPushIsAbandonedNotAppliedLate(t *testing.T) {
-	ua, a := orderedIngester(t, 0)
-	ub, _ := orderedIngester(t, 0)
-	uc, c := orderedIngester(t, 2*time.Second) // first push outlives the 300ms timeout
+// An overwrite outranks the write it overwrites on every replica, even when
+// the two go through different gateways and the older write's push reaches a
+// slow replica last: each replica stores the generation the gateway stamped
+// at admission, not one of its own at arrival. Two routers stand in for two
+// gateway pods.
+func TestOverwriteThroughTwoGatewaysWinsOnEveryReplica(t *testing.T) {
+	ua, a := genIngester(t, 0)
+	ub, b := genIngester(t, 0)
+	uc, c := genIngester(t, 300*time.Millisecond) // v1's push lands here after v2's
 	r, _ := ring.New([]string{ua, ub, uc})
-	var mu sync.Mutex
-	outcomes := map[string]int{}
-	rt, err := NewRouter(r, RouterOptions{ReplicationFactor: 3, Timeout: 300 * time.Millisecond,
-		ObserveMember: func(m, o string) {
-			if m == MemberLabel(uc) {
-				mu.Lock()
-				outcomes[o]++
-				mu.Unlock()
-			}
-		}})
+	gw1, err := NewRouter(r, RouterOptions{ReplicationFactor: 3, Timeout: 2 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(rt.Wait)
+	gw2, err := NewRouter(r, RouterOptions{ReplicationFactor: 3, Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(gw1.Wait)
+	t.Cleanup(gw2.Wait)
 	l, _ := metrics.NewLabels(map[string]string{"__name__": "over"})
-	for _, v := range []float64{1, 2} {
-		if err := rt.PushSamples(context.Background(), []metrics.PendingSample{{Labels: l, TimestampMs: 1000, Value: v}}); err != nil {
-			t.Fatalf("write %v: %v", v, err)
+	if err := gw1.PushSamples(context.Background(), []metrics.PendingSample{{Labels: l, TimestampMs: 1000, Value: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw2.PushSamples(context.Background(), []metrics.PendingSample{{Labels: l, TimestampMs: 1000, Value: 2}}); err != nil {
+		t.Fatal(err)
+	}
+	gw1.Wait()
+	gw2.Wait()
+	c.mu.Lock()
+	order := slices.Clone(c.vals)
+	c.mu.Unlock()
+	if !slices.Equal(order, []float64{2, 1}) {
+		t.Fatalf("slow replica applied %v; the test needs v1 to land after v2 there", order)
+	}
+	for name, m := range map[string]*genRecorder{"a": a, "b": b, "c (v1 landed last)": c} {
+		if v, ok := m.newest(); !ok || v != 2 {
+			t.Errorf("replica %s: the highest generation holds %v, want the overwrite 2", name, v)
 		}
-	}
-	rt.Wait()
-	if got := a.got(); !slices.Equal(got, []float64{1, 2}) {
-		t.Errorf("healthy ingester applied %v, want [1 2]", got)
-	}
-	time.Sleep(2 * time.Second) // the slow handler wakes and sees v1's deadline passed
-	// v1 is never applied there. v2 either follows once v1's push ended, or —
-	// when its own wait for v1 runs out first — is not sent to that replica at
-	// all (counted unavailable; the write already had quorum). Never v1 last.
-	if got := c.got(); slices.Contains(got, 1) {
-		t.Errorf("slow ingester applied %v: the timed-out v1 landed late", got)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if outcomes["unavailable"] < 1 || outcomes["unavailable"]+outcomes["ok"] != 2 {
-		t.Errorf("slow ingester outcomes %v, want v1 unavailable and v2 ok or unavailable", outcomes)
 	}
 }
