@@ -27,7 +27,7 @@ func TestMergeHeadsWithSkipsUpToTolerateOutages(t *testing.T) {
 	down := staticSource{err: errOutage}
 	ctx := context.Background()
 	var skipped []int
-	src := MergeHeadsWith(HeadsOptions{Tolerate: 1, Skippable: outage, OnSkip: func(s []int) { skipped = s }}, down, good, good)
+	src := MergeHeadsWith(HeadsOptions{Tolerate: 1, Skippable: outage, OnSkip: func(_ context.Context, s []int) { skipped = s }}, down, good, good)
 	got, err := src.SelectStreams(ctx, nil, 0, 10)
 	if err != nil || len(got) != 1 || len(got[0].Entries) != 1 {
 		t.Fatalf("one outage tolerated: %v %+v", err, got)
