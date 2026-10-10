@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/masonwheeler/observability-platform/internal/drain"
@@ -156,6 +158,32 @@ func MountWrites(r chi.Router, m metrics.Ingester, l logs.Ingester, ingest *obse
 	r.Post("/logs/push", func(w http.ResponseWriter, req *http.Request) { logsPush(w, req, l, ingest) })
 }
 
+// DeadlineHeader carries the caller's deadline for a request, in Unix
+// microseconds.
+const DeadlineHeader = "X-Obs-Deadline"
+
+// abandonedPush reports whether the caller of a push has given up on it: its
+// connection closed, or its deadline (DeadlineHeader) passed. The push routes
+// check it before every append and stop, so a push the gateway timed out on
+// cannot land after a later push of the same keys: the gateway sends a key's
+// next push to this ingester only once this one has ended, and ingesters
+// stamp generations when they apply, so a late apply would outrank an
+// overwrite sent after it. Comparing the deadline uses this host's clock, so
+// clock skew between gateway and ingester bounds what remains.
+func abandonedPush(r *http.Request) error {
+	if err := r.Context().Err(); err != nil {
+		return err
+	}
+	if v := r.Header.Get(DeadlineHeader); v != "" {
+		if us, err := strconv.ParseInt(v, 10, 64); err == nil && time.Now().UnixMicro() >= us {
+			return errPushDeadline
+		}
+	}
+	return nil
+}
+
+var errPushDeadline = errors.New("rpc: push abandoned: the caller's deadline passed")
+
 func metricsPush(w http.ResponseWriter, r *http.Request, ing metrics.Ingester, im *observability.IngestMetrics) {
 	body, ok := readBody(w, r, FlushBodyLimit)
 	if !ok {
@@ -177,6 +205,12 @@ func metricsPush(w http.ResponseWriter, r *http.Request, ing metrics.Ingester, i
 		}
 	}
 	for i, p := range batch {
+		if err := abandonedPush(r); err != nil {
+			im.SamplesIngested.Add(float64(i))
+			im.SamplesRejected.WithLabelValues(observability.ReasonAppend).Add(float64(len(batch) - i))
+			writeError(w, statusClientClosedRequest, err.Error())
+			return
+		}
 		if err := ing.Append(p.Labels, p.TimestampMs, p.Value); err != nil {
 			im.SamplesIngested.Add(float64(i))
 			im.SamplesRejected.WithLabelValues(observability.ReasonAppend).Add(float64(len(batch) - i))
@@ -209,6 +243,12 @@ func logsPush(w http.ResponseWriter, r *http.Request, ing logs.Ingester, im *obs
 		}
 	}
 	for i, e := range batch {
+		if err := abandonedPush(r); err != nil {
+			im.LogLinesIngested.Add(float64(i))
+			im.LogLinesRejected.WithLabelValues(observability.ReasonAppend).Add(float64(len(batch) - i))
+			writeError(w, statusClientClosedRequest, err.Error())
+			return
+		}
 		if err := ing.Append(e.Labels, e.TimestampNs, e.Line); err != nil {
 			im.LogLinesIngested.Add(float64(i))
 			im.LogLinesRejected.WithLabelValues(observability.ReasonAppend).Add(float64(len(batch) - i))
