@@ -51,6 +51,10 @@ func buildStore(cfg *config.Config, log *slog.Logger) (*App, error) {
 		Registry: reg,
 		HTTP:     inst.HTTP,
 		Internal: func(r chi.Router) {
+			// Refuse a request meant for another store (rpc.MemberHeader).
+			if cfg.StoreSelfURL != "" {
+				r.Use(rpc.RequireMember(cfg.StoreSelfURL))
+			}
 			rpc.MountReads(r, blocks, logs.AsSource(chunks))
 			rpc.MountStore(r, blocks, chunks)
 		},
