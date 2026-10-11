@@ -62,6 +62,7 @@ func TestIngesterRefusesWritesOnceADrainStarts(t *testing.T) {
 func TestIngesterShutdownDrainHonorsTheShutdownBudget(t *testing.T) {
 	cfg := testConfig(t, config.TargetIngester)
 	cfg.StoreURL = hangingStore(t)
+	cfg.StoreURLs = []string{cfg.StoreURL}
 	a, err := app.Build(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("Build: %v", err)
