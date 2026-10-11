@@ -120,7 +120,7 @@ func TestComposeSplitComponentEnvironmentsLoad(t *testing.T) {
 				// Viper treats an empty variable as unset, so "" restores a default —
 				// except OBS_DATA_DIR, which config reads with LookupEnv and refuses
 				// when empty. The stateless components do not set it; give it the default.
-				for _, k := range []string{"OBS_TARGET", "OBS_INGESTER_URL", "OBS_STORE_URL", "OBS_QUERIER_URL", "OBS_LOG_LEVEL", "OBS_LOGS_FLUSH_THRESHOLD_BYTES"} {
+				for _, k := range []string{"OBS_TARGET", "OBS_INGESTER_URL", "OBS_STORE_URL", "OBS_QUERIER_URL", "OBS_INGESTER_SELF_URL", "OBS_LOG_LEVEL", "OBS_LOGS_FLUSH_THRESHOLD_BYTES"} {
 					t.Setenv(k, "")
 				}
 				t.Setenv("OBS_DATA_DIR", "data")
@@ -188,6 +188,35 @@ func TestComposeSplitRingListsMatch(t *testing.T) {
 	for _, c := range []string{"gateway", "querier"} {
 		if got := svcs[c].Environment["OBS_INGESTER_URL"]; got != want {
 			t.Errorf("%s OBS_INGESTER_URL = %q, want %q", c, got, want)
+		}
+	}
+}
+
+// Every Compose ingester is told its own URL, exactly as the gateway and the
+// querier list it, so it refuses a request meant for another member. The
+// setting is optional to the binary, so only this test notices if a service
+// loses it -- and with it the guard against one ingester counting twice
+// toward a write quorum.
+func TestComposeSplitIngestersKnowTheirOwnURL(t *testing.T) {
+	svcs := loadComposeSplit(t)
+	for _, reader := range []string{"gateway", "querier"} {
+		ring := strings.Split(svcs[reader].Environment["OBS_INGESTER_URL"], ",")
+		if len(ring) != len(composeIngesters) {
+			t.Fatalf("%s lists %d ingesters, want %d", reader, len(ring), len(composeIngesters))
+		}
+		for i, svc := range composeIngesters {
+			self := svcs[svc].Environment["OBS_INGESTER_SELF_URL"]
+			if want := "http://" + svc + ":8080"; self != want {
+				t.Errorf("%s OBS_INGESTER_SELF_URL = %q, want %q", svc, self, want)
+			}
+			if ring[i] != self {
+				t.Errorf("%s lists %q where %s calls itself %q", reader, ring[i], svc, self)
+			}
+		}
+	}
+	for name, s := range svcs {
+		if _, ok := s.Environment["OBS_INGESTER_SELF_URL"]; ok && !slices.Contains(composeIngesters, name) {
+			t.Errorf("%s sets OBS_INGESTER_SELF_URL, which only an ingester takes", name)
 		}
 	}
 }
