@@ -251,8 +251,17 @@ func Load() (*Config, error) {
 	if cfg.StoreRetryMaxAge <= 0 {
 		return nil, fmt.Errorf("config: OBS_STORE_RETRY_MAX_AGE must be > 0")
 	}
-	if raw, ok := os.LookupEnv("OBS_STORE_REPLICATION_FACTOR"); ok && raw != "" && cfg.StoreReplicationFactor < 1 {
+	if raw, ok := os.LookupEnv("OBS_STORE_REPLICATION_FACTOR"); (ok && raw != "") && cfg.StoreReplicationFactor < 1 || cfg.StoreReplicationFactor < 0 {
 		return nil, fmt.Errorf("config: OBS_STORE_REPLICATION_FACTOR must be >= 1")
+	}
+	// The retry bounds belong to the ingester's straggler queue; any other
+	// target that sets one gets a refusal like the other set-but-unused settings.
+	if cfg.Target != TargetIngester {
+		for _, k := range []string{"OBS_STORE_RETRY_MAX_BYTES", "OBS_STORE_RETRY_MAX_AGE"} {
+			if raw, ok := os.LookupEnv(k); ok && raw != "" {
+				return nil, fmt.Errorf("config: %s is set but target %s does not use it; unset it", k, cfg.Target)
+			}
+		}
 	}
 
 	if err := cfg.validateTopology(); err != nil {
