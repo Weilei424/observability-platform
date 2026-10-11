@@ -3,7 +3,7 @@ package metrics_test
 import (
 	"context"
 	"errors"
-	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -17,10 +17,19 @@ type orderSource struct {
 	events *[]string
 }
 
+// orderMu guards every orderSource's events: heads now read concurrently.
+var orderMu sync.Mutex
+
+func (o orderSource) record(e string) {
+	orderMu.Lock()
+	*o.events = append(*o.events, e)
+	orderMu.Unlock()
+}
+
 func (o orderSource) Select(ctx context.Context, p metrics.SelectParams) ([]metrics.SeriesData, error) {
-	*o.events = append(*o.events, o.name+" start")
+	o.record(o.name + " start")
 	out, err := o.Source.Select(ctx, p)
-	*o.events = append(*o.events, o.name+" end")
+	o.record(o.name + " end")
 	return out, err
 }
 
@@ -352,7 +361,7 @@ func TestMergeServesAPostRestartOverwrite(t *testing.T) {
 	}
 }
 
-func TestMergeHeadsReadsEveryHeadInOrder(t *testing.T) {
+func TestMergeHeadsFinishesEveryHeadBeforeTheStore(t *testing.T) {
 	var events []string
 	heads := []metrics.Source{
 		orderSource{Source: metrics.NewMemoryStore(), name: "h0", events: &events},
@@ -363,9 +372,14 @@ func TestMergeHeadsReadsEveryHeadInOrder(t *testing.T) {
 	if _, err := metrics.Merge(metrics.MergeHeads(heads...), store).Select(context.Background(), metrics.SelectParams{MinT: 0, MaxT: 10}); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"h0 start", "h0 end", "h1 start", "h1 end", "h2 start", "h2 end", "store start", "store end"}
-	if fmt.Sprint(events) != fmt.Sprint(want) {
-		t.Fatalf("events = %v, want %v: every ingester must finish before the store starts", events, want)
+	// Heads read concurrently, so their own order is free; the store is not.
+	if n := len(events); n != 8 || events[6] != "store start" || events[7] != "store end" {
+		t.Fatalf("events = %v: every ingester must finish before the store starts", events)
+	}
+	for _, e := range events[:6] {
+		if strings.HasPrefix(e, "store") {
+			t.Fatalf("events = %v: the store started before every ingester finished", events)
+		}
 	}
 }
 
