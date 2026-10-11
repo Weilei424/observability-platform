@@ -37,7 +37,7 @@ func TestRequireMemberRefusesAnotherMembersRequest(t *testing.T) {
 		if rec.Code != tc.want {
 			t.Errorf("member %q: status %d, want %d", tc.member, rec.Code, tc.want)
 		}
-		if tc.want == http.StatusMisdirectedRequest && !strings.Contains(rec.Body.String(), "this ingester is http://ingester-1:8080, not http://ingester-2:8080") {
+		if tc.want == http.StatusMisdirectedRequest && !strings.Contains(rec.Body.String(), "this member is http://ingester-1:8080, not http://ingester-2:8080") {
 			t.Errorf("421 body = %s", rec.Body.String())
 		}
 	}
