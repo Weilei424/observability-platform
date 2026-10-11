@@ -16,6 +16,7 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/logs"
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/observability"
+	"github.com/masonwheeler/observability-platform/internal/ring"
 	"github.com/masonwheeler/observability-platform/internal/rpc"
 	"github.com/masonwheeler/observability-platform/internal/storage/fsutil"
 	"github.com/masonwheeler/observability-platform/internal/storage/wal"
@@ -29,8 +30,10 @@ const ingesterDrainTimeout = 40 * time.Second
 
 // buildIngester assembles the ingester: the metrics WAL and head, the logs WAL
 // and head, the two write routes, the internal head reads, and a flush-only
-// maintenance loop. Both heads flush to the store at cfg.StoreURL; nothing at
-// startup waits for it.
+// maintenance loop. Both heads flush to the stores in cfg.StoreURLs, each
+// series and stream to its R_s stores; a flush succeeds on a quorum and the
+// stores that missed it are retried on the maintenance loop. Nothing at
+// startup waits for a store.
 func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 	mainLog := observability.Component(log, "main")
 	walLog := observability.Component(log, "wal")
@@ -40,13 +43,36 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 		mainLog.Error("failed to create data directory", slog.String("data_dir", cfg.DataDir), slog.String("error", err.Error()))
 		return nil, err
 	}
-	store, err := rpc.NewClient("store", cfg.StoreURL)
+	storeRing, err := ring.New(cfg.StoreURLs)
 	if err != nil {
-		mainLog.Error("failed to build store client", slog.String("error", err.Error()))
+		mainLog.Error("failed to build the store ring", slog.String("error", err.Error()))
 		return nil, err
 	}
+	storeClients := map[string]*rpc.Client{}
+	for _, s := range storeRing.Members() {
+		// The queue sends serially on the maintenance loop: a hung store must
+		// not block it.
+		c, err := rpc.NewClient("store "+rpc.MemberLabel(s), s, rpc.WithRequestTimeout(metrics.DefaultFlushTimeout))
+		if err != nil {
+			mainLog.Error("failed to build store client", slog.String("error", err.Error()))
+			return nil, err
+		}
+		storeClients[s] = c
+	}
+	sm := observability.NewStoreMetrics()
+	stragglers := rpc.NewStragglerQueue(storeClients, rpc.StragglerOptions{
+		MaxBytes: cfg.StoreRetryMaxBytes, MaxAge: cfg.StoreRetryMaxAge,
+		Observe: func(o string) { sm.Retries.WithLabelValues(o).Inc() },
+		Pending: func(b int64) { sm.RetryPending.Set(float64(b)) },
+		Log:     observability.Component(log, "flush"),
+	})
+	observeFlush := func(o string) { sm.FlushQuorum.WithLabelValues(o).Inc() }
+	rs := max(cfg.StoreReplicationFactor, 1)
+	blockSink := rpc.NewReplicatedBlockSink(storeRing, rs, storeClients, stragglers, observeFlush)
+	chunkSink := rpc.NewReplicatedChunkSink(storeRing, rs, storeClients, stragglers, observeFlush)
+	mainLog.Info("store ring ready", slog.Int("stores", len(storeRing.Members())), slog.Int("store_replication_factor", rs))
 
-	head, err := metrics.OpenHeadStore(cfg.DataDir, rpc.NewBlockSink(store), metrics.HeadStoreOptions{})
+	head, err := metrics.OpenHeadStore(cfg.DataDir, blockSink, metrics.HeadStoreOptions{})
 	if err != nil {
 		mainLog.Error("failed to open metrics head", slog.String("error", err.Error()))
 		return nil, err
@@ -70,7 +96,7 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 
 	logsWALDir := filepath.Join(cfg.DataDir, "logs", "wal")
 	logHead, err := logs.OpenHead(logsWALDir, cfg.WALSegmentMaxBytes, cfg.WALSyncEveryN, cfg.LogsFlushThresholdBytes,
-		rpc.NewChunkSink(store), logs.HeadOptions{
+		chunkSink, logs.HeadOptions{
 			TolerateFlushErrors: true,
 			FlushTimeout:        logs.DefaultLogFlushTimeout,
 			BatchBytes:          logs.DefaultLogFlushBatchBytes,
@@ -91,6 +117,7 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 		Omit:   observability.CompactionGroup,
 		Logger: log,
 	})
+	sm.RegisterIngester(reg, labelsOf(storeRing.Members()))
 
 	// The ingester's logs head tolerates flush errors so a push never fails just
 	// because the store is unreachable -- the entry is already durable in the
@@ -155,10 +182,23 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 	flush := compactor.New(writes, nil, writes, time.Now, mcfg,
 		inst.Maintenance, flushLog)
 
+	retryLoop := func(ctx context.Context) {
+		t := time.NewTicker(cfg.MaintenanceInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				stragglers.Retry(ctx)
+			}
+		}
+	}
+
 	return &App{
 		Target:  config.TargetIngester,
 		Handler: srv,
-		loops:   []func(ctx context.Context){flush.Run},
+		loops:   []func(ctx context.Context){flush.Run, retryLoop},
 		closers: []closer{
 			// One bounded drain before the WALs close, in place of the loop's
 			// final flush: an ingester removed from the ring must not leave its
