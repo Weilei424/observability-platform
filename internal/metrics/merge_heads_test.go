@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -91,16 +93,17 @@ func TestMergeHeadsWithNeverSkipsCancellationOrAllHeadsDown(t *testing.T) {
 	if _, err := metrics.MergeHeadsWith(metrics.HeadsOptions{Tolerate: 2, Skippable: always}, downSource{context.Canceled}, good).Select(context.Background(), allParams); !errors.Is(err, context.Canceled) {
 		t.Errorf("Canceled was skipped: err = %v", err)
 	}
-	// A done caller context disables skipping.
+	// A done caller context disables skipping: the read fails (with the outage or the
+	// cancellation, whichever head answers first) instead of returning a partial answer.
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 	expired, cancel2 := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel2()
 	for _, ctx := range []context.Context{cancelled, expired} {
-		if _, err := metrics.MergeHeadsWith(metrics.HeadsOptions{Tolerate: 2, Skippable: outage}, downSource{timeoutErr}, good).Select(ctx, allParams); !errors.Is(err, errOutage) {
+		if _, err := metrics.MergeHeadsWith(metrics.HeadsOptions{Tolerate: 2, Skippable: outage}, downSource{timeoutErr}, good).Select(ctx, allParams); err == nil {
 			t.Errorf("skipped with a done caller context: err = %v", err)
 		}
-		if _, err := metrics.MergeHeadsWith(metrics.HeadsOptions{Tolerate: 2, Skippable: outage}, downSource{timeoutErr}, good).SelectLabelNames(ctx); !errors.Is(err, errOutage) {
+		if _, err := metrics.MergeHeadsWith(metrics.HeadsOptions{Tolerate: 2, Skippable: outage}, downSource{timeoutErr}, good).SelectLabelNames(ctx); err == nil {
 			t.Errorf("label read skipped with a done caller context: err = %v", err)
 		}
 	}
@@ -111,11 +114,17 @@ func TestMergeHeadsWithNeverSkipsCancellationOrAllHeadsDown(t *testing.T) {
 
 func TestMergeHeadsWithObservesEveryHeadReadOnce(t *testing.T) {
 	good := headWith(t, "m", 1, 1)
+	var mu sync.Mutex
 	var seen []string
-	opts := metrics.HeadsOptions{Tolerate: 1, Skippable: outage, Observe: func(h int, err error) { seen = append(seen, fmt.Sprint(h, err)) }}
+	opts := metrics.HeadsOptions{Tolerate: 1, Skippable: outage, Observe: func(h int, err error) {
+		mu.Lock()
+		seen = append(seen, fmt.Sprint(h, err))
+		mu.Unlock()
+	}}
 	if _, err := metrics.MergeHeadsWith(opts, good, downSource{errOutage}, good).Select(context.Background(), allParams); err != nil {
 		t.Fatal(err)
 	}
+	slices.Sort(seen)
 	if want := []string{"0 <nil>", "1 outage", "2 <nil>"}; !slices.Equal(seen, want) {
 		t.Errorf("observed %v, want %v", seen, want)
 	}
@@ -229,5 +238,136 @@ func TestEqualGenerationsResolveTheSameEverywhere(t *testing.T) {
 	}
 	if m := value(metrics.MergeHeads(b, a)); m != va {
 		t.Errorf("merged the other way %v, want %v", m, va)
+	}
+}
+
+// slowSource answers its inner source after d, or ctx's error if ctx ends first.
+type slowSource struct {
+	inner metrics.Source
+	d     time.Duration
+}
+
+func (s slowSource) Select(ctx context.Context, p metrics.SelectParams) ([]metrics.SeriesData, error) {
+	select {
+	case <-time.After(s.d):
+		return s.inner.Select(ctx, p)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+func (s slowSource) SelectLabelNames(ctx context.Context) ([]string, error) {
+	select {
+	case <-time.After(s.d):
+		return s.inner.SelectLabelNames(ctx)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+func (s slowSource) SelectLabelValues(ctx context.Context, n string) ([]string, error) {
+	select {
+	case <-time.After(s.d):
+		return s.inner.SelectLabelValues(ctx, n)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func TestMergeHeadsWithReadsHeadsInParallel(t *testing.T) {
+	heads := []metrics.Source{
+		slowSource{headWith(t, "a", 1, 1), 200 * time.Millisecond},
+		slowSource{headWith(t, "b", 2, 2), 200 * time.Millisecond},
+		slowSource{headWith(t, "c", 3, 3), 200 * time.Millisecond},
+	}
+	start := time.Now()
+	if _, err := metrics.MergeHeadsWith(metrics.HeadsOptions{}, heads...).Select(context.Background(), allParams); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d > 450*time.Millisecond {
+		t.Errorf("three 200ms heads took %v; parallel reads take about one", d)
+	}
+}
+
+// Whatever order heads answer in, the answer is the sequential fold's.
+func TestMergeHeadsWithAnswerIgnoresArrivalOrder(t *testing.T) {
+	a, b, c := headWith(t, "x", 1, 1), headWith(t, "y", 2, 2), headWith(t, "x", 3, 3)
+	want, err := metrics.MergeHeads(a, b, c).Select(context.Background(), allParams)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, delays := range [][3]time.Duration{{0, 20, 40}, {40, 20, 0}, {20, 0, 40}} {
+		heads := []metrics.Source{
+			slowSource{a, delays[0] * time.Millisecond},
+			slowSource{b, delays[1] * time.Millisecond},
+			slowSource{c, delays[2] * time.Millisecond},
+		}
+		got, err := metrics.MergeHeadsWith(metrics.HeadsOptions{Tolerate: 1, Skippable: outage}, heads...).Select(context.Background(), allParams)
+		if err != nil || fmt.Sprintf("%+v", got) != fmt.Sprintf("%+v", want) {
+			t.Fatalf("delays %v: got %+v (%v), want %+v", delays, got, err, want)
+		}
+	}
+}
+
+// A protocol error decides the read at once: a hung head is cancelled, not
+// waited for, and its cancellation is not observed as an outage.
+func TestMergeHeadsWithStopsEarlyAndDoesNotObserveCancelled(t *testing.T) {
+	hung := slowSource{headWith(t, "m", 1, 1), time.Hour}
+	var mu sync.Mutex
+	var seen []string
+	opts := metrics.HeadsOptions{Tolerate: 1, Skippable: outage, Observe: func(h int, err error) {
+		mu.Lock()
+		seen = append(seen, fmt.Sprint(h, err))
+		mu.Unlock()
+	}}
+	start := time.Now()
+	_, err := metrics.MergeHeadsWith(opts, hung, downSource{errors.New("bad answer")}).Select(context.Background(), allParams)
+	if err == nil || errors.Is(err, errOutage) {
+		t.Fatalf("err = %v, want the protocol error", err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("took %v: the hung head was waited for", d)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 1 || seen[0] != "1 bad answer" {
+		t.Errorf("observed %v, want only the protocol error", seen)
+	}
+}
+
+// Tolerate+1 outages decide the read without waiting for a slow head.
+func TestMergeHeadsWithFailsAsSoonAsToleranceIsExceeded(t *testing.T) {
+	slow := slowSource{headWith(t, "m", 1, 1), time.Hour}
+	start := time.Now()
+	_, err := metrics.MergeHeadsWith(metrics.HeadsOptions{Tolerate: 1, Skippable: outage},
+		downSource{errOutage}, slow, downSource{errOutage}).Select(context.Background(), allParams)
+	if !errors.Is(err, errOutage) || time.Since(start) > time.Second {
+		t.Fatalf("err = %v after %v, want the outage at once", err, time.Since(start))
+	}
+}
+
+// A caller that cancels mid-read gets context.Canceled, and no head is observed as an outage.
+func TestMergeHeadsWithCallerCancelIsNotAnOutage(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+	var observed atomic.Int32
+	opts := metrics.HeadsOptions{Tolerate: 1, Skippable: outage, Observe: func(int, error) { observed.Add(1) }}
+	_, err := metrics.MergeHeadsWith(opts, slowSource{headWith(t, "m", 1, 1), time.Hour}, slowSource{headWith(t, "n", 1, 1), time.Hour}).Select(ctx, allParams)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if n := observed.Load(); n != 0 {
+		t.Errorf("observed %d head reads; a cancelled read is never observed", n)
+	}
+}
+
+func TestMergeHeadsWithOnSkipIsSorted(t *testing.T) {
+	good := headWith(t, "m", 1, 1)
+	var skipped []int
+	opts := metrics.HeadsOptions{Tolerate: 2, Skippable: outage, OnSkip: func(_ context.Context, s []int) { skipped = s }}
+	heads := []metrics.Source{slowSource{downSource{errOutage}, 30 * time.Millisecond}, good, downSource{errOutage}}
+	if _, err := metrics.MergeHeadsWith(opts, heads...).Select(context.Background(), allParams); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(skipped, []int{0, 2}) {
+		t.Errorf("OnSkip = %v, want [0 2]", skipped)
 	}
 }
