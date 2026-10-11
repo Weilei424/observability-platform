@@ -56,6 +56,7 @@ func produceSplitTrees(t *testing.T) (ingesterDir, storeDir string) {
 	store := &process{t: t, cfg: base(config.TargetStore, storeAddr)}
 	ingCfg := base(config.TargetIngester, ingAddr)
 	ingCfg.StoreURL = "http://" + storeAddr
+	ingCfg.StoreURLs = []string{ingCfg.StoreURL}
 	ingester := &process{t: t, cfg: ingCfg}
 	store.start()
 	ingester.start()
