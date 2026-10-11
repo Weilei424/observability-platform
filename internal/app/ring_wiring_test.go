@@ -16,9 +16,9 @@ func TestGatewayAndQuerierLogTheSameRing(t *testing.T) {
 	hashOf := func(target config.Target, urls []string) string {
 		var buf bytes.Buffer
 		cfg := &config.Config{Target: target, DataDir: t.TempDir(), IngesterURLs: urls,
-			IngesterURL: strings.Join(urls, ","), ReplicationFactor: 3, QuerierURL: "http://q:1", StoreURL: "http://s:1"}
+			IngesterURL: strings.Join(urls, ","), ReplicationFactor: 3, QuerierURL: "http://q:1", StoreURL: "http://s:1", StoreURLs: []string{"http://s:1"}}
 		if target == config.TargetGateway {
-			cfg.StoreURL = ""
+			cfg.StoreURL, cfg.StoreURLs = "", nil
 		} else {
 			cfg.QuerierURL = ""
 		}
