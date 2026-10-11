@@ -611,22 +611,40 @@ func (g *genRecorder) newest() (float64, bool) {
 	return g.vals[best], true
 }
 
-// genIngester serves pushes into a genRecorder; with slowFirst, its first push
-// carrying samples (not the gateway's empty probe) is held for that long
-// before it is applied.
-func genIngester(t *testing.T, slowFirst time.Duration) (string, *genRecorder) {
+// genIngester serves pushes into a genRecorder.
+func genIngester(t *testing.T) (string, *genRecorder) {
 	t.Helper()
 	m := &genRecorder{}
 	r := chi.NewRouter()
 	r.Route("/internal/v1", func(r chi.Router) { MountWrites(r, m, &recordingLogs{}, observability.NewIngestMetrics()) })
-	var first atomic.Bool
+	srv := httptest.NewServer(r)
+	t.Cleanup(srv.Close)
+	return srv.URL, m
+}
+
+// heldIngester is genIngester whose push carrying hold is held until one
+// carrying after has been applied (or 5s pass), so the held write lands last
+// whatever order the two arrive in.
+func heldIngester(t *testing.T, hold, after string) (string, *genRecorder) {
+	t.Helper()
+	m := &genRecorder{}
+	r := chi.NewRouter()
+	r.Route("/internal/v1", func(r chi.Router) { MountWrites(r, m, &recordingLogs{}, observability.NewIngestMetrics()) })
+	applied := make(chan struct{})
+	var once sync.Once
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		body, _ := io.ReadAll(req.Body)
 		req.Body = io.NopCloser(bytes.NewReader(body))
-		if slowFirst > 0 && bytes.Contains(body, []byte(`"samples"`)) && first.CompareAndSwap(false, true) {
-			time.Sleep(slowFirst)
+		if bytes.Contains(body, []byte(hold)) {
+			select {
+			case <-applied:
+			case <-time.After(5 * time.Second):
+			}
 		}
 		r.ServeHTTP(w, req)
+		if bytes.Contains(body, []byte(after)) {
+			once.Do(func() { close(applied) })
+		}
 	}))
 	t.Cleanup(srv.Close)
 	return srv.URL, m
@@ -635,7 +653,7 @@ func genIngester(t *testing.T, slowFirst time.Duration) (string, *genRecorder) {
 // The gateway stamps each batch one generation at admission, never repeating
 // one: max(previous + 1, now). One per batch keeps the counter at the clock.
 func TestRouterStampsIncreasingGenerations(t *testing.T) {
-	u, m := genIngester(t, 0)
+	u, m := genIngester(t)
 	r, _ := ring.New([]string{u})
 	var clock atomic.Int64
 	clock.Store(1000)
@@ -671,9 +689,9 @@ func TestRouterStampsIncreasingGenerations(t *testing.T) {
 // at admission, not one of its own at arrival. Two routers stand in for two
 // gateway pods.
 func TestOverwriteThroughTwoGatewaysWinsOnEveryReplica(t *testing.T) {
-	ua, a := genIngester(t, 0)
-	ub, b := genIngester(t, 0)
-	uc, c := genIngester(t, 300*time.Millisecond) // v1's push lands here after v2's
+	ua, a := genIngester(t)
+	ub, b := genIngester(t)
+	uc, c := heldIngester(t, `,"1",`, `,"2",`) // v1's push lands here after v2's
 	r, _ := ring.New([]string{ua, ub, uc})
 	gw1, err := NewRouter(r, RouterOptions{ReplicationFactor: 3, Timeout: 2 * time.Second, ProbeGenerations: true})
 	if err != nil {
@@ -713,7 +731,7 @@ func TestOverwriteThroughTwoGatewaysWinsOnEveryReplica(t *testing.T) {
 // batch takes one generation, so a write admitted a microsecond later through
 // another gateway still outranks it.
 func TestALargeBatchDoesNotOutrankALaterWriteElsewhere(t *testing.T) {
-	u, m := genIngester(t, 0)
+	u, m := genIngester(t)
 	r, _ := ring.New([]string{u})
 	gw1, err := NewRouter(r, RouterOptions{Clock: func() int64 { return 1000 }, ProbeGenerations: true})
 	if err != nil {
@@ -750,7 +768,7 @@ func TestALargeBatchDoesNotOutrankALaterWriteElsewhere(t *testing.T) {
 // A batch repeating one series and timestamp keeps only its last sample: the
 // batch shares a generation, so an earlier duplicate could not lose otherwise.
 func TestRouterKeepsTheLastDuplicateInABatch(t *testing.T) {
-	u, m := genIngester(t, 0)
+	u, m := genIngester(t)
 	r, _ := ring.New([]string{u})
 	rt, err := NewRouter(r, RouterOptions{ProbeGenerations: true})
 	if err != nil {
@@ -804,7 +822,7 @@ func legacyIngester(t *testing.T) (string, *atomic.Int64) {
 func TestNewGatewayOverOldIngestersMeetsQuorum(t *testing.T) {
 	o1, r1 := legacyIngester(t)
 	o2, r2 := legacyIngester(t)
-	n, m := genIngester(t, 0)
+	n, m := genIngester(t)
 	r, _ := ring.New([]string{o1, o2, n})
 	rt, err := NewRouter(r, RouterOptions{ReplicationFactor: 3, Timeout: 2 * time.Second, ProbeGenerations: true})
 	if err != nil {
