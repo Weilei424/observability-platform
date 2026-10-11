@@ -2021,3 +2021,64 @@ func TestNewBlockStore_TieSourceLeftByAPartialRetireIsReclaimed(t *testing.T) {
 		})
 	}
 }
+
+// A restart that finds one tie source staged in tmp and then cannot move the
+// other out of blocks keeps the staged witness, so the next restart still
+// reclaims the live source. Either source may be the staged one, so both
+// orders of the retire are covered.
+func TestNewBlockStore_FailedRetireKeepsTheStagedWitness(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the directory permission this test uses to fail a rename")
+	}
+	dir := t.TempDir()
+	blocksDir := filepath.Join(dir, "metrics", "blocks")
+	tmpDir := filepath.Join(dir, "metrics", "tmp")
+	for _, d := range []string{blocksDir, tmpDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	a := writeTwoSampleBlock(t, blocksDir, tmpDir, "m", 2, 1, 5)
+	b := writeTwoSampleBlock(t, blocksDir, tmpDir, "m", 1, 2, 5)
+	merged := compactBlocks(t, blocksDir, tmpDir, a, b)
+	for staged, live := range map[string]string{a: b, b: a} {
+		t.Run("staged "+map[string]string{a: "a", b: "b"}[staged], func(t *testing.T) {
+			run := t.TempDir()
+			if err := os.CopyFS(run, os.DirFS(dir)); err != nil {
+				t.Fatal(err)
+			}
+			rb, rt := filepath.Join(run, "metrics", "blocks"), filepath.Join(run, "metrics", "tmp")
+			if err := os.Rename(filepath.Join(rb, staged), filepath.Join(rt, staged)); err != nil {
+				t.Fatal(err)
+			}
+			// Nothing can leave blocks now: the live source's move fails.
+			if err := os.Chmod(rb, 0o555); err != nil {
+				t.Fatal(err)
+			}
+			bs, err := metrics.NewBlockStore(run)
+			_ = os.Chmod(rb, 0o755)
+			if err != nil {
+				t.Fatalf("NewBlockStore with blocks unwritable: %v", err)
+			}
+			_ = bs.Close()
+			if _, err := os.Stat(filepath.Join(rt, staged)); err != nil {
+				t.Fatalf("the staged witness %s was removed although %s could not be moved: %v", staged, live, err)
+			}
+
+			bs, err = metrics.NewBlockStore(run)
+			if err != nil {
+				t.Fatalf("restart: %v", err)
+			}
+			defer bs.Close()
+			if infos := bs.BlockInfos(); len(infos) != 1 || infos[0].ID != merged {
+				t.Fatalf("blocks = %+v, want only the survivor %s", infos, merged)
+			}
+			if _, err := os.Stat(filepath.Join(rb, live)); !os.IsNotExist(err) {
+				t.Errorf("live source %s still in blocks after the restart: %v", live, err)
+			}
+			if left, _ := os.ReadDir(rt); len(left) != 0 {
+				t.Errorf("tmp still holds %d entries after the restart", len(left))
+			}
+		})
+	}
+}
