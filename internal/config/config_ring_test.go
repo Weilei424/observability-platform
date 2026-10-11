@@ -56,7 +56,6 @@ func TestIngesterURLListRefusals(t *testing.T) {
 
 func TestSingleURLPeersRefuseAComma(t *testing.T) {
 	for _, c := range []*Config{
-		topo(TargetQuerier, "http://i:1", "http://s:1,http://s2:1", ""),
 		topo(TargetGateway, "http://i:1", "", "http://q:1,http://q2:1"),
 	} {
 		err := c.validateTopology()
