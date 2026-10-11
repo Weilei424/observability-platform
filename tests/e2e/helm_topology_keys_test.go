@@ -6,13 +6,13 @@ import (
 	"testing"
 )
 
-// TestBackendRejectsTemplateOwnedTopologyKeys pins the component target and
-// the peer URLs as the chart's own. Set by hand they would contradict the
+// TestBackendRejectsTemplateOwnedTopologyKeys pins the component target, the
+// peer URLs, and each ingester's own URL as the chart's own. Set by hand they would contradict the
 // topology the chart renders — the failure TestBackendRejectsHTTPAddrOverride
 // guards against for the listen port.
 func TestBackendRejectsTemplateOwnedTopologyKeys(t *testing.T) {
 	helmAvailable(t)
-	for _, key := range []string{"OBS_TARGET", "OBS_INGESTER_URL", "OBS_STORE_URL", "OBS_QUERIER_URL"} {
+	for _, key := range []string{"OBS_TARGET", "OBS_INGESTER_URL", "OBS_STORE_URL", "OBS_QUERIER_URL", "OBS_INGESTER_SELF_URL"} {
 		out, err := exec.Command("helm", "template", "backend", backendChart,
 			"--set-string", "config."+key+"=x").CombinedOutput()
 		if err == nil {
