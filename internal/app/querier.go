@@ -15,9 +15,10 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/rpc"
 )
 
-// buildQuerier assembles the querier: the nine read routes over every ingester,
-// then the store -- every ingester read to completion before the store, which
-// keeps a flush invisible.
+// buildQuerier assembles the querier: the nine read routes over every
+// ingester read in parallel, then every store in parallel; all ingester reads
+// finish before any store read starts, which keeps a flush invisible. Up to
+// W_s-1 unavailable stores are skipped, as up to W-1 ingesters are.
 func buildQuerier(cfg *config.Config, log *slog.Logger) (*App, error) {
 	mainLog := observability.Component(log, "main")
 	r, err := ring.New(cfg.IngesterURLs)
@@ -46,14 +47,29 @@ func buildQuerier(cfg *config.Config, log *slog.Logger) (*App, error) {
 		metricHeads = append(metricHeads, rpc.NewMetricsSource(c))
 		logHeads = append(logHeads, rpc.NewLogsSource(c))
 	}
-	store, err := rpc.NewClient("store", cfg.StoreURL)
+	storeRing, err := ring.New(cfg.StoreURLs)
 	if err != nil {
-		mainLog.Error("failed to build store client", slog.String("error", err.Error()))
+		mainLog.Error("failed to build the store ring", slog.String("error", err.Error()))
 		return nil, err
+	}
+	storeMembers := storeRing.Members()
+	storeLabels := labelsOf(storeMembers)
+	var metricStores []metrics.Source
+	var logStores []logs.Source
+	for i, m := range storeMembers {
+		c, err := rpc.NewClient("store "+storeLabels[i], m, rpc.WithRequestTimeout(timeout))
+		if err != nil {
+			mainLog.Error("failed to build store client", slog.String("error", err.Error()))
+			return nil, err
+		}
+		metricStores = append(metricStores, rpc.NewMetricsSource(c))
+		logStores = append(logStores, rpc.NewLogsSource(c))
 	}
 	reg, inst := observability.NewRegistry(observability.RegistryOptions{Omit: observability.AllGroups, Logger: log})
 	rm := observability.NewRingMetrics()
 	rm.Register(reg, labels, false)
+	sm := observability.NewStoreMetrics()
+	sm.RegisterQuerier(reg, storeLabels)
 	logRing(mainLog, r, rf)
 	skippable := func(err error) bool { return errors.Is(err, rpc.ErrUnavailable) }
 	// A read the caller cancelled says nothing about the ingester, so it is
@@ -75,16 +91,34 @@ func buildQuerier(cfg *config.Config, log *slog.Logger) (*App, error) {
 		recordSkip(ctx, names)
 	}
 	tolerate := config.Quorum(rf) - 1
+	storeTolerate := config.Quorum(max(cfg.StoreReplicationFactor, 1)) - 1
+	storeObserve := func(i int, err error) {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
+		sm.StoreReads.WithLabelValues(storeLabels[i], rpc.OutcomeOf(err)).Inc()
+	}
+	onStoreSkip := func(ctx context.Context, skipped []int) {
+		names := make([]string, len(skipped))
+		for j, i := range skipped {
+			names[j] = "store " + storeLabels[i]
+		}
+		recordSkip(ctx, names)
+	}
+	ingesterOpts := metrics.HeadsOptions{Tolerate: tolerate, Skippable: skippable, Observe: observe, OnSkip: onSkip}
+	storeOpts := metrics.HeadsOptions{Tolerate: storeTolerate, Skippable: skippable, Observe: storeObserve, OnSkip: onStoreSkip}
+	logIngesterOpts := logs.HeadsOptions{Tolerate: tolerate, Skippable: skippable, Observe: observe, OnSkip: onSkip}
+	logStoreOpts := logs.HeadsOptions{Tolerate: storeTolerate, Skippable: skippable, Observe: storeObserve, OnSkip: onStoreSkip}
 	srv := api.New(api.Deps{
 		Config: cfg,
 		Logger: log,
 		Routes: api.RoutesRead,
-		Engine: metrics.NewQueryEngineFromSource(metrics.Merge(metrics.MergeHeadsWith(
-			metrics.HeadsOptions{Tolerate: tolerate, Skippable: skippable, Observe: observe, OnSkip: onSkip}, metricHeads...),
-			rpc.NewMetricsSource(store))),
-		LogQuery: logs.NewQueryEngineFromSource(logs.Merge(logs.MergeHeadsWith(
-			logs.HeadsOptions{Tolerate: tolerate, Skippable: skippable, Observe: observe, OnSkip: onSkip}, logHeads...),
-			rpc.NewLogsSource(store))),
+		Engine: metrics.NewQueryEngineFromSource(metrics.Merge(
+			metrics.MergeHeadsWith(ingesterOpts, metricHeads...),
+			metrics.MergeHeadsWith(storeOpts, metricStores...))),
+		LogQuery: logs.NewQueryEngineFromSource(logs.Merge(
+			logs.MergeHeadsWith(logIngesterOpts, logHeads...),
+			logs.MergeHeadsWith(logStoreOpts, logStores...))),
 		Middleware: []func(http.Handler) http.Handler{replicationNotes},
 		Registry:   reg,
 		HTTP:       inst.HTTP,
