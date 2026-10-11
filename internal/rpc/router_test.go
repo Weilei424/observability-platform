@@ -831,3 +831,62 @@ func TestNewGatewayOverOldIngestersMeetsQuorum(t *testing.T) {
 		}
 	}
 }
+
+// arrivalStamper is a 6.3 ingester's head: a sample pushed without a
+// generation gets one from the ingester's own clock on arrival, here far ahead
+// of the gateway's.
+type arrivalStamper struct{ *genRecorder }
+
+func (a arrivalStamper) Append(l metrics.Labels, ts int64, v float64) error {
+	return a.AppendWithGeneration(l, ts, v, 1<<60)
+}
+
+// A failed generation ask fails that replica's push: nothing is sent while the
+// router doesn't know the ingester takes generations. Were the batch sent
+// without one, the ingester would stamp it on arrival, and a delayed old
+// write would then outrank the overwrite admitted after it.
+func TestRouterSendsNothingWhenTheGenerationAskFails(t *testing.T) {
+	m := arrivalStamper{&genRecorder{}}
+	r := chi.NewRouter()
+	r.Route("/internal/v1", func(r chi.Router) { MountWrites(r, m, &recordingLogs{}, observability.NewIngestMetrics()) })
+	var asks atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, _ := io.ReadAll(req.Body)
+		req.Body = io.NopCloser(bytes.NewReader(body))
+		if !bytes.Contains(body, []byte(`"samples"`)) && asks.Add(1) == 1 {
+			http.Error(w, `{"error":"this ingester is someone else"}`, http.StatusMisdirectedRequest)
+			return
+		}
+		r.ServeHTTP(w, req)
+	}))
+	t.Cleanup(srv.Close)
+	rg, _ := ring.New([]string{srv.URL})
+	var clock atomic.Int64
+	clock.Store(100)
+	rt, err := NewRouter(rg, RouterOptions{Clock: clock.Load, Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(rt.Wait)
+	l, _ := metrics.NewLabels(map[string]string{"__name__": "x"})
+	write := func(v float64) error {
+		return rt.PushSamples(context.Background(), []metrics.PendingSample{{Labels: l, TimestampMs: 1, Value: v}})
+	}
+	if err := write(1); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("write with a failed ask: err = %v, want ErrUnavailable", err)
+	}
+	clock.Store(101)
+	if err := write(2); err != nil {
+		t.Fatalf("overwrite once the ask succeeds: %v", err)
+	}
+	rt.Wait()
+	m.mu.Lock()
+	gens := slices.Clone(m.gens)
+	m.mu.Unlock()
+	if slices.Contains(gens, 1<<60) {
+		t.Errorf("generations stored = %v: a batch went out without the gateway's generation", gens)
+	}
+	if v, _ := m.newest(); v != 2 {
+		t.Errorf("newest = %v, want the overwrite 2", v)
+	}
+}
