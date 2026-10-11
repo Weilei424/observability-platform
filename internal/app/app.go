@@ -12,6 +12,7 @@ import (
 
 	"github.com/masonwheeler/observability-platform/internal/config"
 	"github.com/masonwheeler/observability-platform/internal/observability"
+	"github.com/masonwheeler/observability-platform/internal/rpc"
 )
 
 // App is one assembled process.
@@ -115,4 +116,13 @@ func (a *App) CloseContext(ctx context.Context) {
 			observability.Component(a.log, c.component).Error(c.msg, slog.String("error", err.Error()))
 		}
 	}
+}
+
+// labelsOf maps member URLs to their metric labels (rpc.MemberLabel).
+func labelsOf(members []string) []string {
+	out := make([]string, len(members))
+	for i, m := range members {
+		out[i] = rpc.MemberLabel(m)
+	}
+	return out
 }
