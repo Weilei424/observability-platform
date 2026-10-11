@@ -898,14 +898,36 @@ Spec: `docs/superpowers/specs/2026-10-06-phase-6.3-replication-design.md` · Pla
 - [x] Verify: `make smoke-compose-split` 108/0 and `make smoke-compose` (all-in-one) 71/0, both on 2026-10-07
 - [x] Verify: kind split in CI with the exact replication check and the held ingester outage — job "Helm + Kubernetes E2E (kind, split)" passed on 2026-10-09 at `d99d515` (https://github.com/Weilei424/observability-platform/actions/runs/37895744179/job/113707199508): every ingester pod held every marker, and with ingester-2 held down a write answered `204` and a read was complete (not run locally: cgroup v1 host)
 
-### Phase 6.4 — Query Fanout and Merge
-- [ ] Implement metrics query fanout
-- [ ] Implement logs query fanout
-- [ ] Merge metrics by series/time
-- [ ] Merge logs by timestamp
-- [ ] Deduplicate replicated query results
-- [ ] Integration test: multi-ingester metrics ingest → query
-- [ ] Integration test: multi-ingester logs ingest → query
+### Phase 6.4 — Query Fanout, Sharded and Replicated Store
+Spec: `docs/superpowers/specs/2026-10-11-phase-6.4-fanout-sharded-store-design.md` · Plan: `docs/superpowers/plans/2026-10-11-phase-6.4-fanout-sharded-store.md`
+
+Already delivered by 6.2/6.3 and kept: merge metrics by series/time, merge logs by timestamp, deduplicate replicated results (highest generation per timestamp; `(timestamp, line)` for logs).
+
+**Read path**
+- [ ] Parallel ingester and store reads (metrics and logs; selects and label reads), answers folded in member order, early exit once decided, cancelled reads never observed as outages; every ingester read finishes before any store read — `internal/metrics`, `internal/logs` merge tests
+- [ ] No pruning: every read covers every member (a series is placed by its full label set) — documented
+
+**Sharded, replicated store**
+- [ ] `OBS_STORE_URL` as a list (ingester, querier, compactor), `OBS_STORE_REPLICATION_FACTOR` (default 1; ingester, querier), `OBS_STORE_SELF_URL` (store), `OBS_STORE_RETRY_MAX_BYTES` (64 MiB) and `OBS_STORE_RETRY_MAX_AGE` (15m) (ingester)
+- [ ] Replicated flush sinks: each series/stream to its R_s stores on a store ring, per-key quorum W_s = R_s/2+1, a quorum miss keeps the whole batch in the head (`StoreQuorumError`); `obs_ingester_store_flush_total{outcome}`
+- [ ] Straggler queue: a quorum flush's missed store copy is retried (1s→1m backoff) within the byte and age bounds; `obs_ingester_store_retries_total{outcome}`, `obs_ingester_store_retry_pending_bytes`; lost on restart (documented)
+- [ ] Querier store layer skips up to W_s−1 store outages; `obs_querier_store_reads_total{store,outcome}`; the replication note names skipped stores
+- [ ] Store member identity: `OBS_STORE_SELF_URL` → `421` for another member's request
+- [ ] Compactor maintains every store, skipping one that fails; `obs_compactor_store_passes_total{store,outcome}`
+
+**Membership**
+- [ ] Add a store, staged (querier and compactor first, then ingesters)
+- [ ] Remove a store: ingesters drop it, `POST /internal/v1/handoff` copies its data to every new owner behind a flush barrier (`200` only when all acknowledged; `400` on a bad target list), then the querier and compactor drop it
+
+**Deployment**
+- [ ] Compose split: `store-1`…`store-4`, store RF 3, per-store self URL, Prometheus targets; smoke: one store down still reads, two down answer `503`
+- [ ] Helm split: `split.store.replicas` 4, `split.storeReplicationFactor` 3, `split.store.writeReplicas` staging with the running-release check, per-pod self URL, chart-owned keys refused, Prometheus chart targets
+- [ ] Internals dashboard: store flush quorum, store reads, store retry queue
+
+**Verification**
+- [ ] Integration (3 ingesters RF 3, 4 stores R_s 3): sharded flush read back with each store holding exactly its keys; one store down (and its copies arrive after it returns); two down (flush fails, reads `503`, recovery); compaction per store; add a store; remove a store with handoff then read while skipping one store; parallel ingester reads; restart persistence
+- [ ] Render tests: Compose and Helm store self URLs equal ring entries; R_s rendered and bounded; staging refusals
+- [ ] `go test -race ./...`, lint, `make smoke-compose-split`, `make smoke-compose`; kind split in CI
 
 ### Phase 6.5 — Multi-Tenant Boundaries
 - [ ] Read tenant ID from request header
