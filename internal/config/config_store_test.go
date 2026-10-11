@@ -64,6 +64,10 @@ func TestStoreSettingsRejected(t *testing.T) {
 		{map[string]string{"OBS_TARGET": "store", "OBS_STORE_SELF_URL": "ftp://s:1"}, "must be an http or https URL"},
 		{map[string]string{"OBS_TARGET": "ingester", "OBS_STORE_URL": "http://s:1", "OBS_STORE_RETRY_MAX_BYTES": "-1"},
 			"OBS_STORE_RETRY_MAX_BYTES must be >= 0"},
+		{map[string]string{"OBS_TARGET": "querier", "OBS_INGESTER_URL": "http://i:1", "OBS_STORE_URL": "http://s:1", "OBS_STORE_RETRY_MAX_BYTES": "10"},
+			"OBS_STORE_RETRY_MAX_BYTES is set but target querier does not use it"},
+		{map[string]string{"OBS_TARGET": "compactor", "OBS_STORE_URL": "http://s:1", "OBS_STORE_RETRY_MAX_AGE": "1m"},
+			"OBS_STORE_RETRY_MAX_AGE is set but target compactor does not use it"},
 		{map[string]string{"OBS_TARGET": "ingester", "OBS_STORE_URL": "http://s:1", "OBS_STORE_RETRY_MAX_AGE": "0s"},
 			"OBS_STORE_RETRY_MAX_AGE must be > 0"},
 	} {
@@ -85,5 +89,17 @@ func TestStoreSelfURLOnStore(t *testing.T) {
 	cfg, err := Load()
 	if err != nil || cfg.StoreSelfURL != "http://store-2:8080" {
 		t.Fatalf("StoreSelfURL = %q, %v", cfg.StoreSelfURL, err)
+	}
+}
+
+func TestStoreRetrySettingsOnIngester(t *testing.T) {
+	clearStoreEnv(t)
+	t.Setenv("OBS_TARGET", "ingester")
+	t.Setenv("OBS_STORE_URL", "http://s:1")
+	t.Setenv("OBS_STORE_RETRY_MAX_BYTES", "1024")
+	t.Setenv("OBS_STORE_RETRY_MAX_AGE", "1m")
+	cfg, err := Load()
+	if err != nil || cfg.StoreRetryMaxBytes != 1024 || cfg.StoreRetryMaxAge != time.Minute {
+		t.Fatalf("cfg = %+v, err = %v", cfg, err)
 	}
 }
