@@ -154,7 +154,7 @@ func TestSplitConfigMapsLoadAndReachTheirPeers(t *testing.T) {
 			if o.Data["OBS_TARGET"] != component {
 				t.Fatalf("OBS_TARGET = %q, want %q", o.Data["OBS_TARGET"], component)
 			}
-			for _, k := range []string{"OBS_TARGET", "OBS_INGESTER_URL", "OBS_STORE_URL", "OBS_QUERIER_URL", "OBS_INGESTER_SELF_URL"} {
+			for _, k := range []string{"OBS_TARGET", "OBS_INGESTER_URL", "OBS_STORE_URL", "OBS_QUERIER_URL", "OBS_INGESTER_SELF_URL", "OBS_STORE_REPLICATION_FACTOR", "OBS_STORE_SELF_URL", "OBS_STORE_RETRY_MAX_BYTES", "OBS_STORE_RETRY_MAX_AGE"} {
 				t.Setenv(k, "")
 			}
 			for k, v := range o.Data {
