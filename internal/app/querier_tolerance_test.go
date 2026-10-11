@@ -61,6 +61,7 @@ func labelsStatusWithStore(t *testing.T, store string, rf int, ingesters ...stri
 	cfg := testConfig(t, config.TargetQuerier)
 	cfg.IngesterURLs = ingesters
 	cfg.StoreURL = store
+	cfg.StoreURLs = []string{store}
 	cfg.ReplicationFactor = rf
 	var buf bytes.Buffer
 	a, err := app.Build(cfg, slog.New(slog.NewJSONHandler(&buf, nil)))
@@ -122,6 +123,7 @@ func TestQuerierCountsIngesterReadsButNotCancellations(t *testing.T) {
 	cfg := testConfig(t, config.TargetQuerier)
 	cfg.IngesterURLs = []string{up1, up2, down}
 	cfg.StoreURL = readsPeer(t)
+	cfg.StoreURLs = []string{cfg.StoreURL}
 	cfg.ReplicationFactor = 3
 	a, err := app.Build(cfg, slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil)))
 	if err != nil {
@@ -174,6 +176,7 @@ func TestQuerierWarnsOncePerRequest(t *testing.T) {
 	cfg := testConfig(t, config.TargetQuerier)
 	cfg.IngesterURLs = []string{readsPeer(t), readsPeer(t), downPeer(t)}
 	cfg.StoreURL = readsPeer(t)
+	cfg.StoreURLs = []string{cfg.StoreURL}
 	cfg.ReplicationFactor = 3
 	var buf bytes.Buffer
 	a, err := app.Build(cfg, slog.New(slog.NewJSONHandler(&buf, nil)))
