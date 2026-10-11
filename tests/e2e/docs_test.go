@@ -171,9 +171,10 @@ func servedRoutes(t *testing.T) map[string]map[string]bool {
 			cfg.IngesterURL, cfg.QuerierURL = "http://127.0.0.1:1", "http://127.0.0.1:1"
 			cfg.IngesterURLs = []string{"http://127.0.0.1:1"}
 		case config.TargetIngester, config.TargetCompactor:
-			cfg.StoreURL = "http://127.0.0.1:1"
+			cfg.StoreURL, cfg.StoreURLs = "http://127.0.0.1:1", []string{"http://127.0.0.1:1"}
 		case config.TargetQuerier:
 			cfg.IngesterURL, cfg.StoreURL = "http://127.0.0.1:1", "http://127.0.0.1:1"
+			cfg.StoreURLs = []string{"http://127.0.0.1:1"}
 			cfg.IngesterURLs = []string{"http://127.0.0.1:1"}
 		}
 		a, err := app.Build(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
