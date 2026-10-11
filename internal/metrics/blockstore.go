@@ -1080,19 +1080,24 @@ func (bs *BlockStore) readerByID(id string) *block.Reader {
 // every one into tmpDir before removing any, so a crash part way leaves each
 // either still in blockDir or in tmpDir, where startup reads it as a witness for
 // the sources still in blockDir — the one holding a survivor's equal-generation
-// tie winner may go first. If a move fails, the blocks already moved go back,
-// allMoved is false, and the error is returned. A missing block is skipped.
-// allMoved is true once every block is out of blockDir; err may then still
-// report a removal that failed, whose leftover the next tmpDir sweep clears.
+// tie winner may go first. A block no longer in blockDir is skipped, and its
+// copy already in tmpDir — a witness an earlier, interrupted retire staged — is
+// left alone: removing it before the rest are confirmed out would strand them.
+// If a move fails, the blocks already moved go back, allMoved is false, and the
+// error is returned; nothing in tmpDir is removed. allMoved is true once every
+// block is out of blockDir; err may then still report a removal that failed,
+// whose leftover the next tmpDir sweep clears.
 func retireBlocks(blockDir, tmpDir string, ids []string) (allMoved bool, err error) {
 	var moved []string
 	for _, id := range ids {
-		dst := filepath.Join(tmpDir, id)
+		src, dst := filepath.Join(blockDir, id), filepath.Join(tmpDir, id)
+		if _, err := os.Stat(src); os.IsNotExist(err) {
+			continue // already out of blockDir; a staged witness stays until the sweep
+		}
+		// A copy in tmpDir under the same ID is this same block from an earlier
+		// retire; the live one still in blockDir replaces it, so no witness is lost.
 		_ = os.RemoveAll(dst)
-		if err := os.Rename(filepath.Join(blockDir, id), dst); err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
+		if err := os.Rename(src, dst); err != nil {
 			for _, m := range moved {
 				_ = os.Rename(filepath.Join(tmpDir, m), filepath.Join(blockDir, m))
 			}
