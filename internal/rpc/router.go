@@ -127,7 +127,7 @@ func NewRouter(r *ring.Ring, opts RouterOptions) (*Router, error) {
 			rt.wg.Add(1)
 			go func() {
 				defer rt.wg.Done()
-				rt.learnGenSupport(context.Background(), c)
+				_ = rt.learnGenSupport(context.Background(), c) // unknown again on failure: the first push asks
 			}()
 		}
 	}
@@ -135,12 +135,13 @@ func NewRouter(r *ring.Ring, opts RouterOptions) (*Router, error) {
 }
 
 // learnGenSupport asks c, with an empty push, whether it takes generations,
-// and records the answer. A failed ask leaves it unknown.
-func (rt *Router) learnGenSupport(ctx context.Context, c *Client) {
+// and records the answer. A failed ask leaves it unknown and is returned.
+func (rt *Router) learnGenSupport(ctx context.Context, c *Client) error {
 	takes, err := c.PushSamplesGen(ctx, nil, false)
 	if err == nil {
 		rt.recordGenSupport(c, takes)
 	}
+	return err
 }
 
 func (rt *Router) recordGenSupport(c *Client, takes bool) {
@@ -154,7 +155,10 @@ func (rt *Router) recordGenSupport(c *Client, takes bool) {
 // pushTo sends g to c, with generations only if c has said it takes them, and
 // learns from the answer whether it does. When c hasn't said yet, it is asked
 // first, and the ask and the push share the one client timeout, so a hung
-// ingester costs one timeout rather than two.
+// ingester costs one timeout rather than two. A failed ask is this replica's
+// failed push: nothing is sent while c's support is unknown, since a 6.3
+// ingester sent no generation would stamp its own on arrival, and a late
+// arrival would then outrank the overwrite that followed it.
 func (rt *Router) pushTo(ctx context.Context, c *Client, g []metrics.PendingSample) error {
 	state := rt.genSupport[c]
 	if state.Load() == genUnknown {
@@ -163,7 +167,9 @@ func (rt *Router) pushTo(ctx context.Context, c *Client, g []metrics.PendingSamp
 			ctx, cancel = context.WithTimeout(ctx, c.timeout)
 			defer cancel()
 		}
-		rt.learnGenSupport(ctx, c)
+		if err := rt.learnGenSupport(ctx, c); err != nil {
+			return err
+		}
 	}
 	takes, err := c.PushSamplesGen(ctx, g, state.Load() == genTakes)
 	if err == nil {
