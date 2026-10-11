@@ -63,11 +63,24 @@ type Config struct {
 	// members on the gateway and querier (Phase 6.2). One URL is a one-member ring.
 	IngesterURLs []string
 	StoreURL     string
-	QuerierURL   string
+	// StoreURLs is OBS_STORE_URL split on commas and normalized: the store
+	// ring's members on the ingester, querier, and compactor (Phase 6.4).
+	StoreURLs  []string
+	QuerierURL string
 	// IngesterSelfURL is OBS_INGESTER_SELF_URL, normalized: this ingester's own
 	// URL as the ring lists it. When set, the ingester refuses an internal
 	// request addressed to another member. Ingester only; optional.
 	IngesterSelfURL string
+	// StoreReplicationFactor is OBS_STORE_REPLICATION_FACTOR: stores each
+	// flushed series or stream goes to; ingester and querier.
+	StoreReplicationFactor int
+	// StoreSelfURL is OBS_STORE_SELF_URL, normalized: this store's own URL as
+	// the store ring lists it. Store only; optional.
+	StoreSelfURL string
+	// StoreRetryMaxBytes and StoreRetryMaxAge bound the ingester's straggler
+	// queue (OBS_STORE_RETRY_MAX_BYTES, OBS_STORE_RETRY_MAX_AGE).
+	StoreRetryMaxBytes int64
+	StoreRetryMaxAge   time.Duration
 
 	ReplicationFactor int           // OBS_REPLICATION_FACTOR: replicas per series/stream; gateway and querier (Phase 6.3)
 	IngesterTimeout   time.Duration // OBS_INGESTER_TIMEOUT: bounds each routed write and ingester read
@@ -112,6 +125,12 @@ func Load() (*Config, error) {
 	v.SetDefault("ingester_self_url", "")
 	v.SetDefault("replication_factor", 1)
 	v.SetDefault("ingester_timeout", DefaultIngesterTimeout.String())
+	// 0 means unset: validateTopology turns it into 1 and refuses a value set
+	// on a target that does not use it.
+	v.SetDefault("store_replication_factor", 0)
+	v.SetDefault("store_self_url", "")
+	v.SetDefault("store_retry_max_bytes", int64(64<<20))
+	v.SetDefault("store_retry_max_age", "15m")
 
 	v.SetConfigName("config")
 	v.SetConfigType("yaml")
@@ -155,6 +174,10 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	storeRetryMaxAge, err := parseDuration(v.GetString("store_retry_max_age"), "OBS_STORE_RETRY_MAX_AGE")
+	if err != nil {
+		return nil, err
+	}
 
 	cfg := &Config{
 		HTTPAddr:                v.GetString("http_addr"),
@@ -170,6 +193,10 @@ func Load() (*Config, error) {
 		IngesterSelfURL:         v.GetString("ingester_self_url"),
 		ReplicationFactor:       v.GetInt("replication_factor"),
 		IngesterTimeout:         ingesterTimeout,
+		StoreReplicationFactor:  v.GetInt("store_replication_factor"),
+		StoreSelfURL:            v.GetString("store_self_url"),
+		StoreRetryMaxBytes:      v.GetInt64("store_retry_max_bytes"),
+		StoreRetryMaxAge:        storeRetryMaxAge,
 		MaintenanceInterval:     maintenanceInterval,
 		FlushInterval:           flushInterval,
 		FlushSealedChunks:       v.GetInt("flush_sealed_chunks"),
@@ -217,6 +244,15 @@ func Load() (*Config, error) {
 	}
 	if cfg.IngesterTimeout < 100*time.Millisecond {
 		return nil, fmt.Errorf("config: OBS_INGESTER_TIMEOUT must be >= 100ms")
+	}
+	if cfg.StoreRetryMaxBytes < 0 {
+		return nil, fmt.Errorf("config: OBS_STORE_RETRY_MAX_BYTES must be >= 0")
+	}
+	if cfg.StoreRetryMaxAge <= 0 {
+		return nil, fmt.Errorf("config: OBS_STORE_RETRY_MAX_AGE must be > 0")
+	}
+	if raw, ok := os.LookupEnv("OBS_STORE_REPLICATION_FACTOR"); ok && raw != "" && cfg.StoreReplicationFactor < 1 {
+		return nil, fmt.Errorf("config: OBS_STORE_REPLICATION_FACTOR must be >= 1")
 	}
 
 	if err := cfg.validateTopology(); err != nil {
@@ -285,16 +321,20 @@ func (c *Config) validateTopology() error {
 			return fmt.Errorf("config: target %s requires %s", c.Target, p.env)
 		case !needed && v != "":
 			return fmt.Errorf("config: %s is set but target %s does not use it; unset it", p.env, c.Target)
-		case v != "" && p == peerIngester:
+		case v != "" && (p == peerIngester || p == peerStore):
 			urls, err := validatePeerList(p.env, c.Target, v)
 			if err != nil {
 				return err
 			}
-			c.IngesterURLs = urls
+			if p == peerIngester {
+				c.IngesterURLs = urls
+			} else {
+				c.StoreURLs = urls
+			}
 			*fields[p] = strings.Join(urls, ",")
 		case v != "":
 			if strings.Contains(v, ",") {
-				return fmt.Errorf("config: %s must be a single URL for target %s; only OBS_INGESTER_URL takes a list", p.env, c.Target)
+				return fmt.Errorf("config: %s must be a single URL for target %s; only OBS_INGESTER_URL and OBS_STORE_URL take a list", p.env, c.Target)
 			}
 			normalized, err := validatePeerURL(p.env, c.Target, v)
 			if err != nil {
@@ -312,6 +352,27 @@ func (c *Config) validateTopology() error {
 			return err
 		}
 		c.IngesterSelfURL = self
+	}
+	rsSet := c.StoreReplicationFactor != 0
+	usesRS := c.Target == TargetIngester || c.Target == TargetQuerier
+	if rsSet && !usesRS {
+		return fmt.Errorf("config: OBS_STORE_REPLICATION_FACTOR is set but target %s does not use it; unset it", c.Target)
+	}
+	if !rsSet {
+		c.StoreReplicationFactor = 1
+	}
+	if usesRS && c.StoreReplicationFactor > len(c.StoreURLs) {
+		return fmt.Errorf("config: OBS_STORE_REPLICATION_FACTOR %d is larger than the %d stores in OBS_STORE_URL", c.StoreReplicationFactor, len(c.StoreURLs))
+	}
+	if c.StoreSelfURL != "" {
+		if c.Target != TargetStore {
+			return fmt.Errorf("config: OBS_STORE_SELF_URL is set but target %s does not use it; unset it", c.Target)
+		}
+		self, err := validatePeerURL("OBS_STORE_SELF_URL", c.Target, c.StoreSelfURL)
+		if err != nil {
+			return err
+		}
+		c.StoreSelfURL = self
 	}
 	if (c.Target == TargetGateway || c.Target == TargetQuerier) && c.ReplicationFactor > len(c.IngesterURLs) {
 		return fmt.Errorf("config: OBS_REPLICATION_FACTOR %d is larger than the %d ingesters in OBS_INGESTER_URL", c.ReplicationFactor, len(c.IngesterURLs))
