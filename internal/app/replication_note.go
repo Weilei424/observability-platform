@@ -9,7 +9,9 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/observability"
 )
 
-// skipNote collects, for one HTTP request, the ingesters its reads skipped.
+// skipNote collects, for one HTTP request, the ingesters and stores its reads
+// skipped. Ingesters are named by bare host:port, stores prefixed "store ", so
+// the note tells them apart.
 // A request can read the sources several times -- /api/v1/series reads once
 // per match[] selector -- so the head merge records each skip here
 // (MergeHeadsWith's OnSkip) and the request logs the note once, after its
@@ -32,7 +34,7 @@ func recordSkip(ctx context.Context, names []string) {
 
 // replicationNotes gives each request a skip note and, once the handler has
 // answered with a non-error status, logs one "read answered by replication"
-// line with the distinct ingesters skipped, through the request's logger (so
+// line with the distinct ingesters and stores skipped, through the request's logger (so
 // with its request ID). It runs inside the API server's request-ID and logger
 // middleware (api.Deps.Middleware).
 func replicationNotes(next http.Handler) http.Handler {
