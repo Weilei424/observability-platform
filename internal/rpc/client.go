@@ -115,16 +115,21 @@ func (c *Client) callInto(ctx context.Context, method, path string, query url.Va
 	}
 	var body io.Reader
 	if in != nil {
-		// marshalJSON, not json.Marshal: it is the one encoding path for every
-		// internal body (codec.go). encoding/json's default HTML escaping would
-		// turn '<', '>', '&' in a log line or label value into a six-byte
-		// \u00XX escape each, which the ingester's flush-batch sizing does not
-		// account for.
-		b, err := marshalJSON(in)
-		if err != nil {
-			return fmt.Errorf("rpc: encode %s request: %w", path, err)
+		if raw, ok := in.(rawJSON); ok {
+			// Already encoded by marshalJSON (replicated_sink.go, the straggler queue).
+			body = bytes.NewReader(raw)
+		} else {
+			// marshalJSON, not json.Marshal: it is the one encoding path for every
+			// internal body (codec.go). encoding/json's default HTML escaping would
+			// turn '<', '>', '&' in a log line or label value into a six-byte
+			// \u00XX escape each, which the ingester's flush-batch sizing does not
+			// account for.
+			b, err := marshalJSON(in)
+			if err != nil {
+				return fmt.Errorf("rpc: encode %s request: %w", path, err)
+			}
+			body = bytes.NewReader(b)
 		}
-		body = bytes.NewReader(b)
 	}
 	u := c.base.JoinPath("internal", "v1", path)
 	u.RawQuery = query.Encode()
