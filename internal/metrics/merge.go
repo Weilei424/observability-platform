@@ -124,8 +124,9 @@ type HeadsOptions struct {
 	// outage. A per-request timeout with a live caller context is an outage
 	// and is skippable even though it wraps context.DeadlineExceeded.
 	Skippable func(error) bool
-	// Observe is called once per head read with the head's index; err is nil
-	// on success.
+	// Observe is called at most once per head read, possibly from several
+	// goroutines, with the head's index; err is nil on success. A read cancelled
+	// because the outcome was already decided, or by the caller, is not observed.
 	Observe func(head int, err error)
 	// OnSkip is called, once, with the read's context and the skipped head
 	// indexes when the heads were read only by skipping. It runs when the
@@ -136,9 +137,11 @@ type HeadsOptions struct {
 
 // MergeHeadsWith is MergeHeads that may skip up to opts.Tolerate failed heads.
 //
-// Heads are read sequentially, each to completion, in order, which Merge's
-// no-gap argument needs; they are never read in parallel. Skipping is complete
-// when Tolerate is at most W-1 for replication factor W: every write was
+// Heads are read concurrently and their answers folded in head order, so the
+// answer is the one a sequential read gives. Merge(heads, store) still reads
+// every head before the store, which is all Merge's no-gap argument needs.
+//
+// Skipping is complete when Tolerate is at most W-1 for replication factor W: every write was
 // acknowledged by W replicas on distinct ingesters, so any W-1 of them
 // being unreadable leaves at least one replica of every sample among the
 // heads read. A protocol error (anything not Skippable) is never skipped,
@@ -173,41 +176,79 @@ func (f fixedSource) SelectLabelValues(context.Context, string) ([]string, error
 	return f.strs, nil
 }
 
-// collect reads every head in order, skipping tolerated outages, and folds the
-// answers with Merge. wrap turns one answer into a Source; read reads a Source
-// the same way (used on the folded result).
-func collect[T any](ctx context.Context, t tolerantHeads, readHead func(Source) (T, error), wrap func(T) Source, read func(Source) (T, error)) (T, error) {
+// collect reads every head concurrently, skipping tolerated outages, and folds
+// the answers with Merge in head order, so the answer does not depend on which
+// head answers first. It returns as soon as the outcome is certain -- a
+// non-skippable error, or one outage more than Tolerate -- and cancels the
+// reads still running; a read that ends because of that cancellation is not
+// observed, so it never counts as an outage. Among failures already in when
+// the read is decided, a non-skippable error is returned over an outage.
+func collect[T any](ctx context.Context, t tolerantHeads, readHead func(context.Context, Source) (T, error), wrap func(T) Source, read func(Source) (T, error)) (T, error) {
 	var zero T
-	var answers []Source
-	var skipped []int
-	var lastErr error
+	rctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type result struct {
+		i   int
+		a   T
+		err error
+	}
+	results := make(chan result, len(t.heads))
 	for i, h := range t.heads {
-		a, err := readHead(h)
-		if t.opts.Observe != nil {
-			t.opts.Observe(i, err)
+		go func() {
+			a, err := readHead(rctx, h)
+			results <- result{i, a, err}
+		}()
+	}
+	answers := make([]Source, len(t.heads))
+	var skipped []int
+	var lastOutage, fatal error
+	for range len(t.heads) {
+		r := <-results
+		// A cancelled read -- by the caller, or by an earlier decision -- is
+		// never an outcome to observe.
+		if t.opts.Observe != nil && !errors.Is(r.err, context.Canceled) {
+			t.opts.Observe(r.i, r.err)
 		}
-		if err != nil {
-			if !t.skip(ctx, err) || len(skipped) >= t.opts.Tolerate {
-				return zero, err
-			}
-			skipped = append(skipped, i)
-			lastErr = err
+		if r.err == nil {
+			answers[r.i] = wrap(r.a)
 			continue
 		}
-		answers = append(answers, wrap(a))
+		if !t.skip(ctx, r.err) {
+			fatal = r.err
+			break
+		}
+		skipped = append(skipped, r.i)
+		lastOutage = r.err
+		if len(skipped) > t.opts.Tolerate {
+			break
+		}
 	}
-	if len(answers) == 0 {
-		return zero, lastErr
+	cancel()
+	switch {
+	case fatal != nil:
+		return zero, fatal
+	case len(skipped) > t.opts.Tolerate:
+		return zero, lastOutage
 	}
-	acc := answers[len(answers)-1]
-	for i := len(answers) - 2; i >= 0; i-- {
-		acc = Merge(answers[i], acc)
+	var folded []Source
+	for _, a := range answers {
+		if a != nil {
+			folded = append(folded, a)
+		}
+	}
+	if len(folded) == 0 {
+		return zero, lastOutage
+	}
+	acc := folded[len(folded)-1]
+	for i := len(folded) - 2; i >= 0; i-- {
+		acc = Merge(folded[i], acc)
 	}
 	out, err := read(acc)
 	if err != nil {
 		return zero, err
 	}
 	if len(skipped) > 0 && t.opts.OnSkip != nil {
+		slices.Sort(skipped)
 		t.opts.OnSkip(ctx, skipped)
 	}
 	return out, nil
@@ -224,13 +265,13 @@ func (t tolerantHeads) Select(ctx context.Context, p SelectParams) ([]SeriesData
 	if err := p.Validate(); err != nil {
 		return nil, err
 	}
-	return collect(ctx, t, func(h Source) ([]SeriesData, error) { return h.Select(ctx, p) }, func(a []SeriesData) Source { return fixedSource{series: a} }, func(s Source) ([]SeriesData, error) { return s.Select(ctx, p) })
+	return collect(ctx, t, func(c context.Context, h Source) ([]SeriesData, error) { return h.Select(c, p) }, func(a []SeriesData) Source { return fixedSource{series: a} }, func(s Source) ([]SeriesData, error) { return s.Select(ctx, p) })
 }
 
 func (t tolerantHeads) SelectLabelNames(ctx context.Context) ([]string, error) {
-	return collect(ctx, t, func(h Source) ([]string, error) { return h.SelectLabelNames(ctx) }, func(a []string) Source { return fixedSource{strs: a} }, func(s Source) ([]string, error) { return s.SelectLabelNames(ctx) })
+	return collect(ctx, t, func(c context.Context, h Source) ([]string, error) { return h.SelectLabelNames(c) }, func(a []string) Source { return fixedSource{strs: a} }, func(s Source) ([]string, error) { return s.SelectLabelNames(ctx) })
 }
 
 func (t tolerantHeads) SelectLabelValues(ctx context.Context, name string) ([]string, error) {
-	return collect(ctx, t, func(h Source) ([]string, error) { return h.SelectLabelValues(ctx, name) }, func(a []string) Source { return fixedSource{strs: a} }, func(s Source) ([]string, error) { return s.SelectLabelValues(ctx, name) })
+	return collect(ctx, t, func(c context.Context, h Source) ([]string, error) { return h.SelectLabelValues(c, name) }, func(a []string) Source { return fixedSource{strs: a} }, func(s Source) ([]string, error) { return s.SelectLabelValues(ctx, name) })
 }
