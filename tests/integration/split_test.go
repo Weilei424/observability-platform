@@ -199,7 +199,7 @@ func (c *cluster) newIngester(t *testing.T) (*process, string) {
 		FlushInterval:           time.Hour, // count-based flushes only:
 		FlushSealedChunks:       1,         // flush as soon as a chunk seals
 		CompactionBaseRange:     2 * time.Hour, CompactionMultiplier: 4, CompactionLevels: 3,
-		StoreURL: c.storeURL,
+		StoreURL: c.storeURL, StoreURLs: []string{c.storeURL},
 	}}, "http://" + addr
 }
 
@@ -292,11 +292,15 @@ func startClusterRF(t *testing.T, n, rf int) *cluster {
 	})
 	c.querier = mk(config.TargetQuerier, func(x *config.Config) {
 		x.IngesterURL, x.StoreURL = strings.Join(c.ingesterURLs, ","), peer(config.TargetStore)
+		x.StoreURLs = []string{x.StoreURL}
 		x.IngesterURLs = slices.Clone(c.ingesterURLs)
 		x.ReplicationFactor, x.IngesterTimeout = rf, 2*time.Second
 	})
 	c.store = mk(config.TargetStore, func(*config.Config) {})
-	c.compactor = mk(config.TargetCompactor, func(x *config.Config) { x.StoreURL = peer(config.TargetStore) })
+	c.compactor = mk(config.TargetCompactor, func(x *config.Config) {
+		x.StoreURL = peer(config.TargetStore)
+		x.StoreURLs = []string{x.StoreURL}
+	})
 
 	// Deliberately in dependency-reversed order: nothing waits for its peers.
 	// Each process registers its own cleanup right after it starts, so a
