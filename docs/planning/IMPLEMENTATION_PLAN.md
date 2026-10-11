@@ -591,20 +591,25 @@ closes the gap. It is a query-engine feature, so it was deliberately kept out of
 
 **Why the scope grew:** a quorum write that survives an outage is not much use if every read still fails during it, and a hung (rather than refused) replica would stall a quorum write without a deadline.
 
-### Phase 6.4 — Query Fanout and Merge
+### Phase 6.4 — Query Fanout, Sharded and Replicated Store
 
-**Goal:** Query data across multiple ingesters/stores.
+**Goal:** Query data across multiple ingesters and multiple stores, reading each layer in parallel, with flushed data sharded and replicated across stores.
 
 **Scope:**
-- Gateway/querier fans out query requests in parallel (6.2 reads every ingester sequentially), pruning ingesters a selector cannot touch.
-- Merge metrics query results by series/time.
-- Merge log query results by timestamp.
-- Deduplicate replicated data (already done by the 6.3 merge: highest generation per timestamp, `(ts, line)` for logs).
+- The querier reads every ingester in parallel, then every store in parallel (all ingester reads finish before any store read, which keeps a flush invisible). No pruning: a series is placed by its full label set, so no selector can safely skip a member.
+- Merge and dedup are 6.2/6.3's (highest generation per timestamp; `(timestamp, line)` for logs).
+- The store is sharded by a hash ring over `OBS_STORE_URL` and replicated to `OBS_STORE_REPLICATION_FACTOR` stores with a per-key flush quorum; reads tolerate a minority of stores down.
+- A bounded in-memory straggler queue re-sends a store's missed copy after a quorum flush.
+- Stores can be added (staged) and removed (staged, with a handoff that copies the leaving store's data to its new owners).
+- The compactor maintains every store. Compose and Helm split run 4 stores at store RF 3.
+
+**Why the scope grew:** the roadmap's "multiple ingesters/stores" was taken literally at planning time (2026-10-11): sharding the store, replicating it, and supporting store membership changes were folded in rather than left as a later phase.
 
 **DoD:**
-- Querying through gateway returns complete results across shards.
-- Duplicate replicated samples/log lines are deduplicated.
-- Integration tests cover multi-ingester ingest → query.
+- Querying through the gateway returns complete, deduplicated results across ingesters and stores.
+- One store down fails neither flushes nor reads; two stores sharing a key fail clearly (`503`), never with a partial answer.
+- A store can be added and removed without losing data.
+- Integration tests cover multi-ingester, multi-store ingest → flush → query, outages, and membership changes.
 
 ### Phase 6.5 — Multi-Tenant Boundaries
 
