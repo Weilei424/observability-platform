@@ -154,7 +154,7 @@ func TestSplitConfigMapsLoadAndReachTheirPeers(t *testing.T) {
 			if o.Data["OBS_TARGET"] != component {
 				t.Fatalf("OBS_TARGET = %q, want %q", o.Data["OBS_TARGET"], component)
 			}
-			for _, k := range []string{"OBS_TARGET", "OBS_INGESTER_URL", "OBS_STORE_URL", "OBS_QUERIER_URL"} {
+			for _, k := range []string{"OBS_TARGET", "OBS_INGESTER_URL", "OBS_STORE_URL", "OBS_QUERIER_URL", "OBS_INGESTER_SELF_URL"} {
 				t.Setenv(k, "")
 			}
 			for k, v := range o.Data {
@@ -430,7 +430,8 @@ func TestSplitStatelessComponentsMountNoVolume(t *testing.T) {
 // not bypass that guard.
 func TestSplitRejectsTemplateOwnedConfigKeys(t *testing.T) {
 	helmAvailable(t)
-	for _, key := range []string{"config.OBS_TARGET=gateway", "config.OBS_STORE_URL=http://elsewhere:8080", "config.OBS_REPLICATION_FACTOR=1"} {
+	for _, key := range []string{"config.OBS_TARGET=gateway", "config.OBS_STORE_URL=http://elsewhere:8080", "config.OBS_REPLICATION_FACTOR=1",
+		"config.OBS_INGESTER_SELF_URL=http://elsewhere:8080"} {
 		out, err := exec.Command("helm", "template", "backend", backendChart,
 			"--set", "topology=split", "--set-string", key).CombinedOutput()
 		if err == nil {
@@ -800,5 +801,72 @@ func TestSplitQuerierQuorumAboveGatewayQuorumFails(t *testing.T) {
 	if out, err := exec.Command("helm", "template", "backend", backendChart, "--set", "topology=split",
 		"--set", "split.replicationFactor=2", "--set", "split.querier.replicationFactor=3").CombinedOutput(); err != nil {
 		t.Errorf("gateway RF 2 with querier RF 3 (quorum 2 each) failed: %v\n%.400s", err, out)
+	}
+}
+
+// Each ingester pod is told its own URL, built from its pod name, and every
+// one of them is exactly an entry of the querier's ring: the chart's two
+// spellings of a member must agree, or every request would be refused as
+// misdirected. The setting is optional to the binary, so only this test
+// notices if the chart drops it.
+func TestSplitIngesterPodsKnowTheirOwnURL(t *testing.T) {
+	for _, replicas := range []int{1, 3, 5} {
+		t.Run(fmt.Sprint(replicas), func(t *testing.T) {
+			objs := renderSplit(t, fmt.Sprintf("split.ingester.replicas=%d", replicas), "split.replicationFactor=1", "service.port=9090")
+			var ring []string
+			var sts *k8sObject
+			for i, o := range objs {
+				if o.Kind == "ConfigMap" && o.Data["OBS_TARGET"] == "querier" {
+					ring = strings.Split(o.Data["OBS_INGESTER_URL"], ",")
+				}
+				if o.Kind == "StatefulSet" && splitNames[o.Metadata.Name] == "ingester" {
+					sts = &objs[i]
+				}
+				if o.Kind == "ConfigMap" {
+					if _, ok := o.Data["OBS_INGESTER_SELF_URL"]; ok {
+						t.Errorf("ConfigMap %s carries OBS_INGESTER_SELF_URL; each pod's comes from its own name", o.Metadata.Name)
+					}
+				}
+			}
+			if sts == nil || len(ring) != replicas {
+				t.Fatalf("ingester StatefulSet found = %v, querier ring = %v; want %d members", sts != nil, ring, replicas)
+			}
+			env := sts.Spec.Template.Spec.Containers[0].Env
+			podName, self := -1, -1
+			var tmpl string
+			for i, e := range env {
+				switch e.Name {
+				case "POD_NAME":
+					if e.ValueFrom == nil || e.ValueFrom.FieldRef == nil || e.ValueFrom.FieldRef.FieldPath != "metadata.name" {
+						t.Fatalf("POD_NAME is not the pod's metadata.name")
+					}
+					podName = i
+				case "OBS_INGESTER_SELF_URL":
+					self, tmpl = i, e.Value
+				}
+			}
+			// Kubernetes expands $(POD_NAME) only from a variable defined earlier.
+			if podName < 0 || self < 0 || podName > self {
+				t.Fatalf("env = %+v; want POD_NAME before OBS_INGESTER_SELF_URL", env)
+			}
+			for i := range replicas {
+				url := strings.ReplaceAll(tmpl, "$(POD_NAME)", fmt.Sprintf("%s-%d", sts.Metadata.Name, i))
+				if url != ring[i] {
+					t.Errorf("pod %d calls itself %q; the ring lists %q", i, url, ring[i])
+				}
+				t.Setenv("OBS_TARGET", "ingester")
+				t.Setenv("OBS_STORE_URL", "http://store:1")
+				t.Setenv("OBS_INGESTER_URL", "")
+				t.Setenv("OBS_QUERIER_URL", "")
+				t.Setenv("OBS_INGESTER_SELF_URL", url)
+				cfg, err := config.Load()
+				if err != nil {
+					t.Fatalf("config.Load with pod %d's self URL: %v", i, err)
+				}
+				if cfg.IngesterSelfURL != url {
+					t.Errorf("pod %d's self URL normalizes to %q, not the %q the gateway sends", i, cfg.IngesterSelfURL, url)
+				}
+			}
+		})
 	}
 }
