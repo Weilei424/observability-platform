@@ -721,7 +721,10 @@ records the decisions and where the code corrected the spec.
   winner may be deleted before the one holding its loser, superseded sources all move
   into `tmp/` before any is removed, and startup reads blocks a crash left there as
   witnesses before it clears `tmp/`, so the live loser is still reclaimed
-  (`TestNewBlockStore_TieSourceLeftByAPartialRetireIsReclaimed`). An ingester advertises generation support
+  (`TestNewBlockStore_TieSourceLeftByAPartialRetireIsReclaimed`). A source already
+  staged in `tmp/` is left there until every other is out of `blocks/`, and `tmp/` is
+  cleared only then, so a restart whose move fails keeps the witness for the next
+  (`TestNewBlockStore_FailedRetireKeepsTheStagedWitness`). An ingester advertises generation support
   (`X-Obs-Push-Generations`), and the gateway sends generations only to one that has, so
   a rolling upgrade from 6.2 never sends an old ingester a sample it would refuse
   (`TestNewGatewayOverOldIngestersMeetsQuorum`); asking an ingester it hasn't heard from
@@ -739,7 +742,10 @@ records the decisions and where the code corrected the spec.
   client counts as an outage and answers by dropping its pooled connections
   (`TestRouterDoesNotCountOneIngesterTwice`,
   `TestClientTreatsMisdirectedAsUnavailableAndRedials`,
-  `TestIngesterRefusesAnotherMembersRequest`). A request without the header
+  `TestIngesterRefusesAnotherMembersRequest`); since the binary takes the setting as
+  optional, render tests pin that every Compose ingester and every chart pod gets
+  exactly its ring entry (`TestComposeSplitIngestersKnowTheirOwnURL`,
+  `TestSplitIngesterPodsKnowTheirOwnURL`). A request without the header
   passes, so a rolling upgrade keeps working; an ingester without a self URL
   checks nothing.
 - **RF changes.** `OBS_REPLICATION_FACTOR` must be equal on the gateway and querier
