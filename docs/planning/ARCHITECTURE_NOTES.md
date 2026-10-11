@@ -728,7 +728,10 @@ records the decisions and where the code corrected the spec.
   (`X-Obs-Push-Generations`), and the gateway sends generations only to one that has, so
   a rolling upgrade from 6.2 never sends an old ingester a sample it would refuse
   (`TestNewGatewayOverOldIngestersMeetsQuorum`); asking an ingester it hasn't heard from
-  shares the push's one timeout (`TestRouterAskAndPushToAnUnknownIngesterShareOneTimeout`).
+  shares the push's one timeout (`TestRouterAskAndPushToAnUnknownIngesterShareOneTimeout`),
+  and a failed ask fails that replica's push rather than sending the batch without a
+  generation, which a 6.3 ingester would stamp on arrival
+  (`TestRouterSendsNothingWhenTheGenerationAskFails`).
   Writes sent straight to an ingester still take its own generation;
   `TestMergeHeadsOverwriteSkewWindow` pins that rule for ingester-assigned generations.
 - **Member identity (found by the Compose smoke).** The two-down drill sometimes
