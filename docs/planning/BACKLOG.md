@@ -927,7 +927,8 @@ Already delivered by 6.2/6.3 and kept: merge metrics by series/time, merge logs 
 **Verification**
 - [x] Integration (3 ingesters RF 3, 4 stores R_s 3): sharded flush read back with each store holding exactly its keys; one store down (and its copies arrive after it returns); two down (flush fails, reads `503`, recovery); compaction per store; add a store; remove a store with handoff then read while skipping one store; parallel ingester reads; restart persistence — `tests/integration` `TestStoreClusterFlushedDataIsShardedAndReadBack`, `TestStoreClusterOneStoreDown`, `TestStoreClusterTwoStoresDown`, `TestStoreClusterCompactsEveryStore`, `TestStoreClusterAddStore`, `TestStoreClusterRemoveStoreWithHandoff`, `TestStoreClusterReadsIngestersInParallel`, `TestStoreClusterRestartKeepsStores`
 - [x] Render tests: Compose and Helm store self URLs equal ring entries; R_s rendered and bounded; staging refusals — `TestComposeSplitStoresKnowTheirOwnURL`, `TestSplitStorePodsKnowTheirOwnURL`, `TestComposeSplitStoreReplication`, `TestSplitStoreReplicationRendered`, `TestStoreStagingReadsTheRunningIngesters`
-- [ ] `go test -race ./...`, lint, `make smoke-compose-split`, `make smoke-compose`; kind split in CI
+- [x] `go test -race ./...`, lint, `make smoke-compose-split` 123/0, `make smoke-compose` (all-in-one) 71/0, all on 2026-10-12
+- [ ] Verify: kind split in CI with four store pods each holding blocks after a drain (local kind could not start a cluster)
 
 ### Phase 6.5 — Multi-Tenant Boundaries
 - [ ] Read tenant ID from request header
