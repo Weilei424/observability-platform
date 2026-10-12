@@ -13,7 +13,17 @@ component's own port. This is not a public API:
 The ingester serves the six read routes over its in-memory heads, plus the two
 push routes; the store serves the six over its blocks and log chunks, plus six
 routes of its own, the handoff route among them. The
-querier, ingester, and compactor call them through `internal/rpc`'s clients.
+querier, ingester, and compactor call them through `internal/rpc`'s clients,
+and a store calls the other stores' flush-in routes during a handoff.
+
+`OBS_STORE_URL` is a comma-separated list on the ingester, querier, and
+compactor, normalized and de-duplicated like `OBS_INGESTER_URL`; one URL is a
+one-store ring. The ingester sends each flushed series or stream to the
+`OBS_STORE_REPLICATION_FACTOR` (R_s) stores the store ring gives its key, so
+one flush is several flush-in requests, one per store, each carrying only the
+keys that store owns. The querier reads every store, and the compactor drives
+each store's block maintenance in turn
+([../architecture/components.md](../architecture/components.md)).
 
 ## Encoding
 
@@ -39,7 +49,7 @@ Errors are `{"error": "..."}`:
 |---|---|
 | `400` | A malformed or invalid request |
 | `413` | A flush body over 64 MiB, or any other body over 1 MiB. The public API caps a selector at 128 KiB, which JSON escaping cannot grow past 768 KiB, so a query never meets this limit |
-| `421` | An ingester was addressed as another member (see below) |
+| `421` | An ingester or store was addressed as another member (see below) |
 | `500` | The component failed while serving the request |
 
 A caller treats a refused connection, a timeout, any `5xx`, or a `421` as the
@@ -48,15 +58,17 @@ Any other `4xx` means the two components disagree about this protocol — a bug 
 and a query answers `500`.
 
 Every request carries `X-Obs-Member`: the base URL the caller meant to reach,
-as the ring lists it. An ingester given its own URL (`OBS_INGESTER_SELF_URL`)
-refuses, with `421`, a request whose header names another member; one without
-the header passes. A connection can reach a different ingester than its URL
-names — when containers restart, Docker's DNS can briefly answer one member's
-name with an address another has just taken, and keep-alive then holds that
-connection — and without the check that ingester's one acknowledgement would
-count twice toward a write quorum. On a `421` the caller drops its pooled
-connections, so its next request dials and resolves afresh. The Compose split
-file and the Helm chart set each ingester's own URL.
+as the ring lists it. An ingester given its own URL (`OBS_INGESTER_SELF_URL`),
+or a store given its own (`OBS_STORE_SELF_URL`), refuses, with `421` `{"error":
+"this member is <self>, not <member>"}`, a request whose header names another
+member; one without the header passes, so an operator's `curl` needs none. A
+connection can reach a different member than its URL names — when containers
+restart, Docker's DNS can briefly answer one member's name with an address
+another has just taken, and keep-alive then holds that connection — and
+without the check that member's one acknowledgement would count twice toward
+a write or flush quorum. On a `421` the caller drops its pooled connections,
+so its next request dials and resolves afresh. The Compose split file and the
+Helm chart set every ingester's and every store's own URL.
 
 ## Reads — ingester and store
 
@@ -126,8 +138,14 @@ As their metrics counterparts, over log streams.
 ## Flush-in — store only
 
 A flush answers only once the data is durable and readable: the ingester drops
-what it sent when it receives the `200`, and that order is what keeps a flush
-invisible to queries ([../architecture/components.md](../architecture/components.md)).
+what it sent once enough stores have answered `200`, and that order is what
+keeps a flush invisible to queries
+([../architecture/components.md](../architecture/components.md)). One batch of
+a head flush goes to several stores at once, each sent the series or streams
+it owns; the batch counts as flushed when every key in it has `200`s from
+W_s = R_s/2 + 1 of its R_s stores. A store that failed its part while every
+key still reached W_s is sent the same body again later, from the ingester's
+in-memory retry queue ([limitations.md](limitations.md)).
 
 ```http
 POST /internal/v1/metrics/flush
@@ -158,7 +176,8 @@ rather than silently replaced.
 
 Both flush routes answer `503` `{"error":"store is handing off: it takes no new
 flushes"}` once a handoff has closed the store's flush barrier, until the store
-restarts ([Handoff](#handoff-store-only)).
+restarts ([Handoff](#handoff-store-only)). The ingester's own drain counts
+that `503` like any other store outage.
 
 ## Push — ingester only
 
@@ -218,14 +237,16 @@ POST /internal/v1/drain
 
 First a write barrier: the ingester stops taking writes, on every write route
 — public and internal, metrics and logs — and waits for the ones already
-accepted to finish. Then it flushes its whole head into the store — every
+accepted to finish. Then it flushes its whole head to the stores — every
 metrics chunk, including the open ones a normal flush leaves, and every
 buffered log line. All of it, including any wait for a flush already in
 progress, happens within 40 seconds. It answers `200` `{"drained":true}` only
-when everything reached the store and the head was empty afterwards, and `503`
-`{"error":"drain incomplete: …"}` otherwise: the store unreachable or the
-deadline passed. A `200` therefore covers every write the ingester ever
-acknowledged. Removing an ingester waits for this `200` after the gateway stops
+when every key reached its store quorum (W_s of its R_s stores) and the head
+was empty afterwards, and `503` `{"error":"drain incomplete: …"}` otherwise:
+too many of a key's stores unreachable, or the deadline passed. A `200`
+therefore covers every write the ingester ever acknowledged. It does not wait
+for the retry queue: a store that missed its copy during the drain gets it
+from the queue only while this ingester keeps running. Removing an ingester waits for this `200` after the gateway stops
 writing to it and before the querier stops reading it
 ([../runbooks/split-demo.md](../runbooks/split-demo.md)). An ingester also runs
 one such drain as the last step of a graceful stop, within the process's
@@ -240,7 +261,7 @@ it restarts.
 
 | Status | Meaning |
 |---|---|
-| `200` | every write this ingester acknowledged is in the store |
+| `200` | every write this ingester acknowledged is on a quorum of its stores |
 | `503` | the drain did not complete; what is left stays in the WAL, and writes stay refused |
 
 ## Handoff — store only
@@ -253,7 +274,9 @@ POST /internal/v1/handoff
 {"stores":["http://store-b:8080","http://store-c:8080"],"replication_factor":2}
 ```
 
-A leaving store copies everything it holds to the stores that remain.
+A leaving store copies everything it holds to the stores that remain. It
+handles one leaving store: remove stores one handoff at a time
+([../runbooks/split-demo.md](../runbooks/split-demo.md#add-or-remove-a-store)).
 `stores` is the target ring, the stores that stay; `replication_factor` is how
 many owners each series and stream has on it. The body is checked first, and a
 refused body leaves the store taking flushes. `400` for:
@@ -265,8 +288,9 @@ refused body leaves the store taking flushes. `400` for:
 - a target equal to the store's own URL, when `OBS_STORE_SELF_URL` is set.
 
 Without a self URL the store cannot spot itself: listing the leaving store
-among the targets fails later, with `503`, because its own barrier refuses the
-copy.
+among the targets fails later, with `503` rather than `400`, because its own
+barrier refuses the copy. The Compose split file and the Helm chart set the
+self URL, so there the mistake answers `400`.
 
 Then the barrier closes, waiting for flushes already admitted to finish, and it
 stays closed until the store restarts, even when the handoff fails. Both
@@ -290,6 +314,9 @@ before the error. Retry until `200`: a retry resends everything, and the
 duplicates it leaves on the owners collapse on read and at compaction.
 
 ## Block maintenance — store only, driven by the compactor
+
+The compactor calls these on each store in `OBS_STORE_URL` in turn; a store
+that fails is logged and skipped, and the others are still maintained.
 
 ```http
 GET /internal/v1/metrics/blocks
