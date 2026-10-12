@@ -297,7 +297,11 @@ stays closed until the store restarts, even when the handoff fails. Both
 flush-in routes answer `503` `{"error":"store is handing off: it takes no new
 flushes"}`. The store then sends every metrics series, then every log stream,
 to every owner on the target ring through their flush-in routes, in batches.
-Every owner must acknowledge every batch. The whole handoff is bounded by 10
+Every owner must acknowledge every batch. Send the deployment's
+`OBS_STORE_REPLICATION_FACTOR` as `replication_factor`: the route accepts any
+value from 1 to the target count, but a lower one gives keys fewer new owners
+and can leave a key with fewer than W_s copies, so reads may be silently
+incomplete if one of its stores is down. The whole handoff is bounded by 10
 minutes; each batch request by the store's request timeout.
 
 `{"series":1204,"streams":38}` — the distinct series and the streams
