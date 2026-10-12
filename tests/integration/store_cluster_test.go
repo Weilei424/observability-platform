@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"net/http"
 	"slices"
@@ -16,6 +17,7 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/ring"
 	"github.com/masonwheeler/observability-platform/internal/rpc"
+	"github.com/masonwheeler/observability-platform/internal/storage/index"
 )
 
 // The store cluster every test here runs on unless noted: 3 ingesters at RF 3,
@@ -154,6 +156,29 @@ func streamReplicaSet(t *testing.T, urls []string, svc string, rs int) []string 
 	return reps
 }
 
+// storeLines returns the lines {service=svc} holds on the store at storeURL
+// in [minNs, maxNs], read straight from its own select route, keyed by
+// timestamp.
+func storeLines(t *testing.T, storeURL, svc string, minNs, maxNs int64) map[int64]string {
+	t.Helper()
+	cl, err := rpc.NewClient("store", storeURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sds, err := rpc.NewLogsSource(cl).SelectStreams(context.Background(),
+		[]index.Pair{{Name: "service", Value: svc}}, minNs, maxNs)
+	if err != nil {
+		t.Fatalf("select {service=%q} on %s: %v", svc, storeURL, err)
+	}
+	out := map[int64]string{}
+	for _, sd := range sds {
+		for _, e := range sd.Entries {
+			out[e.TimestampNs] = e.Line
+		}
+	}
+	return out
+}
+
 // storeBlockCount is how many metrics blocks the store at storeURL lists.
 func storeBlockCount(t *testing.T, storeURL string) int {
 	t.Helper()
@@ -261,6 +286,9 @@ func TestStoreClusterOneStoreDown(t *testing.T) {
 			}
 		}
 		return true
+	})
+	eventually(t, "the straggler queue to give the returned store its log copy", func() bool {
+		return maps.Equal(storeLines(t, down, svc, tsNs-1, tsNs+10), wantLogs)
 	})
 	for _, name := range names { // and nothing it does not own
 		if !slices.Contains(owned, name) && storeHolds(t, down, name) {
@@ -418,11 +446,18 @@ func TestStoreClusterRemoveStoreWithHandoff(t *testing.T) {
 	base := time.Now().UnixMilli()
 	names := storeNames("remove_metric", 30)
 	c.ingestEach(t, names, base)
+	leaving, remaining := c.storeURLs[3], slices.Clone(c.storeURLs[:3])
+	// A stream on the leaving store, so the handoff must carry it.
+	svc := ""
+	for i := 0; svc == ""; i++ {
+		if cand := fmt.Sprintf("remove-%d", i); slices.Contains(streamReplicaSet(t, c.storeURLs, cand, scRS), leaving) {
+			svc = cand
+		}
+	}
 	tsNs := base * 1_000_000
-	wantLogs := c.pushLines(t, "remove-svc", tsNs, 5)
+	wantLogs := c.pushLines(t, svc, tsNs, 5)
 	c.drainAll(t)
 
-	leaving, remaining := c.storeURLs[3], slices.Clone(c.storeURLs[:3])
 	// Series the handoff must copy: held by the leaving store and missing from
 	// a remaining one (every key misses exactly one of the four stores).
 	var needCopy []string
@@ -469,13 +504,21 @@ func TestStoreClusterRemoveStoreWithHandoff(t *testing.T) {
 			t.Fatalf("after the handoff %s is held by %v, want every remaining store %v", name, got, want)
 		}
 	}
+	if counts.Streams < 1 {
+		t.Errorf("handoff sent %d streams, want at least the one on the leaving store", counts.Streams)
+	}
+	for _, u := range remaining { // every owner on the three-store ring
+		if got := storeLines(t, u, svc, tsNs-1, tsNs+10); !maps.Equal(got, wantLogs) {
+			t.Fatalf("after the handoff store %s holds %v for %s, want %v", u, got, svc, wantLogs)
+		}
+	}
 
 	setStores(c.querier, remaining)
 	setStores(c.compactor, remaining)
 	c.stores[3].stop()
 	c.stores[0].stop() // a read that also skips one store
 	c.assertAllRead(t, "after the removal with one more store down", names, base)
-	status, entries, rawBody := c.lokiQueryRange(t, `{service="remove-svc"}`, tsNs-1, tsNs+10)
+	status, entries, rawBody := c.lokiQueryRange(t, fmt.Sprintf(`{service=%q}`, svc), tsNs-1, tsNs+10)
 	if status != http.StatusOK {
 		t.Fatalf("loki query_range after the removal = %d: %s", status, rawBody)
 	}
@@ -498,17 +541,26 @@ func TestStoreClusterReadsIngestersInParallel(t *testing.T) {
 	if v, code, _ := c.instant(t, "parallel_metric", base); v != "9" { // warm the connections
 		t.Fatalf("warm-up read = %q (%d), want 9", v, code)
 	}
-	start := time.Now()
-	v, code, _ := c.instant(t, "parallel_metric", base)
-	took := time.Since(start)
-	if v != "9" {
-		t.Fatalf("timed read = %q (%d), want 9", v, code)
+	// The fastest of three timed reads: one slow scheduling hiccup under
+	// -race on a loaded machine must not fail the test. A sequential read of
+	// three ingesters takes at least 900ms; a parallel one about 300ms.
+	var took time.Duration
+	for i := range 3 {
+		start := time.Now()
+		v, code, _ := c.instant(t, "parallel_metric", base)
+		d := time.Since(start)
+		if v != "9" {
+			t.Fatalf("timed read %d = %q (%d), want 9", i, v, code)
+		}
+		if i == 0 || d < took {
+			took = d
+		}
 	}
 	if took < delay {
-		t.Fatalf("timed read took %v, under one delay of %v: the delay is not applied", took, delay)
+		t.Fatalf("fastest timed read took %v, under one delay of %v: the delay is not applied", took, delay)
 	}
-	if took >= 700*time.Millisecond {
-		t.Fatalf("timed read took %v, want under 700ms: three %v ingester reads ran sequentially", took, delay)
+	if took >= 800*time.Millisecond {
+		t.Fatalf("fastest timed read took %v, want under 800ms: three %v ingester reads ran sequentially", took, delay)
 	}
 }
 
