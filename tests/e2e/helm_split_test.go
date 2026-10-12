@@ -233,7 +233,7 @@ func TestSplitProbePathsExist(t *testing.T) {
 
 func TestSplitRefusesMoreThanOneSingleton(t *testing.T) {
 	helmAvailable(t)
-	for component, mention := range map[string]string{"store": "Phase 6.4", "compactor": "two compactors"} {
+	for component, mention := range map[string]string{"compactor": "two compactors"} {
 		out, err := exec.Command("helm", "template", "backend", backendChart,
 			"--set", "topology=split", "--set", "split."+component+".replicas=2").CombinedOutput()
 		if err == nil {
@@ -431,7 +431,8 @@ func TestSplitStatelessComponentsMountNoVolume(t *testing.T) {
 func TestSplitRejectsTemplateOwnedConfigKeys(t *testing.T) {
 	helmAvailable(t)
 	for _, key := range []string{"config.OBS_TARGET=gateway", "config.OBS_STORE_URL=http://elsewhere:8080", "config.OBS_REPLICATION_FACTOR=1",
-		"config.OBS_INGESTER_SELF_URL=http://elsewhere:8080"} {
+		"config.OBS_INGESTER_SELF_URL=http://elsewhere:8080", "config.OBS_STORE_REPLICATION_FACTOR=1",
+		"config.OBS_STORE_SELF_URL=http://elsewhere:8080"} {
 		out, err := exec.Command("helm", "template", "backend", backendChart,
 			"--set", "topology=split", "--set-string", key).CombinedOutput()
 		if err == nil {
@@ -599,11 +600,113 @@ func TestSplitDefaultsToThreeIngesters(t *testing.T) {
 	}
 }
 
-func TestSplitStoreStaysSingle(t *testing.T) {
-	out, err := exec.Command("helm", "template", "obs", backendChart, "--set", "topology=split",
-		"--set", "split.store.replicas=2").CombinedOutput()
-	if err == nil || !strings.Contains(string(out), "Phase 6.4") {
-		t.Errorf("two stores rendered (err %v), want a failure pointing at Phase 6.4\n%.300s", err, out)
+// The store runs as four pods by default (spec §9.2): the querier and
+// compactor read every one, the ingesters flush to all of them.
+func TestSplitDefaultsToFourStores(t *testing.T) {
+	want := make([]string, 4)
+	for i := range want {
+		want[i] = fmt.Sprintf("http://observability-store-%d.observability-store-headless:8080", i)
+	}
+	seen := 0
+	for _, o := range renderSplit(t) {
+		if o.Kind == "StatefulSet" && splitNames[o.Metadata.Name] == "store" && o.Spec.Replicas != 4 {
+			t.Errorf("default store replicas = %d, want 4", o.Spec.Replicas)
+		}
+		if o.Kind != "ConfigMap" {
+			continue
+		}
+		target := o.Data["OBS_TARGET"]
+		got, has := o.Data["OBS_STORE_URL"]
+		switch target {
+		case "ingester", "querier", "compactor":
+			seen++
+			if got != strings.Join(want, ",") {
+				t.Errorf("%s OBS_STORE_URL = %q, want %q", target, got, strings.Join(want, ","))
+			}
+		default:
+			if has {
+				t.Errorf("%s ConfigMap carries OBS_STORE_URL=%q, want none", target, got)
+			}
+		}
+	}
+	if seen != 3 {
+		t.Errorf("saw OBS_STORE_URL on %d ConfigMaps, want 3 (ingester, querier, compactor)", seen)
+	}
+}
+
+// The store replication factor reaches the ingester (which flushes each block
+// to that many stores) and the querier (which dedups that many copies) only:
+// the compactor refuses it. The chart refuses a factor above the stores the
+// ingesters flush to, and a write prefix longer than the store list.
+func TestSplitStoreReplicationRendered(t *testing.T) {
+	helmAvailable(t)
+	for _, o := range renderSplit(t) {
+		if o.Kind != "ConfigMap" || o.Data["OBS_TARGET"] == "" {
+			continue
+		}
+		target := o.Data["OBS_TARGET"]
+		got, has := o.Data["OBS_STORE_REPLICATION_FACTOR"]
+		if target == "ingester" || target == "querier" {
+			if got != "3" {
+				t.Errorf("%s OBS_STORE_REPLICATION_FACTOR = %q, want \"3\"", target, got)
+			}
+		} else if has {
+			t.Errorf("%s ConfigMap holds OBS_STORE_REPLICATION_FACTOR=%q, want none", target, got)
+		}
+	}
+	for _, tc := range []struct {
+		sets []string
+		want string
+	}{
+		{[]string{"split.storeReplicationFactor=5"}, "split.storeReplicationFactor"},
+		{[]string{"split.store.writeReplicas=2"}, "split.storeReplicationFactor"},
+		{[]string{"split.store.writeReplicas=5"}, "split.store.writeReplicas"},
+		{[]string{"split.store.replicas=4", "split.store.writeReplicas=5"}, "split.store.writeReplicas"},
+		// The schema refuses these; Helm 3 and 4 spell the path differently.
+		{[]string{"split.storeReplicationFactor=0"}, "storeReplicationFactor"},
+		{[]string{"split.store.replicas=0"}, "replicas"},
+	} {
+		args := []string{"template", "obs", backendChart, "--set", "topology=split"}
+		for _, s := range tc.sets {
+			args = append(args, "--set", s)
+		}
+		out, err := exec.Command("helm", args...).CombinedOutput()
+		if err == nil || !strings.Contains(string(out), tc.want) {
+			t.Errorf("%v rendered (err %v), want a failure naming %q\n%.400s", tc.sets, err, tc.want, out)
+		}
+	}
+	// A staged store removal: the ingesters flush to three of four stores.
+	if out, err := exec.Command("helm", "template", "obs", backendChart, "--set", "topology=split",
+		"--set", "split.store.writeReplicas=3").CombinedOutput(); err != nil {
+		t.Errorf("writeReplicas=3 of 4 stores at R_s 3 failed: %v\n%.400s", err, out)
+	}
+}
+
+// The ingester pod template records the stores its pods flush to, which the
+// store staging check reads back on the next upgrade.
+func TestSplitIngesterRecordsItsStoreCount(t *testing.T) {
+	const key = "observability-platform.dev/store-count"
+	for _, tc := range []struct {
+		sets []string
+		want string
+	}{
+		{nil, "4"},
+		{[]string{"split.store.writeReplicas=3"}, "3"},
+	} {
+		got := map[string]string{}
+		for _, o := range renderSplit(t, tc.sets...) {
+			if o.Kind == "StatefulSet" || o.Kind == "Deployment" {
+				got[splitNames[o.Metadata.Name]] = o.Spec.Template.Metadata.Annotations[key]
+			}
+		}
+		for component, v := range got {
+			if component == "ingester" && v != tc.want {
+				t.Errorf("%v: ingester pod template %s = %q, want %q", tc.sets, key, v, tc.want)
+			}
+			if component != "ingester" && v != "" {
+				t.Errorf("%v: %s pod template carries %s=%q, want none", tc.sets, component, key, v)
+			}
+		}
 	}
 }
 
@@ -865,6 +968,90 @@ func TestSplitIngesterPodsKnowTheirOwnURL(t *testing.T) {
 				}
 				if cfg.IngesterSelfURL != url {
 					t.Errorf("pod %d's self URL normalizes to %q, not the %q the gateway sends", i, cfg.IngesterSelfURL, url)
+				}
+			}
+		})
+	}
+}
+
+// Each store pod is told its own URL, built from its pod name, and every one of
+// them is exactly an entry of the querier's and compactor's store list, so the
+// store's X-Obs-Member check matches what they send. The ingesters' list is the
+// split.store.writeReplicas prefix of it.
+func TestSplitStorePodsKnowTheirOwnURL(t *testing.T) {
+	for _, tc := range []struct {
+		replicas, write int
+		sets            []string
+	}{
+		{1, 1, []string{"split.store.replicas=1", "split.storeReplicationFactor=1"}},
+		{4, 4, nil},
+		{4, 3, []string{"split.store.writeReplicas=3"}},
+	} {
+		t.Run(fmt.Sprintf("%d-%d", tc.replicas, tc.write), func(t *testing.T) {
+			objs := renderSplit(t, append([]string{"service.port=9090"}, tc.sets...)...)
+			lists := map[string][]string{}
+			var sts *k8sObject
+			for i, o := range objs {
+				if o.Kind == "ConfigMap" {
+					if v := o.Data["OBS_STORE_URL"]; v != "" {
+						lists[o.Data["OBS_TARGET"]] = strings.Split(v, ",")
+					}
+					if _, ok := o.Data["OBS_STORE_SELF_URL"]; ok {
+						t.Errorf("ConfigMap %s carries OBS_STORE_SELF_URL; each store pod's comes from its own name", o.Metadata.Name)
+					}
+				}
+				if o.Kind == "StatefulSet" && splitNames[o.Metadata.Name] == "store" {
+					sts = &objs[i]
+				}
+			}
+			if sts == nil || sts.Spec.Replicas != tc.replicas {
+				t.Fatalf("store StatefulSet found = %v; want %d replicas", sts != nil, tc.replicas)
+			}
+			for _, reader := range []string{"querier", "compactor"} {
+				if len(lists[reader]) != tc.replicas {
+					t.Fatalf("%s OBS_STORE_URL = %v, want %d stores", reader, lists[reader], tc.replicas)
+				}
+			}
+			if !slices.Equal(lists["querier"], lists["compactor"]) {
+				t.Errorf("querier reads %v, compactor %v; want the same stores", lists["querier"], lists["compactor"])
+			}
+			if ing := lists["ingester"]; len(ing) != tc.write || !slices.Equal(ing, lists["querier"][:tc.write]) {
+				t.Errorf("ingester flushes to %v, want the first %d of %v", ing, tc.write, lists["querier"])
+			}
+			env := sts.Spec.Template.Spec.Containers[0].Env
+			podName, self := -1, -1
+			var tmpl string
+			for i, e := range env {
+				switch e.Name {
+				case "POD_NAME":
+					if e.ValueFrom == nil || e.ValueFrom.FieldRef == nil || e.ValueFrom.FieldRef.FieldPath != "metadata.name" {
+						t.Fatalf("POD_NAME is not the pod's metadata.name")
+					}
+					podName = i
+				case "OBS_STORE_SELF_URL":
+					self, tmpl = i, e.Value
+				}
+			}
+			// Kubernetes expands $(POD_NAME) only from a variable defined earlier.
+			if podName < 0 || self < 0 || podName > self {
+				t.Fatalf("env = %+v; want POD_NAME before OBS_STORE_SELF_URL", env)
+			}
+			for i := range tc.replicas {
+				url := strings.ReplaceAll(tmpl, "$(POD_NAME)", fmt.Sprintf("%s-%d", sts.Metadata.Name, i))
+				if url != lists["querier"][i] {
+					t.Errorf("store pod %d calls itself %q; the querier lists %q", i, url, lists["querier"][i])
+				}
+				for _, k := range []string{"OBS_INGESTER_URL", "OBS_STORE_URL", "OBS_QUERIER_URL", "OBS_INGESTER_SELF_URL", "OBS_STORE_REPLICATION_FACTOR"} {
+					t.Setenv(k, "")
+				}
+				t.Setenv("OBS_TARGET", "store")
+				t.Setenv("OBS_STORE_SELF_URL", url)
+				cfg, err := config.Load()
+				if err != nil {
+					t.Fatalf("config.Load with store pod %d's self URL: %v", i, err)
+				}
+				if cfg.StoreSelfURL != url {
+					t.Errorf("store pod %d's self URL normalizes to %q, not the %q the querier sends", i, cfg.StoreSelfURL, url)
 				}
 			}
 		})
