@@ -269,6 +269,11 @@ func registeredMetricNames(t *testing.T) map[string]bool {
 	storeReads := observability.NewStoreMetrics()
 	storeReads.StoreReads.WithLabelValues("http://seed-store:8080", "ok").Inc()
 	reg.MustRegister(storeReads.StoreReads)
+	// The compactor's per-store counter, which the docs name; registered alone
+	// for the same reason.
+	passes := observability.NewStoreMetrics()
+	passes.CompactorPass.WithLabelValues("http://seed-store:8080", "ok").Inc()
+	reg.MustRegister(passes.CompactorPass)
 
 	// Gather once and discard the result before the real read below.
 	//
