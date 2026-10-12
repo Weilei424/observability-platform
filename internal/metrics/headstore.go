@@ -150,7 +150,7 @@ func (h *HeadStore) FlushBlockContext(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	sent := false
-	for _, batch := range batchSeriesChunks(snapshot, h.batchBytes, block.MaxChunksPerSeries) {
+	for _, batch := range BatchSeriesChunks(snapshot, h.batchBytes) {
 		batchCtx, cancel := context.WithTimeout(ctx, h.timeout)
 		_, err := h.sink.IngestSeriesChunks(batchCtx, batch)
 		cancel()
@@ -164,6 +164,13 @@ func (h *HeadStore) FlushBlockContext(ctx context.Context) (bool, error) {
 		h.mem.RemoveEmptySeries(id)
 	}
 	return true, nil
+}
+
+// BatchSeriesChunks splits series into flush-sized groups of at most limit
+// estimated wire bytes, capping each series at block.MaxChunksPerSeries chunks
+// per group. See batchSeriesChunks.
+func BatchSeriesChunks(series []SeriesChunks, limit int) [][]SeriesChunks {
+	return batchSeriesChunks(series, limit, block.MaxChunksPerSeries)
 }
 
 // batchSeriesChunks splits series into groups whose estimated encoded request
