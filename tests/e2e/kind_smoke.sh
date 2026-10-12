@@ -355,9 +355,10 @@ fi
 
 if [ "$TOPOLOGY" = split ]; then
     ROLLOUTS="statefulset/observability-ingester statefulset/observability-store deployment/observability-backend deployment/observability-querier deployment/observability-compactor"
-    # One PVC per ingester replica (chart default is 3) plus the store's PVC (1) = 4 total.
-    # If the chart's split.ingester.replicas default changes, update this value.
-    WANT_PVCS=4
+    # One PVC per ingester replica (chart default is 3) plus one per store pod
+    # (chart default is 4) = 7 total. If the chart's split.ingester.replicas or
+    # split.store.replicas default changes, update this value.
+    WANT_PVCS=7
 else
     ROLLOUTS="statefulset/observability-backend"
     WANT_PVCS=1
@@ -369,6 +370,18 @@ for workload in $ROLLOUTS; do
         log_fail "$workload did not roll out"
     fi
 done
+
+# Split only: the store is a four-pod StatefulSet (store RF 3); the rollout
+# above waits for the set, this names the pods so a short set fails clearly.
+if [ "$TOPOLOGY" = split ]; then
+    for i in 0 1 2 3; do
+        if kubectl wait --for=condition=Ready "pod/observability-store-$i" -n "$NS" --timeout="$ROLLOUT_TIMEOUT" >/dev/null 2>&1; then
+            log_pass "observability-store-$i is ready"
+        else
+            log_fail "observability-store-$i is not ready (want four store pods)"
+        fi
+    done
+fi
 
 # The PVCs are the whole point of the StatefulSets; assert every one bound.
 BOUND=$(kubectl get pvc -n "$NS" -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' 2>/dev/null | grep -c '^Bound$')
@@ -798,7 +811,8 @@ wait_for_port "prometheus port-forward is ready" 30 "http://localhost:19090/-/he
 prometheus_target_up() {
     local q want body
     if [ "$TOPOLOGY" = split ]; then
-        q='count(up{service="observability-platform"} == 1)'; want=7
+        # gateway + querier + compactor + 3 ingesters + 4 stores
+        q='count(up{service="observability-platform"} == 1)'; want=10
     else
         q='up{job="observability-platform-backend"}'; want=1
     fi
@@ -910,6 +924,63 @@ if [ "$TOPOLOGY" = split ]; then
     fi
 fi
 kill "$PF_PID" 2>/dev/null; PF_PID=""
+
+# Split only: drain one ingester (a graceful stop flushes its head to the stores
+# at store RF 3), then ask the self-observability Prometheus -- the backend
+# image is distroless, so there is no shell in a pod to ask -- whether the
+# flushes reached quorum and every one of the four stores holds blocks. Each
+# block goes to 3 of the 4 stores, and the ingesters flushed on their earlier
+# restarts, so by now all four hold a share. Polled: scrapes lag the drain.
+if [ "$TOPOLOGY" = split ]; then
+    echo ""
+    echo "-- Draining ingester-0, then checking the store shares --"
+    restart_pod observability-ingester 0
+    kubectl port-forward -n "$NS" svc/observability-prometheus 19090:9090 >/dev/null 2>&1 &
+    PF_PID=$!
+    wait_for_port "prometheus port-forward is ready (store shares)" 30 "http://localhost:19090/-/healthy"
+    # prom_value <promql> -- the first result's value, or 0 when there is none.
+    prom_value() {
+        curl -s --max-time 10 -G "http://localhost:19090/api/v1/query" --data-urlencode "query=$1" 2>/dev/null \
+            | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null
+    }
+    # max_over_time keeps the flush count across the drained ingester's counter
+    # reset, which a plain sum over the live series would lose.
+    FLUSH_Q='sum(max_over_time(obs_ingester_store_flush_total{outcome="full"}[1h]))'
+    flush_ok=0
+    start=$SECONDS
+    while [ $((SECONDS - start)) -lt 120 ]; do
+        v="$(prom_value "$FLUSH_Q")"
+        if awk -v v="${v:-0}" 'BEGIN{exit !(v > 0)}'; then
+            flush_ok=1
+            break
+        fi
+        sleep 3
+    done
+    if [ "$flush_ok" -eq 1 ]; then
+        log_pass "the ingesters' flushes reached every store they were sent to (full outcome count $v)"
+    else
+        log_fail "obs_ingester_store_flush_total{outcome=\"full\"} stayed 0 within 120s of the drain"
+    fi
+    for i in 0 1 2 3; do
+        BLOCKS_Q="obs_blocks_total{component=\"store\",instance=~\"observability-store-$i\\\\..*\"}"
+        blocks_ok=0
+        start=$SECONDS
+        while [ $((SECONDS - start)) -lt 120 ]; do
+            v="$(prom_value "$BLOCKS_Q")"
+            if awk -v v="${v:-0}" 'BEGIN{exit !(v > 0)}'; then
+                blocks_ok=1
+                break
+            fi
+            sleep 3
+        done
+        if [ "$blocks_ok" -eq 1 ]; then
+            log_pass "observability-store-$i holds $v block(s) after the drain"
+        else
+            log_fail "observability-store-$i holds no blocks 120s after the drain (obs_blocks_total = ${v:-0})"
+        fi
+    done
+    kill "$PF_PID" 2>/dev/null; PF_PID=""
+fi
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
