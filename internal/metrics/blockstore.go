@@ -1598,21 +1598,34 @@ func (bs *BlockStore) SelectLabelValues(_ context.Context, name string) ([]strin
 // series held by several blocks appears once per block, each time with only
 // that block's chunks and never twice in one batch: chunks of different blocks
 // may overlap in time, and reads and compaction dedup copies by generation. It
-// returns the number of distinct series exported. A block's data is collected
-// under the read lock and fn runs outside it; fn may do network I/O. ctx is
-// checked between batches.
+// returns the number of distinct series exported.
+//
+// The block list can change while fn runs (compaction, retention, a flush), so
+// blocks are tracked by ID, never by position: each round takes a fresh
+// snapshot of block IDs, exports one not yet exported, and stops when none is
+// left. A block that vanished between snapshot and collection is skipped: its
+// data lives on in the block that replaced it, which a later snapshot shows. A
+// merged block built from already-exported sources is exported again; receivers
+// dedup by generation. A block's data is collected under the read lock and fn
+// runs outside it (fn may do network I/O). ctx is checked between batches.
 func (bs *BlockStore) ExportSeries(ctx context.Context, batchBytes int, fn func([]SeriesChunks) error) (series int, err error) {
 	distinct := make(map[SeriesID]struct{})
-	bs.mu.RLock()
-	n := len(bs.blocks)
-	bs.mu.RUnlock()
-	for i := 0; i < n; i++ {
+	exported := make(map[string]struct{})
+	for {
 		if err := ctx.Err(); err != nil {
 			return len(distinct), err
 		}
-		all, err := bs.collectBlockSeries(i)
+		id, ok := bs.nextUnexportedBlock(exported)
+		if !ok {
+			return len(distinct), nil
+		}
+		all, found, err := bs.collectBlockSeries(id)
 		if err != nil {
 			return len(distinct), err
+		}
+		exported[id] = struct{}{}
+		if !found {
+			continue
 		}
 		for _, batch := range BatchSeriesChunks(all, batchBytes) {
 			if err := ctx.Err(); err != nil {
@@ -1626,29 +1639,47 @@ func (bs *BlockStore) ExportSeries(ctx context.Context, batchBytes int, fn func(
 			}
 		}
 	}
-	return len(distinct), nil
 }
 
-// collectBlockSeries reads every series of the i-th block (if it still exists)
-// with its chunks, sorted by series ID, under the read lock.
-func (bs *BlockStore) collectBlockSeries(i int) ([]SeriesChunks, error) {
+// nextUnexportedBlock returns the ID of a current block not in exported.
+func (bs *BlockStore) nextUnexportedBlock(exported map[string]struct{}) (string, bool) {
 	bs.mu.RLock()
 	defer bs.mu.RUnlock()
-	if i >= len(bs.blocks) {
-		return nil, nil
+	for _, r := range bs.blocks {
+		id := r.Meta().BlockID
+		if _, done := exported[id]; !done {
+			return id, true
+		}
 	}
-	r := bs.blocks[i]
-	var out []SeriesChunks
+	return "", false
+}
+
+// collectBlockSeries reads every series of the block with the given ID, with
+// its chunks, sorted by series ID, under the read lock. found is false if the
+// block is no longer live.
+func (bs *BlockStore) collectBlockSeries(blockID string) (out []SeriesChunks, found bool, err error) {
+	bs.mu.RLock()
+	defer bs.mu.RUnlock()
+	var r *block.Reader
+	for _, br := range bs.blocks {
+		if br.Meta().BlockID == blockID {
+			r = br
+			break
+		}
+	}
+	if r == nil {
+		return nil, false, nil
+	}
 	for _, se := range r.Series() {
 		lbls, err := blockPairsToLabels(se.Labels)
 		if err != nil {
-			return nil, fmt.Errorf("blockstore: export series %d labels: %w", se.ID, err)
+			return nil, true, fmt.Errorf("blockstore: export series %d labels: %w", se.ID, err)
 		}
 		sc := SeriesChunks{ID: SeriesID(se.ID), Labels: lbls}
 		for _, ref := range se.Chunks {
 			c, err := r.ReadChunk(ref)
 			if err != nil {
-				return nil, fmt.Errorf("blockstore: export series %d chunk: %w", se.ID, err)
+				return nil, true, fmt.Errorf("blockstore: export series %d chunk: %w", se.ID, err)
 			}
 			sc.Chunks = append(sc.Chunks, c)
 		}
@@ -1657,5 +1688,5 @@ func (bs *BlockStore) collectBlockSeries(i int) ([]SeriesChunks, error) {
 		}
 	}
 	sort.Slice(out, func(a, b int) bool { return out[a].ID < out[b].ID })
-	return out, nil
+	return out, true, nil
 }
