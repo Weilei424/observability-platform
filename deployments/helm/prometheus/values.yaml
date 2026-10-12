@@ -30,7 +30,12 @@ split:
       - http://observability-ingester-1.observability-ingester-headless:8080
       - http://observability-ingester-2.observability-ingester-headless:8080
     querier: http://observability-querier:8080
-    store: http://observability-store:8080
+    # One URL per store pod; keep it in step with the backend chart's split.store.replicas.
+    store:
+      - http://observability-store-0.observability-store-headless:8080
+      - http://observability-store-1.observability-store-headless:8080
+      - http://observability-store-2.observability-store-headless:8080
+      - http://observability-store-3.observability-store-headless:8080
     compactor: http://observability-compactor:8080
 
 scrapeInterval: 15s
