@@ -75,13 +75,14 @@ filter.
 
 These are properties of the whole system, not of the query languages.
 
-- **One store, one compactor.** The backend runs all-in-one or
+- **One compactor, no multi-tenancy.** The backend runs all-in-one or
   split into five components
   ([../architecture/components.md](../architecture/components.md)). Writes are
   sharded over a ring of ingesters and replicated across `OBS_REPLICATION_FACTOR`
-  of them, but there is one store and one compactor, no parallel query fanout,
-  and no multi-tenancy. Those are Phases 6.4-6.5 in
-  [`../planning/IMPLEMENTATION_PLAN.md`](../planning/IMPLEMENTATION_PLAN.md).
+  of them; flushed data is sharded over a ring of stores and replicated across
+  `OBS_STORE_REPLICATION_FACTOR` of them. There is one compactor and no
+  multi-tenancy (Phase 6.5 in
+  [`../planning/IMPLEMENTATION_PLAN.md`](../planning/IMPLEMENTATION_PLAN.md)).
 - **Ring membership is static.** The gateway and querier read the ingester list
   from `OBS_INGESTER_URL` at startup; adding or removing an ingester takes a
   restart of both. There are no heartbeats, join or leave states, or hot reload.
@@ -100,9 +101,16 @@ These are properties of the whole system, not of the query languages.
   edited by hand, in that order. Both log `ring ready` with `ring=<hash>` of
   the sorted member list at startup: once a change is complete, the two hashes
   must be equal.
-- **Ingesters are read one after another.** The querier reads every ingester in
-  turn, then the store, so read latency grows with the number of ingesters.
-  Parallel fanout is Phase 6.4.
+- **Every read goes to every member; nothing is pruned.** The querier reads
+  every ingester in parallel, then every store in parallel, so read latency is
+  the slowest ingester plus the slowest store, not the sum of all of them
+  (`TestStoreClusterReadsIngestersInParallel`). Every ingester read finishes
+  before any store read starts: that order is what keeps a flush invisible
+  ([../architecture/components.md](../architecture/components.md#reads-and-why-a-flush-is-invisible-to-them)).
+  No member is skipped by selector: a series is placed by the hash of its full
+  label set, and no selector proves it names a full label set, so skipping any
+  member could miss data. A read therefore costs one request per member per
+  selector, and there is no cap on how many run at once.
 - **Replication tolerates a minority of ingesters, not a majority.**
   `OBS_REPLICATION_FACTOR` (RF, default 1; the Compose and Helm split use 3) sends
   every series and stream to RF ingesters. The quorum is W = RF/2 + 1 per key,
@@ -187,12 +195,87 @@ These are properties of the whole system, not of the query languages.
   A write sent straight to an ingester, or in all-in-one, takes that process's
   own generation, and so does a write to an ingester from before 6.3 during a
   rolling upgrade, which the gateway sends no generations.
-- **Log chunks are stored RF times.** Every replica flushes its own copy to the
-  store. Reads deduplicate by `(timestamp, line)`, so answers never change, but
-  disk use is RF times a single copy. Metrics compaction merges the copies.
+- **Stores are sharded and replicated; reads tolerate W_s−1 store outages.**
+  `OBS_STORE_URL` is a list on the ingester, querier, and compactor, and
+  `OBS_STORE_REPLICATION_FACTOR` (R_s, default 1; the Compose and Helm split run
+  4 stores at R_s 3) places each series and stream on R_s stores of a store
+  ring keyed like the ingester ring. A flush batch succeeds once every key in it
+  has `200`s from W_s = R_s/2 + 1 of its stores; otherwise the ingester keeps
+  the whole batch and retries it, and a re-flush leaves a second copy on the
+  stores that had taken it, which reads and compaction collapse. A read skips
+  up to W_s−1 stores that fail with an outage. At R_s 3 one store down fails
+  neither flushes nor reads; two down fail every flush batch with a key on
+  both, and reads answer `503`. R_s 1 with one store is the 6.3 behaviour.
+  `OBS_STORE_REPLICATION_FACTOR` must be equal on the ingesters and the querier,
+  as `OBS_REPLICATION_FACTOR` must on the gateway and querier; neither process
+  checks the other. Raising it does not re-replicate blocks already flushed at
+  the lower factor. `obs_ingester_store_flush_total{outcome}` and
+  `obs_querier_store_reads_total{store,outcome}` show a tolerated store outage.
+- **A store that missed a flush is caught up from memory only.** When a flush
+  meets quorum but a store failed its part, the ingester queues that store's
+  request body and resends it on its maintenance loop, oldest first, backing
+  off from 1 s, doubling to 1 m per item; the loop runs every
+  `OBS_MAINTENANCE_INTERVAL` (30 s by default), so retries are no more frequent
+  than that. The queue is bounded by `OBS_STORE_RETRY_MAX_BYTES` (64 MiB; `0`
+  disables it) and `OBS_STORE_RETRY_MAX_AGE` (15 m): past either, the oldest
+  item is dropped with a warning and
+  `obs_ingester_store_retries_total{outcome="dropped"}`. It lives in the
+  ingester's memory: a restart or a crash loses it, and a drain does not wait
+  for it. A dropped or lost copy leaves its keys on W_s of their R_s stores,
+  not all of them, until retention; there is no other repair. At R_s 1 nothing
+  is ever queued, because any store failure is a quorum miss.
+  `obs_ingester_store_retry_pending_bytes` gauges the queue.
+- **Adding a store leaves old copies where they were.** A key whose replica set
+  changes keeps its older blocks on its previous stores; reads cover every
+  store, so answers are complete, but nothing moves those blocks and
+  compaction never merges across stores, so the extra copies stay until
+  retention deletes them (never, at the default `retention` of `0s`, and
+  never for log chunks, which have no retention). A store
+  change is staged like an ingester change: the querier and compactor gain a
+  store before the ingesters flush to it
+  ([../runbooks/split-demo.md](../runbooks/split-demo.md#add-or-remove-a-store)).
+  Helm enforces only the removal side of that order (below); growing the store
+  count is staged by convention.
+- **One store is removed per handoff.** `POST /internal/v1/handoff` copies a
+  leaving store's blocks and log chunks to every owner on the target ring, and
+  answers `200` only when every owner took every batch
+  ([internal.md](internal.md#handoff-store-only)). It takes one leaving store;
+  remove several one at a time, each with its own handoff. Skip the handoff and
+  a key whose copies included that store loses one, so reads can come back
+  incomplete when another store is down. Once a handoff starts, the store
+  refuses every flush with `503` until it restarts. With `OBS_STORE_SELF_URL`
+  unset, a target list that names the leaving store itself fails with `503`
+  (its own barrier refuses the copy) rather than `400`. Helm refuses shrinking
+  `split.store.replicas` below the stores the running ingesters flush to, but
+  cannot see the handoff. Nor does it look at kept store PVCs: a reinstall that
+  removed the ingester StatefulSet but kept the store PVCs, with fewer stores
+  than before, is not refused, and the blocks on the PVCs past the new count
+  are never read.
+- **Upgrading to 6.4 leaves the old blocks on one store.** A 6.3 release ran one
+  store, so everything flushed before the upgrade is on that store only (in
+  Helm, `store-0`; nothing re-replicates it). Until retention deletes those
+  blocks (log chunks it never deletes), an outage of that one store gives reads that answer `200` and omit
+  the older data, because a read now skips one store at R_s 3. While the
+  StatefulSet grows from one store to four, expect flush and read failures
+  until every store pod is ready, and `421`s from ingester and querier pods
+  still running the old single store URL. Stage it in Helm: first
+  `--set split.store.replicas=4,split.store.writeReplicas=1,split.storeReplicationFactor=1`,
+  wait for `kubectl rollout status statefulset/<store>`, then raise
+  `split.store.writeReplicas` to 4 and `split.storeReplicationFactor` to 3;
+  that still does not re-replicate the old blocks
+  ([../../deployments/helm/README.md](../../deployments/helm/README.md)).
+  Compose has no in-place path: the 6.3 `store` service and its
+  `obs-store-data` volume are gone from the file, so the four new stores start
+  empty, and what was flushed before the upgrade is no longer read (the old
+  volume stays on disk until removed by hand).
+- **Log chunks are stored RF × R_s times.** Every ingester replica flushes its
+  own copy, to each of the key's R_s stores. Reads deduplicate by `(timestamp,
+  line)`, so answers never change, but disk use is RF × R_s times a single
+  copy. Metrics compaction merges the ingester copies within each store, so a
+  compacted series is held R_s times.
 - **Removing an ingester needs its drain acknowledged.** `POST
-  /internal/v1/drain` answers `200` only once the ingester's whole head is in
-  the store; skip that and stop it anyway, and anything a failed or cut-short
+  /internal/v1/drain` answers `200` only once the ingester's whole head is on
+  a quorum of its stores; skip that and stop it anyway, and anything a failed or cut-short
   drain left stays in its WAL, not read once the querier drops it. Once a drain
   starts, the ingester refuses every write with `503` until it restarts, so
   drain only an ingester the gateway no longer writes to. A graceful stop also
@@ -245,8 +328,9 @@ These are properties of the whole system, not of the query languages.
   `/internal/v1` ([internal.md](internal.md)). The gateway never proxies it and
   the Compose split file publishes only the gateway's port, but anything on the
   Compose network or inside the cluster can reach it.
-- **No backpressure in the split topology.** While the store is down, the
-  ingester keeps accepting writes into its WALs and heads without bound;
+- **No backpressure in the split topology.** While a key's stores are down
+  past its quorum, the ingesters keep accepting writes into their WALs and
+  heads without bound;
   `obs_flush_failures_total`, `obs_log_flush_failures_total`, and
   `obs_wal_bytes` show it.
 - **A slow or hanging store stalls a logs flush per batch, not once.** The logs
@@ -255,30 +339,40 @@ These are properties of the whole system, not of the query languages.
   on *each* batch of one flush, not a single 10 s cap for the whole thing — a
   large head can be split into several batches. The 30 s backoff only limits
   how often a new threshold flush is attempted after a failure; it does not
-  bound one already in flight.
+  bound one already in flight. A flush batch waits for every one of its
+  stores, not only a quorum, so this holds even when the hung store is one of
+  three and the batch succeeds: each batch then costs the timeout (10 s for
+  logs, 30 s for metrics) before the hung store's part is queued for retry.
+  The retry queue sends one item at a time, each bounded by 30 s, so a hung
+  store slows the queue's delivery to the others too.
 - **There is no server-side query timeout.** A querier request runs under the
   inbound HTTP request's own context, and nothing wraps it with a deadline.
-  Each ingester read is bounded by `OBS_INGESTER_TIMEOUT` and counts as an
-  outage, so a hung ingester is skipped or fails the read with `503`. That
-  bound is per ingester read, not per query: ingesters are read one after
-  another, once per selector, so a query with k selectors can wait it out up
-  to k times in a row before it answers. A
-  hung store holds the request open until the caller (Grafana, or curl)
-  disconnects — it never resolves to a `503` on its own.
-- **A store that permanently rejects a batch wedges the head.** A tolerant
-  flush never discards a batch the store failed to accept — that would lose
+  Each ingester read and each store read is bounded by `OBS_INGESTER_TIMEOUT`
+  (the querier uses the one setting for both) and counts as an outage, so a
+  hung ingester or store is skipped or fails the read with `503`. That bound
+  is per read, not per query: the ingesters are read in parallel, then the
+  stores, once per selector, so a query with k selectors can wait it out up to
+  2k times in a row before it answers.
+- **Stores that permanently reject a batch wedge the head.** A tolerant
+  flush never discards a batch that missed its store quorum — that would lose
   data already acknowledged to the client — so a store-side bug that keeps
-  refusing an otherwise-valid batch retries it forever, once per 30 s backoff,
-  while the WAL it cannot checkpoint keeps growing.
+  refusing an otherwise-valid batch on enough of a key's stores retries it
+  forever, once per 30 s backoff, while the WAL it cannot checkpoint keeps
+  growing. If the batch still met quorum, the refusing store's part goes to
+  the retry queue and is dropped once it is older than
+  `OBS_STORE_RETRY_MAX_AGE`.
 - **A hung store can delay the compactor's shutdown by up to about 4
-  minutes.** `RunOnce` always runs a compaction pass and then a retention pass
+  minutes per hung store.** `RunOnce` always runs a compaction pass and then a retention pass
   — `applyRetention` runs unconditionally after `compactToStable`, with no
   check of the shutdown context — and each of `CompactOnce` and
   `ApplyRetention` opens its own fixed 2-minute timeout on a context
   independent of the shutdown signal. Against a store that hangs on every
   request, a maintenance pass in flight when shutdown is requested can cost a
   compaction call's timeout, then a retention call's timeout: up to about 4
-  minutes before the compactor's process can exit on its own. In practice a
+  minutes before the compactor's process can exit on its own. Stores are
+  maintained one after another within a pass, so each hung store adds its own
+  4 minutes, and a hung store also delays the pass for the stores after it
+  (a store that fails outright is logged and skipped). In practice a
   SIGKILL usually cuts this short first — the Compose split's compactor
   service has no `stop_grace_period` override (Compose's 10 s default), and
   the Kubernetes split chart sets no `terminationGracePeriodSeconds` for the
@@ -288,8 +382,8 @@ These are properties of the whole system, not of the query languages.
   directories or ones the split topology wrote; moving an all-in-one data
   directory into an ingester and a store is unsupported.
 - **Ingester volume loss resets the generation floor.** The ingester persists
-  its generation floor on its own volume. If that volume is lost while the store
-  survives, the floor restarts at 1, and later overwrites at already-flushed
+  its generation floor on its own volume. If that volume is lost while the stores
+  survive, the floor restarts at 1, and later overwrites at already-flushed
   timestamps lose to the older samples the store still holds.
 - **Split-mode reads move data.** Every in-range sample and log entry of every
   matching series or stream crosses the network to the querier before it
@@ -303,6 +397,10 @@ These are properties of the whole system, not of the query languages.
   deletes whole blocks.
 - **Retention is off by default.** `retention` defaults to `0s`, which means keep
   everything forever. Set `OBS_RETENTION` to enable deletion.
+- **Logs have no compaction or retention.** Compaction and retention act on
+  metrics blocks only, in every topology. Log chunks are never merged or
+  deleted, so their disk use only grows; in split mode that is on every store
+  holding a copy.
 - **Grafana credentials differ by runtime, and the Compose demo ships a
   throwaway password.** The Kubernetes path commits none: the Helm chart fails to
   render unless you supply `admin.password` or `admin.existingSecret`. The Compose
