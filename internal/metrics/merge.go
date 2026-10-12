@@ -187,48 +187,17 @@ func collect[T any](ctx context.Context, t tolerantHeads, readHead func(context.
 	var zero T
 	rctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	type result struct {
-		i   int
-		a   T
-		err error
-	}
-	results := make(chan result, len(t.heads))
+	results := make(chan headResult[T], len(t.heads))
 	for i, h := range t.heads {
 		go func() {
 			a, err := readHead(rctx, h)
-			results <- result{i, a, err}
+			results <- headResult[T]{i, a, err}
 		}()
 	}
-	answers := make([]Source, len(t.heads))
-	var skipped []int
-	var lastOutage, fatal error
-	for range len(t.heads) {
-		r := <-results
-		// A cancelled read -- by the caller, or by an earlier decision -- is
-		// never an outcome to observe.
-		if t.opts.Observe != nil && !errors.Is(r.err, context.Canceled) {
-			t.opts.Observe(r.i, r.err)
-		}
-		if r.err == nil {
-			answers[r.i] = wrap(r.a)
-			continue
-		}
-		if !t.skip(ctx, r.err) {
-			fatal = r.err
-			break
-		}
-		skipped = append(skipped, r.i)
-		lastOutage = r.err
-		if len(skipped) > t.opts.Tolerate {
-			break
-		}
-	}
+	answers, skipped, lastOutage, err := gather(ctx, t, results, wrap)
 	cancel()
-	switch {
-	case fatal != nil:
-		return zero, fatal
-	case len(skipped) > t.opts.Tolerate:
-		return zero, lastOutage
+	if err != nil {
+		return zero, err
 	}
 	var folded []Source
 	for _, a := range answers {
@@ -252,6 +221,61 @@ func collect[T any](ctx context.Context, t tolerantHeads, readHead func(context.
 		t.opts.OnSkip(ctx, skipped)
 	}
 	return out, nil
+}
+
+type headResult[T any] struct {
+	i   int
+	a   T
+	err error
+}
+
+// gather takes one result per head from results until the read is decided. A
+// decided read returns err: the first non-skippable error, or else the outage
+// that exceeded Tolerate. Results already queued when the read is decided are
+// taken and observed too, so a protocol error that is already in wins over an
+// outage that happened to be taken first. Otherwise it returns every answer by
+// head index, the skipped heads, and the last outage.
+func gather[T any](ctx context.Context, t tolerantHeads, results <-chan headResult[T], wrap func(T) Source) (answers []Source, skipped []int, lastOutage, err error) {
+	answers = make([]Source, len(t.heads))
+	var fatal error
+	take := func(r headResult[T]) {
+		// A cancelled read -- by the caller, or by an earlier decision -- is
+		// never an outcome to observe.
+		if t.opts.Observe != nil && !errors.Is(r.err, context.Canceled) {
+			t.opts.Observe(r.i, r.err)
+		}
+		switch {
+		case r.err == nil:
+			answers[r.i] = wrap(r.a)
+		case !t.skip(ctx, r.err):
+			if fatal == nil {
+				fatal = r.err
+			}
+		default:
+			skipped = append(skipped, r.i)
+			lastOutage = r.err
+		}
+	}
+	for n := 0; n < len(t.heads); n++ {
+		take(<-results)
+		if fatal == nil && len(skipped) <= t.opts.Tolerate {
+			continue
+		}
+		for n++; n < len(t.heads); n++ {
+			select {
+			case r := <-results:
+				take(r)
+				continue
+			default:
+			}
+			break
+		}
+		if fatal != nil {
+			return nil, nil, nil, fatal
+		}
+		return nil, nil, nil, lastOutage
+	}
+	return answers, skipped, lastOutage, nil
 }
 
 func (t tolerantHeads) skip(ctx context.Context, err error) bool {
