@@ -25,6 +25,9 @@ spec:
         {{- include "backend.componentLabels" (list $root $component) | nindent 8 }}
       annotations:
         checksum/config: {{ include "backend.splitConfigMap" (list $root $component) | sha256sum }}
+        {{- if eq $component "ingester" }}
+        {{ include "backend.storeCountAnnotation" $root }}: {{ include "backend.storeWriteCount" $root | quote }}
+        {{- end }}
     spec:
       # The default 30s grace period is too short: the ingester's graceful
       # shutdown can take up to its 50s shutdown budget against a slow store (a
