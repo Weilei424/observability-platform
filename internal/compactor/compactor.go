@@ -136,6 +136,10 @@ func (c *Compactor) compactToStable(ctx context.Context) {
 		}
 		start := c.clock()
 		n, err := c.blocks.CompactOnce(plan)
+		if n > 0 {
+			c.metrics.CompactionsTotal.Add(float64(n))
+			c.metrics.CompactionDuration.Observe(c.clock().Sub(start).Seconds())
+		}
 		if err != nil {
 			c.metrics.CompactionFailuresTotal.Inc()
 			c.log.Warn("compaction failed", slog.String("error", err.Error()))
@@ -144,8 +148,6 @@ func (c *Compactor) compactToStable(ctx context.Context) {
 		if n == 0 {
 			return
 		}
-		c.metrics.CompactionsTotal.Add(float64(n))
-		c.metrics.CompactionDuration.Observe(c.clock().Sub(start).Seconds())
 	}
 }
 
