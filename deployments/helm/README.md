@@ -60,8 +60,8 @@ private WAL, so a query would see whichever shard it landed on.
 | `topology` | `all-in-one` | `all-in-one` runs one StatefulSet. `split` runs the five components: Deployments for the gateway (which takes the Service name `observability-backend`), querier, and compactor; StatefulSets with their own PVCs for the ingester and store |
 | `split.<component>.replicas` | `1` | Gateway and querier may scale. The compactor must stay at 1; the chart refuses more. The store is sharded (next rows) |
 | `split.store.replicas` | `4` | Store pods; at least 1. The querier's and compactor's `OBS_STORE_URL` lists every pod, one `http://<store>-<i>.<store>-headless:<port>` each, and each store pod gets its own URL, spelled the same way, as `OBS_STORE_SELF_URL` from its pod name (the downward API), so it answers `421` to a request addressed to another store. The prometheus chart's `split.targets.store` must list the same pods |
-| `split.store.writeReplicas` | all replicas | How many store pods, from ordinal 0, the ingesters flush to (their `OBS_STORE_URL`); between 1 and `split.store.replicas`, and the chart refuses anything else. Set it below `replicas` to stage a store change: adding, raise `replicas` first and this after; removing, lower this first, hand off the leaving store ([../../docs/runbooks/split-demo.md](../../docs/runbooks/split-demo.md); the chart cannot verify that step), then lower `replicas`. The ingester pod template records it (`observability-platform.dev/store-count`); on an upgrade the chart refuses `replicas` below the stores the running ingesters flush to, and any store-count change while the ingester StatefulSet is still rolling out |
-| `split.storeReplicationFactor` | `3` | How many distinct stores every flushed block goes to, and how many copies the querier dedups. Set on the ingester and querier only (`OBS_STORE_REPLICATION_FACTOR`; the compactor refuses it); the chart refuses a value above the stores the ingesters flush to (`split.store.writeReplicas`, else `replicas`) |
+| `split.store.writeReplicas` | all replicas | How many store pods, from ordinal 0, the ingesters flush to (their `OBS_STORE_URL`); between 1 and `split.store.replicas`, and the chart refuses anything else. Set it below `replicas` to stage a store change: adding, raise `replicas` first and this after; removing, lower this first, hand off the leaving store ([../../docs/runbooks/split-demo.md](../../docs/runbooks/split-demo.md); the chart cannot verify that step), then lower `replicas`. The ingester pod template records it (`observability-platform.dev/store-count`); on an upgrade the chart refuses `replicas` below the stores the running ingesters flush to, and any store-count change while the ingester StatefulSet is still rolling out. It does not refuse growing `replicas` and `writeReplicas` together: adding a store is staged by convention, so set this explicitly when raising `replicas` |
+| `split.storeReplicationFactor` | `3` | How many distinct stores every flushed series and stream goes to, and how many copies the querier dedups. A flush counts once each key is on R_s/2 + 1 of them, and a read skips up to that minus one store (one, at the default). Set on the ingester and querier only (`OBS_STORE_REPLICATION_FACTOR`; the compactor refuses it); the chart refuses a value above the stores the ingesters flush to (`split.store.writeReplicas`, else `replicas`) |
 | `split.ingester.replicas` | `3` | Ingester pods in the ring; at least 1, and the chart refuses less. The querier's `OBS_INGESTER_URL` lists every pod, one `http://<ingester>-<i>.<ingester>-headless:<port>` each. Each workload's `checksum/config` annotation hashes only its own ConfigMap, so a ring stage rolls only the gateway or querier whose list it changes; the ingester StatefulSet scales without restarting its pods, and the store and compactor are untouched. The prometheus chart's `split.targets.ingester` must list the same pods |
 | `split.replicationFactor` | `3` | How many distinct ingesters every write goes to, and how many copies the querier dedups on a read. A write succeeds once every series or stream has W = RF/2 + 1 acknowledgements (2 of 3 at the default), and a read skips up to W−1 ingesters that fail with an outage, so reads and writes survive one ingester down at the default. The chart refuses a value above the ingesters the gateway writes to (`split.ingester.writeReplicas`, else `replicas`) and sets it on the gateway and querier only, so changing it rolls just those two; `config.OBS_REPLICATION_FACTOR` is refused. A change is staged with `split.querier.replicationFactor` (next row) |
 | `split.querier.replicationFactor` | `split.replicationFactor` | The querier's RF, set only while staging an RF change; at least 1 and at most `split.ingester.replicas`. A read skips up to its quorum − 1 ingesters, so it stays complete only while the querier's quorum is at most the gateway's, and the chart refuses a querier quorum above the gateway's. Raise an RF gateway first (set the new `split.replicationFactor` with this at the old value), then remove this (`--set split.querier.replicationFactor=null` on a `--reuse-values` upgrade) once every ingester has been drained (`POST /internal/v1/drain` answers `200`) and restarted, one at a time — a flush interval is not enough, since the maintenance flush leaves open chunks and the logs head; lower it querier first (set this to the new value), then lower `split.replicationFactor` and remove this. Each gateway and querier pod template records its RF (`observability-platform.dev/replication-factor`); on an upgrade the chart refuses a gateway quorum below the running querier's and a querier quorum above the running gateway's, and counts an RF change as a ring change, refused while either Deployment is still rolling out. A Deployment without the annotation counts as RF 1, never as its ConfigMap says — an upgrade applies the ConfigMap before the pods roll, so after an interrupted upgrade the ConfigMap can claim an RF its pods never loaded. A Phase 6.2 release therefore counts as RF 1: upgrading one to the RF 3 default is refused until it is staged (first `--set split.querier.replicationFactor=1`, then remove it once every ingester has been drained and restarted). The release counts as live when any of it survives — either Deployment, either ConfigMap, the ingester StatefulSet, or kept ingester PVCs (`data-<ingester>-<i>`) — and a side whose RF cannot be read counts as RF 1, so a recovery after a deleted Deployment, or a reinstall over kept ingester PVCs, stages its RF the same way. During such a recovery the chart also refuses to render until a surviving gateway or querier has finished rolling out, and refuses a ring smaller than the ingesters that may hold data |
@@ -93,6 +93,34 @@ request meant for another member (an address a restarted pod reused, held by
 keep-alive). `OBS_STORE_REPLICATION_FACTOR` and `OBS_STORE_SELF_URL` are refused
 too: the first comes from `split.storeReplicationFactor`, the second is each
 store pod's own URL, `http://<pod>.<store>-headless:<port>` from its pod name.
+
+The store staging check has limits. It reads only the running ingester
+StatefulSet's `store-count` annotation, never the store PVCs: a reinstall that
+removed the ingester StatefulSet but kept the store PVCs (`data-<store>-<i>`),
+with fewer stores than before, is not refused, and the blocks on the PVCs past
+the new count are never read. It cannot see a handoff either. And a release
+from before 6.4 has no annotation, so nothing is checked on the upgrade to
+6.4.
+
+**Upgrading a 6.3 split release.** 6.3 ran one store, so every block and log
+chunk flushed before the upgrade is on `store-0` alone, and nothing copies it
+to the new stores. Until retention deletes those blocks (log chunks are never
+deleted), a `store-0` outage gives reads that answer `200` without that older
+data, since a read skips one store at the default R_s 3. While the
+StatefulSet grows from one pod to four, expect flush and read errors, and
+`421`s from ingester and querier pods still running the old single store URL,
+until every store pod is ready. Stage it:
+
+```bash
+helm upgrade backend deployments/helm/backend -n obs --reuse-values \
+  --set split.store.replicas=4,split.store.writeReplicas=1,split.storeReplicationFactor=1 --wait
+kubectl rollout status statefulset/observability-store -n obs
+helm upgrade backend deployments/helm/backend -n obs --reuse-values \
+  --set split.store.writeReplicas=4,split.storeReplicationFactor=3 --wait
+```
+
+The second step still does not re-replicate the old blocks
+([`docs/api/limitations.md`](../../docs/api/limitations.md)).
 
 Every `config.*` key must start with `OBS_` and correspond to a `v.SetDefault` in
 `internal/config/config.go` — Viper silently ignores env vars it has no default for, so a
