@@ -22,11 +22,26 @@ var splitComponents = []string{"gateway", "ingester", "querier", "store", "compa
 
 var composeIngesters = []string{"ingester-1", "ingester-2", "ingester-3"}
 
+var composeStores = []string{"store-1", "store-2", "store-3", "store-4"}
+
 func composeServicesOf(role string) []string {
-	if role == "ingester" {
+	switch role {
+	case "ingester":
 		return composeIngesters
+	case "store":
+		return composeStores
 	}
 	return []string{role}
+}
+
+// composeRoleOf maps a Compose service back to the component role it runs.
+func composeRoleOf(svc string) string {
+	for _, c := range splitComponents {
+		if slices.Contains(composeServicesOf(c), svc) {
+			return c
+		}
+	}
+	return svc
 }
 
 type composeSplitService struct {
@@ -98,7 +113,7 @@ func TestComposeSplitComponentsDoNotDependOnEachOther(t *testing.T) {
 	for _, c := range splitComponents {
 		for _, svc := range composeServicesOf(c) {
 			for dep := range svcs[svc].DependsOn {
-				if slices.Contains(splitComponents, dep) || slices.Contains(composeIngesters, dep) {
+				if slices.Contains(splitComponents, dep) || slices.Contains(composeIngesters, dep) || slices.Contains(composeStores, dep) {
 					t.Errorf("%s depends_on %s; components must start in any order", svc, dep)
 				}
 			}
@@ -160,10 +175,7 @@ func TestPrometheusSplitScrapesEveryComponent(t *testing.T) {
 				if _, ok := svcs[host]; !ok {
 					t.Errorf("scrape target %s is not a service in %s", target, composeSplitPath)
 				}
-				role := host
-				if slices.Contains(composeIngesters, host) {
-					role = "ingester"
-				}
+				role := composeRoleOf(host)
 				if st.Labels["component"] != role || st.Labels["service"] != "observability-platform" {
 					t.Errorf("target %s labels = %v, want component=%s service=observability-platform", target, st.Labels, role)
 				}
@@ -218,5 +230,49 @@ func TestComposeSplitIngestersKnowTheirOwnURL(t *testing.T) {
 		if _, ok := s.Environment["OBS_INGESTER_SELF_URL"]; ok && !slices.Contains(composeIngesters, name) {
 			t.Errorf("%s sets OBS_INGESTER_SELF_URL, which only an ingester takes", name)
 		}
+	}
+}
+
+// Every Compose store is told its own URL, exactly as the ingesters, querier and
+// compactor list it, so it answers 421 to a request routed for another store.
+// The setting is optional to the binary, so only this test notices if a store
+// loses it.
+func TestComposeSplitStoresKnowTheirOwnURL(t *testing.T) {
+	svcs := loadComposeSplit(t)
+	readers := append(slices.Clone(composeIngesters), "querier", "compactor")
+	for _, reader := range readers {
+		list := strings.Split(svcs[reader].Environment["OBS_STORE_URL"], ",")
+		if len(list) != len(composeStores) {
+			t.Fatalf("%s lists %d stores, want %d", reader, len(list), len(composeStores))
+		}
+		for i, svc := range composeStores {
+			self := svcs[svc].Environment["OBS_STORE_SELF_URL"]
+			if want := "http://" + svc + ":8080"; self != want {
+				t.Errorf("%s OBS_STORE_SELF_URL = %q, want %q", svc, self, want)
+			}
+			if list[i] != self {
+				t.Errorf("%s lists %q where %s calls itself %q", reader, list[i], svc, self)
+			}
+		}
+	}
+	for name, s := range svcs {
+		if _, ok := s.Environment["OBS_STORE_SELF_URL"]; ok && !slices.Contains(composeStores, name) {
+			t.Errorf("%s sets OBS_STORE_SELF_URL, which only a store takes", name)
+		}
+	}
+}
+
+// The ingesters flush and the querier reads at the same store replication
+// factor: 3 over four stores, so one store down is survivable and two are not.
+// The compactor walks each store on its own and refuses the setting.
+func TestComposeSplitStoreReplication(t *testing.T) {
+	svcs := loadComposeSplit(t)
+	for _, svc := range append(slices.Clone(composeIngesters), "querier") {
+		if got := svcs[svc].Environment["OBS_STORE_REPLICATION_FACTOR"]; got != "3" {
+			t.Errorf("%s OBS_STORE_REPLICATION_FACTOR = %q, want 3", svc, got)
+		}
+	}
+	if _, ok := svcs["compactor"].Environment["OBS_STORE_REPLICATION_FACTOR"]; ok {
+		t.Errorf("compactor sets OBS_STORE_REPLICATION_FACTOR, which it refuses")
 	}
 }
