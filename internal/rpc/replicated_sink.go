@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/masonwheeler/observability-platform/internal/logs"
@@ -24,7 +25,14 @@ type StoreQuorumError struct {
 }
 
 func (e *StoreQuorumError) Error() string {
-	return fmt.Sprintf("store quorum not met: %d of %d %s could not reach %d of %d stores", e.Failed, e.Total, e.Kind, e.Quorum, e.RF)
+	msg := fmt.Sprintf("store quorum not met: %d of %d %s could not reach %d of %d stores", e.Failed, e.Total, e.Kind, e.Quorum, e.RF)
+	if len(e.Stores) > 0 {
+		msg += " (failed: " + strings.Join(e.Stores, ",") + ")"
+	}
+	if e.Cause != nil {
+		msg += ": " + e.Cause.Error()
+	}
+	return msg
 }
 func (e *StoreQuorumError) Unwrap() error { return e.Cause }
 
