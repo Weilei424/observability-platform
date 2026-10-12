@@ -15,8 +15,9 @@ import (
 )
 
 // buildStore assembles the store: blocks and log chunks, the internal reads
-// over them, flush-in, and the block maintenance the compactor drives. It
-// serves no public route and calls no peer.
+// over them, flush-in, the block maintenance the compactor drives, and the
+// handoff that copies its data to the remaining stores before it is removed.
+// It serves no public route and calls a peer only during a handoff.
 func buildStore(cfg *config.Config, log *slog.Logger) (*App, error) {
 	mainLog := observability.Component(log, "main")
 	logsLog := observability.Component(log, "logs")
@@ -44,6 +45,8 @@ func buildStore(cfg *config.Config, log *slog.Logger) (*App, error) {
 		Omit:    observability.AllGroups,
 		Logger:  log,
 	})
+	// Closed by a handoff; flush-ins answer 503 from then until restart.
+	barrier := &rpc.FlushBarrier{}
 	srv := api.New(api.Deps{
 		Config:   cfg,
 		Logger:   log,
@@ -56,7 +59,8 @@ func buildStore(cfg *config.Config, log *slog.Logger) (*App, error) {
 				r.Use(rpc.RequireMember(cfg.StoreSelfURL))
 			}
 			rpc.MountReads(r, blocks, logs.AsSource(chunks))
-			rpc.MountStore(r, blocks, chunks)
+			rpc.MountStore(r, blocks, chunks, barrier)
+			rpc.MountHandoff(r, blocks, chunks, barrier, cfg.StoreSelfURL, metrics.DefaultFlushTimeout)
 		},
 	})
 	return &App{
