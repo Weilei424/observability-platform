@@ -36,9 +36,33 @@ type Straggler interface {
 // FlushObserver is told each batch's outcome: full, degraded, or failed.
 type FlushObserver func(outcome string)
 
+// SinkOption configures a replicated sink.
+type SinkOption func(*sinkOptions)
+
+type sinkOptions struct {
+	requireAll bool
+}
+
+// WithRequireAll makes a batch succeed only when every owner of every key
+// acknowledged it (need = rf, not the W_s quorum), and queues nothing. The
+// store handoff uses it: the leaving store's copy is the one being retired, so
+// each owner on the target ring must take its own.
+func WithRequireAll() SinkOption {
+	return func(o *sinkOptions) { o.requireAll = true }
+}
+
+func applySinkOptions(opts []SinkOption) sinkOptions {
+	var o sinkOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return o
+}
+
 // replicateFlush sends each store its part of a batch -- body(keys) built from the
-// key indexes that store owns -- concurrently, and decides per-key quorum.
-func replicateFlush(ctx context.Context, kind string, keys []uint64, r *ring.Ring, rf int, clients map[string]*Client,
+// key indexes that store owns -- concurrently, and decides per-key quorum: W_s
+// (rf/2+1), or every owner when requireAll is set.
+func replicateFlush(ctx context.Context, kind string, keys []uint64, r *ring.Ring, rf int, requireAll bool, clients map[string]*Client,
 	path string, body func(idx []int) ([]byte, error), q Straggler, observe FlushObserver) error {
 	owned := map[string][]int{}
 	replicasOf := make([][]string, len(keys))
@@ -79,6 +103,9 @@ func replicateFlush(ctx context.Context, kind string, keys []uint64, r *ring.Rin
 		}
 	}
 	need := rf/2 + 1
+	if requireAll {
+		need = rf
+	}
 	failedKeys := 0
 	var causes []error
 	var culprits []string
@@ -127,12 +154,13 @@ type ReplicatedBlockSink struct {
 	clients map[string]*Client
 	q       Straggler
 	observe FlushObserver
+	opts    sinkOptions
 }
 
 var _ metrics.BlockSink = (*ReplicatedBlockSink)(nil)
 
-func NewReplicatedBlockSink(r *ring.Ring, rf int, clients map[string]*Client, q Straggler, observe FlushObserver) *ReplicatedBlockSink {
-	return &ReplicatedBlockSink{ring: r, rf: max(rf, 1), clients: clients, q: q, observe: observe}
+func NewReplicatedBlockSink(r *ring.Ring, rf int, clients map[string]*Client, q Straggler, observe FlushObserver, opts ...SinkOption) *ReplicatedBlockSink {
+	return &ReplicatedBlockSink{ring: r, rf: max(rf, 1), clients: clients, q: q, observe: observe, opts: applySinkOptions(opts)}
 }
 
 // IngestSeriesChunks returns a zero block.Meta: several stores each wrote
@@ -142,7 +170,7 @@ func (s *ReplicatedBlockSink) IngestSeriesChunks(ctx context.Context, series []m
 	for i, sc := range series {
 		keys[i] = sc.Labels.Hash()
 	}
-	return block.Meta{}, replicateFlush(ctx, "series", keys, s.ring, s.rf, s.clients, "metrics/flush",
+	return block.Meta{}, replicateFlush(ctx, "series", keys, s.ring, s.rf, s.opts.requireAll, s.clients, "metrics/flush",
 		func(idx []int) ([]byte, error) {
 			req := metricsFlushRequest{Series: make([]wireChunkSeries, 0, len(idx))}
 			for _, i := range idx {
@@ -164,12 +192,13 @@ type ReplicatedChunkSink struct {
 	clients map[string]*Client
 	q       Straggler
 	observe FlushObserver
+	opts    sinkOptions
 }
 
 var _ logs.ChunkSink = (*ReplicatedChunkSink)(nil)
 
-func NewReplicatedChunkSink(r *ring.Ring, rf int, clients map[string]*Client, q Straggler, observe FlushObserver) *ReplicatedChunkSink {
-	return &ReplicatedChunkSink{ring: r, rf: max(rf, 1), clients: clients, q: q, observe: observe}
+func NewReplicatedChunkSink(r *ring.Ring, rf int, clients map[string]*Client, q Straggler, observe FlushObserver, opts ...SinkOption) *ReplicatedChunkSink {
+	return &ReplicatedChunkSink{ring: r, rf: max(rf, 1), clients: clients, q: q, observe: observe, opts: applySinkOptions(opts)}
 }
 
 func (s *ReplicatedChunkSink) IngestStreams(ctx context.Context, streams []logs.StreamData) error {
@@ -177,7 +206,7 @@ func (s *ReplicatedChunkSink) IngestStreams(ctx context.Context, streams []logs.
 	for i, sd := range streams {
 		keys[i] = sd.Labels.Hash()
 	}
-	return replicateFlush(ctx, "streams", keys, s.ring, s.rf, s.clients, "logs/flush",
+	return replicateFlush(ctx, "streams", keys, s.ring, s.rf, s.opts.requireAll, s.clients, "logs/flush",
 		func(idx []int) ([]byte, error) {
 			part := make([]logs.StreamData, len(idx))
 			for j, i := range idx {
