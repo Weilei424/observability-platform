@@ -86,14 +86,46 @@ querier's and it never writes to an ingester the querier does not read. Both
 come from this one helper (spec §7).
 */}}
 {{- define "backend.ingesterURLs" -}}
+{{- include "backend.podURLs" (list (index . 0) "ingester" (index . 1)) -}}
+{{- end -}}
+
+{{/*
+backend.storeURLs: the stores, by pod DNS name, for ordinals 0 to count-1, as
+backend.ingesterURLs lists the ingesters. Called as (list $root count). The
+querier and compactor read every replica; the ingesters flush to the first
+backend.storeWriteCount, a prefix of that list. Each store pod's
+OBS_STORE_SELF_URL (backend.splitContainer) is spelled the same way, so a
+store recognises a request addressed to it (spec §9.2).
+*/}}
+{{- define "backend.storeURLs" -}}
+{{- include "backend.podURLs" (list (index . 0) "store" (index . 1)) -}}
+{{- end -}}
+
+{{/*
+backend.podURLs: a StatefulSet component's pods, http://<sts>-<i>.<sts>-headless:<port>
+for ordinals 0 to count-1, comma-separated. Called as (list $root component count).
+*/}}
+{{- define "backend.podURLs" -}}
 {{- $root := index . 0 -}}
-{{- $count := index . 1 -}}
-{{- $name := include "backend.componentName" (list $root "ingester") -}}
+{{- $count := index . 2 -}}
+{{- $name := include "backend.componentName" (list $root (index . 1)) -}}
 {{- $urls := list -}}
 {{- range $i := until (int $count) -}}
 {{- $urls = append $urls (printf "http://%s-%d.%s-headless:%d" $name $i $name ($root.Values.service.port | int)) -}}
 {{- end -}}
 {{- join "," $urls -}}
+{{- end -}}
+
+{{/*
+backend.storeWriteCount: split.store.writeReplicas, or every store when unset
+or null. The ingesters flush to that prefix of the stores; the querier and
+compactor read all split.store.replicas. A store joins by raising replicas
+before writeReplicas, and leaves by lowering writeReplicas, handing off the
+leaving store (runbook), then lowering replicas.
+*/}}
+{{- define "backend.storeWriteCount" -}}
+{{- $v := .Values.split.store -}}
+{{- if and (hasKey $v "writeReplicas") (not (kindIs "invalid" $v.writeReplicas)) -}}{{ int $v.writeReplicas }}{{- else -}}{{ int $v.replicas }}{{- end -}}
 {{- end -}}
 
 {{/*
@@ -152,6 +184,10 @@ data:
   OBS_INGESTER_URL: {{ include "backend.ingesterURLs" (list $root (include "backend.ingesterWriteCount" $root)) | quote }}
   {{- else if eq $peer "ingester" }}
   OBS_INGESTER_URL: {{ include "backend.ingesterURLs" (list $root $root.Values.split.ingester.replicas) | quote }}
+  {{- else if and (eq $peer "store") (eq $component "ingester") }}
+  OBS_STORE_URL: {{ include "backend.storeURLs" (list $root (include "backend.storeWriteCount" $root)) | quote }}
+  {{- else if eq $peer "store" }}
+  OBS_STORE_URL: {{ include "backend.storeURLs" (list $root $root.Values.split.store.replicas) | quote }}
   {{- else }}
   OBS_{{ upper $peer }}_URL: {{ include "backend.peerURL" (list $root $peer) | quote }}
   {{- end }}
@@ -160,6 +196,9 @@ data:
   OBS_REPLICATION_FACTOR: {{ $root.Values.split.replicationFactor | int | toString | quote }}
   {{- else if eq $component "querier" }}
   OBS_REPLICATION_FACTOR: {{ include "backend.querierReplicationFactor" $root | quote }}
+  {{- end }}
+  {{- if or (eq $component "ingester") (eq $component "querier") }}
+  OBS_STORE_REPLICATION_FACTOR: {{ $root.Values.split.storeReplicationFactor | int | toString | quote }}
   {{- end }}
   {{- range $key, $value := $root.Values.config }}
   {{ $key }}: {{ $value | quote }}
@@ -182,6 +221,56 @@ compares against the same way.
 */}}
 {{- define "backend.replicationFactorAnnotation" -}}
 observability-platform.dev/replication-factor
+{{- end -}}
+
+{{/*
+backend.storeCountAnnotation: the ingester pod-template annotation recording
+how many stores its pods flush to (backend.storeWriteCount), which
+backend.storeStagingCheck reads back on the next upgrade.
+*/}}
+{{- define "backend.storeCountAnnotation" -}}
+observability-platform.dev/store-count
+{{- end -}}
+
+{{/*
+backend.storeStagingCheck: refuse a store-count change that skips a stage.
+Called as (list $root $live), where $live holds the live "ingester" and "store"
+StatefulSets as lookup returns them (empty when there is no live release).
+
+The running ingesters flush to the stores their pod template records
+(backend.storeCountAnnotation). Shrinking split.store.replicas below that
+would drop a store the ingesters still flush to from the querier's and
+compactor's lists, hiding its blocks: a store leaves by first lowering
+split.store.writeReplicas, handing off the leaving store (runbook; the chart
+cannot verify that step), and only then lowering replicas. While the ingester
+StatefulSet is still rolling out, its old pods may still flush to more stores
+than the template says, so a change of store count waits for it. A release
+from before the annotation ran a single store and has nothing to shrink.
+*/}}
+{{- define "backend.storeStagingCheck" -}}
+{{- $root := index . 0 -}}
+{{- $live := index . 1 -}}
+{{- $replicas := int $root.Values.split.store.replicas -}}
+{{- $ing := $live.ingester | default dict -}}
+{{- $flushTo := dig "spec" "template" "metadata" "annotations" (include "backend.storeCountAnnotation" $root) "" $ing -}}
+{{- if $flushTo -}}
+{{- $liveStores := int (dig "spec" "replicas" 0 ($live.store | default dict)) -}}
+{{- if and $live.store (ne $replicas $liveStores) -}}
+{{- $want := int (dig "spec" "replicas" 1 $ing) -}}
+{{- $generation := int (dig "metadata" "generation" 0 $ing) -}}
+{{- $observed := int (dig "status" "observedGeneration" 0 $ing) -}}
+{{- $updated := int (dig "status" "updatedReplicas" 0 $ing) -}}
+{{- $current := dig "status" "currentRevision" "" $ing -}}
+{{- $ingName := dig "metadata" "name" "?" $ing -}}
+{{- $update := dig "status" "updateRevision" "" $ing -}}
+{{- if or (lt $observed $generation) (ne $updated $want) (ne $current $update) -}}
+{{- fail (printf "store change refused: statefulset/%s has not finished rolling out (%d of %d replicas updated), so its old pods may still flush to stores the new lists drop. Wait for `kubectl rollout status statefulset/%s` to succeed, then retry" $ing.metadata.name $updated $want $ing.metadata.name) -}}
+{{- end -}}
+{{- end -}}
+{{- if lt $replicas (int $flushTo) -}}
+{{- fail (printf "split.store.replicas %d is below the %d stores the running ingesters flush to: first lower split.store.writeReplicas, hand off the leaving store (runbook), then shrink" $replicas (int $flushTo)) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 
 {{/*
@@ -393,6 +482,16 @@ env:
         fieldPath: metadata.name
   - name: OBS_INGESTER_SELF_URL
     value: {{ printf "http://$(POD_NAME).%s-headless:%d" (include "backend.componentName" (list $root "ingester")) ($root.Values.service.port | int) | quote }}
+{{- else if eq $component "store" }}
+env:
+  # This pod's own URL, spelled as backend.storeURLs lists it: the store
+  # refuses a request whose X-Obs-Member names another store (421).
+  - name: POD_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: metadata.name
+  - name: OBS_STORE_SELF_URL
+    value: {{ printf "http://$(POD_NAME).%s-headless:%d" (include "backend.componentName" (list $root "store")) ($root.Values.service.port | int) | quote }}
 {{- end }}
 startupProbe:
   httpGet:
