@@ -341,7 +341,15 @@ target list that names the leaving store itself answers `400` when the store
 has `OBS_STORE_SELF_URL`, as Compose and the chart set it; without one it
 answers `503`, because the store's own barrier refuses the copy. Remove one
 store per handoff, and keep `OBS_STORE_REPLICATION_FACTOR` at most the number
-of stores that remain.
+of stores that remain. Send that same value as the handoff's
+`replication_factor`: the route accepts any value from 1 to the target count,
+but a lower one gives keys fewer new owners and can leave a key with fewer than
+W_s copies, so reads may be silently incomplete if that store is down. The
+handoff has a fixed 10-minute deadline, every retry resends everything, and
+the store holds all its log entries in memory while exporting, so a store with
+very large data may never finish or may run out of memory
+([../api/limitations.md](../api/limitations.md)). A failed handoff's `503` body
+names the failing store.
 
 ### Compose
 
