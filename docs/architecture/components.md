@@ -366,7 +366,10 @@ member replies first (`TestMergeHeadsWithAnswerIgnoresArrivalOrder`). A layer
 is decided as soon as its outcome is certain: a non-skippable error, or one
 outage more than it tolerates, fails it at once, and the reads still running
 are cancelled; a read cancelled that way is not counted as an outage
-(`TestMergeHeadsWithStopsEarlyAndDoesNotObserveCancelled`). If every member was
+(`TestMergeHeadsWithStopsEarlyAndDoesNotObserveCancelled`). Answers already in
+when the layer is decided are taken and observed too, so a protocol error that
+is in wins over the outage that decided it
+(`TestGatherPrefersAQueuedProtocolErrorOverAnOutage`). If every member was
 skipped, the last outage is returned rather than an empty answer.
 
 `Merge` reads its first argument to completion before it starts the second, so
