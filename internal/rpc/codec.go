@@ -311,6 +311,21 @@ type retentionResponse struct {
 	Error   string `json:"error,omitempty"`
 }
 
+// handoffRequest names the target store ring a leaving store copies its data
+// to (spec §8.2).
+type handoffRequest struct {
+	Stores            []string `json:"stores"`
+	ReplicationFactor int      `json:"replication_factor"`
+}
+
+// handoffResponse carries the counts even on failure: a failed handoff
+// reports how many series and streams every owner had acknowledged.
+type handoffResponse struct {
+	Series  int    `json:"series"`
+	Streams int    `json:"streams"`
+	Error   string `json:"error,omitempty"`
+}
+
 // selectorToWire folds the metric name into a __name__ matcher, as the index
 // does, so the receiving side needs no metric-name field.
 func selectorToWire(sel metrics.Selector) []wireMatcher {
