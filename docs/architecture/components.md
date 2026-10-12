@@ -16,15 +16,16 @@ routes, same on-disk layout, same single maintenance loop — so everything in
 |---|---|---|---|---|
 | `all-in-one` | every public route | flush → compact → retain | the whole data directory | — |
 | `gateway` | every public route; the two write routes are validated and routed, the read routes proxied | — | — | every ingester, querier |
-| `ingester` | the two public write routes, the two internal push routes; internal head reads | metrics flush loop; logs threshold flush | `metrics/wal`, `metrics/checkpoint`, `metrics/genfloor`, `logs/wal` | store |
-| `querier` | the nine read routes | — | — | every ingester, store |
-| `store` | internal only: flush-in, reads, block maintenance | — | `metrics/blocks`, `metrics/tmp`, `logs/chunks`, `logs/index` | — |
-| `compactor` | — | compact → retain | — | store |
+| `ingester` | the two public write routes, the two internal push routes; internal head reads | metrics flush loop; logs threshold flush; store retry queue | `metrics/wal`, `metrics/checkpoint`, `metrics/genfloor`, `logs/wal` | each key's stores |
+| `querier` | the nine read routes | — | — | every ingester, every store |
+| `store` | internal only: flush-in, reads, block maintenance, handoff | — | `metrics/blocks`, `metrics/tmp`, `logs/chunks`, `logs/index` (of the keys it holds) | the remaining stores, during a handoff |
+| `compactor` | — | compact → retain, each store in turn | — | every store |
 
 Every durable directory has exactly one owning process, so no volume is shared
 between components and no process ever reasons about another mutating a
 directory under it. Peers are named by `OBS_INGESTER_URL` (a comma-separated
-list on the gateway and querier, see [The ring](#the-ring)), `OBS_STORE_URL`,
+list on the gateway and querier, see [The ring](#the-ring)), `OBS_STORE_URL`
+(a list on the ingester, querier, and compactor, see [Stores](#stores-64)),
 and `OBS_QUERIER_URL`; a target refuses to start if one it needs is missing or one
 it does not use is set. The internal API is described in
 [../api/internal.md](../api/internal.md); it carries no authentication,
@@ -37,10 +38,10 @@ graph LR
   GR["Grafana"] -->|"obs-prometheus · obs-loki"| G
   G -->|"write routes, split by owner:<br/>POST /internal/v1/metrics/push<br/>POST /internal/v1/logs/push"| I["ingesters 1..N<br/>metrics.HeadStore · logs.Head"]
   G -->|"read routes"| Q["querier<br/>metrics.Merge · logs.Merge"]
-  Q -->|"1. every ingester in turn:<br/>POST /internal/v1/metrics/select<br/>POST /internal/v1/logs/select<br/>GET .../metrics/labels · label-values<br/>GET .../logs/labels · label-values"| I
-  Q -->|"2. POST /internal/v1/metrics/select<br/>POST /internal/v1/logs/select<br/>GET .../metrics/labels · label-values<br/>GET .../logs/labels · label-values"| S["store<br/>metrics.BlockStore · logs.ChunkStore"]
-  I -->|"POST /internal/v1/metrics/flush<br/>POST /internal/v1/logs/flush"| S
-  C["compactor<br/>compactor.Compactor · rpc.BlockManager"] -->|"GET /internal/v1/metrics/blocks<br/>POST /internal/v1/metrics/compact<br/>POST /internal/v1/metrics/retention"| S
+  Q -->|"1. every ingester in parallel:<br/>POST /internal/v1/metrics/select<br/>POST /internal/v1/logs/select<br/>GET .../metrics/labels · label-values<br/>GET .../logs/labels · label-values"| I
+  Q -->|"2. then every store in parallel:<br/>POST /internal/v1/metrics/select<br/>POST /internal/v1/logs/select<br/>GET .../metrics/labels · label-values<br/>GET .../logs/labels · label-values"| S["stores 1..M<br/>metrics.BlockStore · logs.ChunkStore"]
+  I -->|"each key to its R_s stores:<br/>POST /internal/v1/metrics/flush<br/>POST /internal/v1/logs/flush"| S
+  C["compactor<br/>compactor.Compactor · compactor.MultiBlockManager"] -->|"each store in turn:<br/>GET /internal/v1/metrics/blocks<br/>POST /internal/v1/metrics/compact<br/>POST /internal/v1/metrics/retention"| S
 ```
 
 ## The ring
@@ -49,7 +50,8 @@ The gateway and the querier take `OBS_INGESTER_URL` as a comma-separated list;
 each URL is a ring member, identified by the URL with any trailing `/` trimmed.
 The list is refused if an element is empty or repeats another after that
 normalization. One URL is a one-member ring and behaves as the single ingester
-did before. `OBS_STORE_URL` and `OBS_QUERIER_URL` stay single URLs.
+did before. `OBS_QUERIER_URL` stays a single URL; `OBS_STORE_URL` is a list
+too, for the store ring ([Stores](#stores-64)), which is built the same way.
 
 `internal/ring` is a token ring with no I/O: each member gets 128 tokens on a
 64-bit ring, and a key belongs to the member of the first token at or past its
@@ -146,9 +148,9 @@ and the two values must match: their `ring ready` lines carry
 - **Reads.** The querier skips up to W-1 ingesters that fail with an outage; a
   protocol error, one more outage, or every ingester skipped fails the read.
   Every acknowledged write is on at least W replicas, so at least one replica
-  is still read. Copies differ only in generation and collapse on read; the
+  is still read. Copies differ only in generation and collapse on read; each
   store holds RF copies of a flushed log chunk, and metrics compaction merges
-  the copies.
+  the copies within a store.
 - **Deadlines.** `OBS_INGESTER_TIMEOUT` (default 10s, at least 100ms) bounds
   each push and each ingester read; a timeout is an outage, so a hung ingester
   is a failed replica.
@@ -164,7 +166,8 @@ and the two values must match: their `ring ready` lines carry
 ### Read path
 
 See [Reads](#reads-and-why-a-flush-is-invisible-to-them): the querier reads
-every ingester in turn, then the store, skipping up to W-1 failed ingesters.
+every ingester in parallel, then every store in parallel, skipping up to W-1
+failed ingesters and W_s-1 failed stores.
 
 ### Membership changes
 
@@ -180,7 +183,7 @@ read would answer `200` with those writes missing):
 - **Removing an ingester:** restart the **gateway** without it, drain it
   (`POST /internal/v1/drain` first stops the ingester taking writes, then
   answers `200` only once its whole head — every metrics chunk, open ones
-  included, and every buffered log line — is in the store, so the `200` covers
+  included, and every buffered log line — is on a quorum of its stores, so the `200` covers
   every write it acknowledged), stop it, then restart the **querier** without
   it. Reads answer `503` while a stopped ingester is still on the querier's
   list. A graceful stop runs the same drain within the process's shutdown
@@ -222,20 +225,84 @@ a µs delta is larger than a counter's. Measured for a 120-sample chunk at a
 15 s interval: 4.64 bytes per sample with the old counter and 5.63 with µs
 generations, 0.99 more.
 
+## Stores (6.4)
+
+Flushed data is sharded over several stores and replicated to R_s of them, so
+one store down fails neither flushes nor reads, and stores can be added and
+removed without losing data.
+
+- **Store ring.** `OBS_STORE_URL` is a list on the ingester, querier, and
+  compactor, parsed like `OBS_INGESTER_URL`, and `internal/ring` builds a
+  second ring from it. A key's stores are `Replicas(hash, R_s)` with
+  `OBS_STORE_REPLICATION_FACTOR` (R_s, default 1, at most the store count; on
+  the ingester and querier only), over the same key the ingester ring uses
+  (`Labels.Hash()` for metrics, `StreamLabels.Hash()` for logs). Every
+  ingester replica of a series therefore sends its copy to the same stores,
+  and compaction there still merges the copies. The ingester logs `store ring
+  ready` with `stores` and `store_replication_factor` at startup.
+- **Flush quorum.** `rpc.ReplicatedBlockSink` and `rpc.ReplicatedChunkSink`
+  sit behind the heads' existing sink seams. For one batch they group the
+  series (streams) by store, send every store its group concurrently, and wait
+  for all of them; the batch succeeds only if every key has W_s = R_s/2 + 1
+  acknowledgements. Otherwise they return a `StoreQuorumError` (an outage only
+  when every failure was one) and the head keeps the whole batch, exactly as a
+  failed single-store flush did. A re-flush puts a second copy on the stores
+  that had acknowledged; reads and compaction collapse it. Outcomes are
+  counted in `obs_ingester_store_flush_total{outcome}`: `full`, `degraded`
+  (quorum met, some store failed), or `failed`.
+- **Stragglers.** A degraded batch's failed groups go to `rpc.StragglerQueue`,
+  which resends each body unchanged to its store on the ingester's maintenance
+  loop, oldest first, with a per-item backoff from 1 s doubling to 1 m. It is
+  bounded by `OBS_STORE_RETRY_MAX_BYTES` (64 MiB) and `OBS_STORE_RETRY_MAX_AGE`
+  (15 m), dropping the oldest past either, and is in memory only
+  ([../api/limitations.md](../api/limitations.md)).
+- **Reads.** The querier reads every store in parallel and skips up to
+  W_s − 1 that fail with an outage. Every acknowledged flush is on at least W_s
+  of a key's R_s stores, so with at most W_s − 1 skipped, one store holding
+  each key is still read. Store reads are bounded by `OBS_INGESTER_TIMEOUT`,
+  like ingester reads, and counted in
+  `obs_querier_store_reads_total{store,outcome}`; a read that skipped a store
+  names it in its `read answered by replication` line.
+- **Member identity.** A store given `OBS_STORE_SELF_URL` refuses, with `421`,
+  a request whose `X-Obs-Member` names another store, as an ingester does, so
+  a reused address cannot land a key's copy on a store that does not own it.
+- **Adding a store** is staged: the querier and compactor list it before any
+  ingester flushes to it. Keys whose replica set changes keep their older
+  blocks on their previous stores; reads cover every store, and those copies
+  stay until retention.
+- **Removing a store** is staged the other way: the ingesters drop it, then
+  `POST /internal/v1/handoff` on the leaving store closes its flush barrier and
+  copies every series and stream it holds to every owner on the remaining
+  ring, answering `200` only when all of them acknowledged every batch
+  ([../api/internal.md](../api/internal.md#handoff-store-only)); only then do
+  the querier and compactor drop it. Every key on the leaving store had at
+  least W_s copies on its old replica set; the handoff gives every owner on
+  the new ring a copy, so reads that skip W_s − 1 stores afterwards still find
+  one. One store leaves per handoff.
+
+The procedures are in
+[../runbooks/split-demo.md](../runbooks/split-demo.md#add-or-remove-a-store).
+
 ## The flush
 
 ```mermaid
 sequenceDiagram
   participant W as WALStore.FlushBlock
   participant H as HeadStore.FlushBlock
-  participant S as store: BlockStore.IngestSeriesChunks
+  participant R as rpc.ReplicatedBlockSink
+  participant S as stores: BlockStore.IngestSeriesChunks
   W->>H: flush sealed chunks
   H->>H: write metrics/genfloor (NextGeneration)
   loop each batch of at most 16 MiB of chunk bytes, at most block.MaxChunksPerSeries chunks per series
-    H->>S: POST /internal/v1/metrics/flush
-    S->>S: write block, validate, register (queryable)
-    S-->>H: 200 {"block_id"}
-    H->>H: DiscardSealedChunks(batch)
+    H->>R: IngestSeriesChunks(batch)
+    par each store owning a series in the batch
+      R->>S: POST /internal/v1/metrics/flush (that store's series)
+      S->>S: write block, validate, register (queryable)
+      S-->>R: 200 {"block_id"}
+    end
+    R->>R: every series on W_s stores? queue failed stores' bodies
+    R-->>H: ok, or StoreQuorumError (head keeps the batch)
+    H->>H: DiscardSealedChunks(batch), on ok only
   end
   H-->>W: done
   W->>W: write metrics/checkpoint, delete covered WAL segments
@@ -288,35 +355,58 @@ and flushes pause for 30 s.
 
 ## Reads, and why a flush is invisible to them
 
-The querier reads through `Merge(MergeHeads(ingesters...), store)` for each
-signal (`metrics.MergeHeads` and `logs.MergeHeads` fold the existing `Merge`
-over the ring's members; one member is that member itself). Each source is read
-to completion before the next starts, never two at once: every ingester in
-turn, then the store.
+The querier reads through
+`Merge(MergeHeadsWith(ingesterOpts, ingesters...), MergeHeadsWith(storeOpts, stores...))`
+for each signal. `metrics.MergeHeadsWith` and `logs.MergeHeadsWith` read every
+member of one layer concurrently, keep each answer at its member's index, and
+once every needed answer is in, fold them with `Merge` in member order — the
+fold a sequential read would do — so the answer does not depend on which
+member replies first (`TestMergeHeadsWithAnswerIgnoresArrivalOrder`). A layer
+is decided as soon as its outcome is certain: a non-skippable error, or one
+outage more than it tolerates, fails it at once, and the reads still running
+are cancelled; a read cancelled that way is not counted as an outage
+(`TestMergeHeadsWithStopsEarlyAndDoesNotObserveCancelled`). If every member was
+skipped, the last outage is returned rather than an empty answer.
 
-1. the store registers a flushed block before it acknowledges the flush;
-2. an ingester discards those chunks only after the acknowledgement;
-3. the querier finishes reading every ingester before it starts on the store.
+`Merge` reads its first argument to completion before it starts the second, so
+the two layers never overlap: every ingester read finishes before any store
+read starts (`TestMergeHeadsFinishesEveryHeadBeforeTheStore`). That order is
+the whole no-gap argument, and the reason the ingesters come first:
+
+1. a store registers a flushed block before it acknowledges the flush;
+2. an ingester discards those chunks only after a quorum of its stores
+   acknowledged;
+3. the querier finishes reading every ingester before it starts on the stores.
+
+Read the stores first and a flush landing between the two layers would be in
+neither answer. Reads within a layer may run in parallel, which is why read
+latency is the slowest ingester plus the slowest store, not the sum
+(`TestStoreClusterReadsIngestersInParallel`). No member is pruned by selector:
+a series is placed by the hash of its full label set, and no selector proves
+it names one ([../api/limitations.md](../api/limitations.md)).
 
 ```mermaid
 sequenceDiagram
   participant GR as Grafana
   participant Q as querier: metrics.QueryEngine · logs.QueryEngine
   participant I as ingesters 1..N: HeadStore.Select · logs.AsSource(Head)
-  participant S as store: BlockStore.Select · logs.AsSource(ChunkStore)
+  participant S as stores 1..M: BlockStore.Select · logs.AsSource(ChunkStore)
   GR->>Q: GET·POST /api/v1/query_range · GET /loki/api/v1/query_range
-  loop each ingester in turn
+  par every ingester
     Q->>I: 1. POST /internal/v1/metrics/select (or /logs/select)
     I-->>Q: head series/streams
   end
-  Q->>S: 2. POST /internal/v1/metrics/select (or /logs/select)
-  S-->>Q: block/chunk series/streams
+  par then every store
+    Q->>S: 2. POST /internal/v1/metrics/select (or /logs/select)
+    S-->>Q: block/chunk series/streams
+  end
   Q->>Q: sortAndDedup (metrics) · mergeEntries (logs)
   Q-->>GR: promVectorData/promMatrixData · resultType streams
 ```
 
 A sample missing from every ingester's answer was therefore discarded before
-that read began, so the store had it before its read began. Overlap between the
+that read began, so a quorum of its stores had it before the store reads
+began, and with at most W_s − 1 stores skipped one of them is read. Overlap between the
 answers is resolved per signal, by the same rule the equivalent all-in-one path
 already applies between its own head and persisted data — one rule per signal,
 not two, shared by all-in-one and split:
@@ -330,6 +420,16 @@ not two, shared by all-in-one and split:
   all-in-one.
 
 ## Compaction
+
+The compactor maintains every store in its `OBS_STORE_URL`, one after another:
+`compactor.MultiBlockManager` compacts each store to stable (repeating its
+compaction until nothing is left to merge), then applies retention to each. A
+store that fails is logged, counted in
+`obs_compactor_store_passes_total{store,outcome}` (one per store per
+compaction or retention call), and skipped; the others are still maintained
+(`TestRunOnceCompactsHealthyStoreToStableWhileAnotherFails`). Compaction never
+crosses stores: each store merges the blocks it holds, including the ingester
+replicas' copies of its keys.
 
 The compactor owns the policy — planning with `compactor.Plan`, the cadence,
 the retention clock, and the maintenance metrics. The store owns the mechanism:
@@ -364,13 +464,17 @@ sequenceDiagram
 
 | Down | Writes | Reads and metadata | Background work |
 |---|---|---|---|
-| store | accepted: WAL + head; the head grows | `503` `unavailable` | flushes and compaction passes fail, are counted, and retry |
-| one ingester | `503` at the gateway for any batch with a key it owns; other batches succeed | `503` at the querier | — |
+| one store (of 4, R_s 3) | accepted | complete: the querier skips it | flushes meet quorum (`degraded`) and queue its copies for retry; its compaction is skipped |
+| two stores (of 4, R_s 3) | accepted: WAL + head; the heads grow | `503` `unavailable` | a flush batch with a key on both fails, is counted, and retries; the head keeps it |
+| one ingester (RF 1) | `503` at the gateway for any batch with a key it owns; other batches succeed | `503` at the querier | — |
 | querier | unaffected | `503` at the gateway | — |
 | compactor | unaffected | unaffected | no compaction or retention until it returns |
 
 Reads fail closed: a query never answers from some sources while another is
-down, because a partial answer would look complete. Readiness reports only a
+down beyond what replication covers, because a partial answer would look
+complete. The ingester rows for RF above 1 are in
+[Replication](#replication-63); with stores, the table above is the Compose
+and Helm default. Readiness reports only a
 process's own state — its data directory, for the ingester and store — so one
 component's outage never marks its dependents unready.
 
@@ -392,7 +496,13 @@ member's host:port; `outcome` is `ok`, `unavailable`, or `error`), `obs_gateway_
 (see [Replication](#replication-63)), and, since
 validation now runs there, the ingest rejection counters. Each ingester counts
 the samples and lines it ingested, which shows how evenly the ring spreads
-writes. The querier exports `obs_querier_ingester_reads_total{ingester,outcome}`. Every scrape target
+writes. The querier exports `obs_querier_ingester_reads_total{ingester,outcome}`
+and `obs_querier_store_reads_total{store,outcome}`. Each ingester exports
+`obs_ingester_store_flush_total{outcome}`, `obs_ingester_store_retries_total{outcome}`
+(`ok`, `failed`, `dropped`), and `obs_ingester_store_retry_pending_bytes`; the
+compactor exports `obs_compactor_store_passes_total{store,outcome}`. The
+internals dashboard plots them as "Store flush quorum", "Store reads", and
+"Store retry queue". Every scrape target
 carries a `component` label; the internals dashboard counts HTTP only at the
 edge (`all-in-one` or `gateway`) and plots `up` by component. Every log line
 carries `target=<mode>`, and one `X-Request-Id` follows a request from the
@@ -402,11 +512,13 @@ gateway through the querier to the ingester and store.
 
 - Compose: [../runbooks/split-demo.md](../runbooks/split-demo.md), from
   `deployments/docker/docker-compose.split.yml`, with three ingesters
-  (`ingester-1` to `ingester-3`). The ingesters and store get a
+  (`ingester-1` to `ingester-3`) and four stores (`store-1` to `store-4`) at
+  store replication factor 3. The ingesters and stores get a
   60 s `stop_grace_period` there, long enough for a graceful stop to finish an
   in-flight flush instead of being killed mid-write.
 - Kubernetes: the backend chart's `topology: split`; see
   [../../deployments/helm/README.md](../../deployments/helm/README.md), with
-  `split.ingester.replicas` ingesters (default 3). The
+  `split.ingester.replicas` ingesters (default 3) and `split.store.replicas`
+  stores (default 4) at `split.storeReplicationFactor` (default 3). The
   ingester and store StatefulSets set `terminationGracePeriodSeconds: 60` for
   the same reason.
