@@ -1592,3 +1592,70 @@ func (bs *BlockStore) SelectLabelNames(context.Context) ([]string, error) {
 func (bs *BlockStore) SelectLabelValues(_ context.Context, name string) ([]string, error) {
 	return bs.LabelValues(name), nil
 }
+
+// ExportSeries calls fn with every series in every block, block by block, in
+// batches of at most batchBytes estimated wire bytes (BatchSeriesChunks). A
+// series held by several blocks appears once per block, each time with only
+// that block's chunks and never twice in one batch: chunks of different blocks
+// may overlap in time, and reads and compaction dedup copies by generation. It
+// returns the number of distinct series exported. A block's data is collected
+// under the read lock and fn runs outside it; fn may do network I/O. ctx is
+// checked between batches.
+func (bs *BlockStore) ExportSeries(ctx context.Context, batchBytes int, fn func([]SeriesChunks) error) (series int, err error) {
+	distinct := make(map[SeriesID]struct{})
+	bs.mu.RLock()
+	n := len(bs.blocks)
+	bs.mu.RUnlock()
+	for i := 0; i < n; i++ {
+		if err := ctx.Err(); err != nil {
+			return len(distinct), err
+		}
+		all, err := bs.collectBlockSeries(i)
+		if err != nil {
+			return len(distinct), err
+		}
+		for _, batch := range BatchSeriesChunks(all, batchBytes) {
+			if err := ctx.Err(); err != nil {
+				return len(distinct), err
+			}
+			for _, sc := range batch {
+				distinct[sc.ID] = struct{}{}
+			}
+			if err := fn(batch); err != nil {
+				return len(distinct), err
+			}
+		}
+	}
+	return len(distinct), nil
+}
+
+// collectBlockSeries reads every series of the i-th block (if it still exists)
+// with its chunks, sorted by series ID, under the read lock.
+func (bs *BlockStore) collectBlockSeries(i int) ([]SeriesChunks, error) {
+	bs.mu.RLock()
+	defer bs.mu.RUnlock()
+	if i >= len(bs.blocks) {
+		return nil, nil
+	}
+	r := bs.blocks[i]
+	var out []SeriesChunks
+	for _, se := range r.Series() {
+		lbls, err := blockPairsToLabels(se.Labels)
+		if err != nil {
+			return nil, fmt.Errorf("blockstore: export series %d labels: %w", se.ID, err)
+		}
+		sc := SeriesChunks{ID: SeriesID(se.ID), Labels: lbls}
+		for _, ref := range se.Chunks {
+			c, err := r.ReadChunk(ref)
+			if err != nil {
+				return nil, fmt.Errorf("blockstore: export series %d chunk: %w", se.ID, err)
+			}
+			sc.Chunks = append(sc.Chunks, c)
+		}
+		if len(sc.Chunks) > 0 {
+			out = append(out, sc)
+		}
+	}
+	sort.Slice(out, func(a, b int) bool { return out[a].ID < out[b].ID })
+	return out, nil
+}
