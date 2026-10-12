@@ -19,10 +19,13 @@ import (
 // signals, and the block maintenance the compactor drives. A flush answers
 // only once the data is durable and queryable — the ingester drops what it
 // sent when it gets the 200, and that ordering is what keeps a flush invisible
-// to queries.
-func MountStore(r chi.Router, blocks *metrics.BlockStore, chunks *logs.ChunkStore) {
-	r.Post("/metrics/flush", func(w http.ResponseWriter, req *http.Request) { metricsFlush(w, req, blocks) })
-	r.Post("/logs/flush", func(w http.ResponseWriter, req *http.Request) { logsFlush(w, req, chunks) })
+// to queries. Once a handoff closes barrier, both flush-in routes answer 503.
+func MountStore(r chi.Router, blocks *metrics.BlockStore, chunks *logs.ChunkStore, barrier *FlushBarrier) {
+	if barrier == nil {
+		barrier = &FlushBarrier{}
+	}
+	r.Post("/metrics/flush", func(w http.ResponseWriter, req *http.Request) { metricsFlush(w, req, blocks, barrier) })
+	r.Post("/logs/flush", func(w http.ResponseWriter, req *http.Request) { logsFlush(w, req, chunks, barrier) })
 	r.Get("/metrics/blocks", func(w http.ResponseWriter, req *http.Request) {
 		infos := blocks.BlockInfos()
 		out := blocksResponse{Blocks: make([]wireBlockInfo, len(infos))}
@@ -35,7 +38,11 @@ func MountStore(r chi.Router, blocks *metrics.BlockStore, chunks *logs.ChunkStor
 	r.Post("/metrics/retention", func(w http.ResponseWriter, req *http.Request) { retention(w, req, blocks) })
 }
 
-func metricsFlush(w http.ResponseWriter, r *http.Request, blocks *metrics.BlockStore) {
+func metricsFlush(w http.ResponseWriter, r *http.Request, blocks *metrics.BlockStore, barrier *FlushBarrier) {
+	if barrier.Closed() {
+		writeError(w, http.StatusServiceUnavailable, handingOffMessage)
+		return
+	}
 	body, ok := readBody(w, r, FlushBodyLimit)
 	if !ok {
 		return
@@ -74,7 +81,15 @@ func metricsFlush(w http.ResponseWriter, r *http.Request, blocks *metrics.BlockS
 		}
 		series = append(series, sc)
 	}
+	// Admitted under the barrier so a handoff's Close waits for this block to
+	// be registered before it exports.
+	release, ok := barrier.enter()
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, handingOffMessage)
+		return
+	}
 	meta, err := blocks.IngestSeriesChunks(r.Context(), series)
+	release()
 	if err != nil {
 		// IngestSeriesChunks wraps ErrInvalidSeriesChunks for a caller error in the
 		// series it was handed (e.g. the same series twice in one flush): that is a
@@ -89,7 +104,11 @@ func metricsFlush(w http.ResponseWriter, r *http.Request, blocks *metrics.BlockS
 	writeJSON(w, http.StatusOK, metricsFlushResponse{BlockID: meta.BlockID, Series: meta.NumSeries, Samples: meta.NumSamples})
 }
 
-func logsFlush(w http.ResponseWriter, r *http.Request, chunks *logs.ChunkStore) {
+func logsFlush(w http.ResponseWriter, r *http.Request, chunks *logs.ChunkStore, barrier *FlushBarrier) {
+	if barrier.Closed() {
+		writeError(w, http.StatusServiceUnavailable, handingOffMessage)
+		return
+	}
 	body, ok := readBody(w, r, FlushBodyLimit)
 	if !ok {
 		return
@@ -130,7 +149,14 @@ func logsFlush(w http.ResponseWriter, r *http.Request, chunks *logs.ChunkStore) 
 		entries += len(sd.Entries)
 		streams = append(streams, sd)
 	}
-	if err := chunks.IngestStreams(r.Context(), streams); err != nil {
+	release, ok := barrier.enter()
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, handingOffMessage)
+		return
+	}
+	err := chunks.IngestStreams(r.Context(), streams)
+	release()
+	if err != nil {
 		internalError(w, r, "logs flush-in failed", err)
 		return
 	}
