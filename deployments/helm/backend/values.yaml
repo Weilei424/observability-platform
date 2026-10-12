@@ -49,8 +49,9 @@ startupProbe:
 topology: all-in-one
 
 # Settings for topology: split; ignored in all-in-one. The ingester runs
-# `split.ingester.replicas` pods behind a ring (Phase 6.2); the store and
-# compactor are singletons and the chart refuses more than one.
+# `split.ingester.replicas` pods behind a ring (Phase 6.2); the store runs
+# `split.store.replicas` pods, each block on storeReplicationFactor of them
+# (Phase 6.4); the compactor is a singleton and the chart refuses more than one.
 # Their PVCs use persistence.storageClassName above.
 split:
   # How many distinct ingesters every write goes to (the gateway) and how many
@@ -59,6 +60,12 @@ split:
   # chart refuses it otherwise. Changing it rolls the gateway and the querier;
   # stage a change with querier.replicationFactor below, as the chart requires.
   replicationFactor: 3
+  # How many distinct stores every flushed block goes to (the ingesters) and how
+  # many copies a read dedups (the querier); the compactor never takes it. Must
+  # not exceed the stores the ingesters flush to (store.writeReplicas, else
+  # store.replicas); the chart refuses it otherwise. config.OBS_STORE_REPLICATION_FACTOR
+  # is refused.
+  storeReplicationFactor: 3
   gateway:
     replicas: 1
     resources:
@@ -90,7 +97,15 @@ split:
       requests: { cpu: 100m, memory: 128Mi }
       limits: { memory: 512Mi }
   store:
-    replicas: 1
+    # Store pods; the querier and compactor read every one, each pod knows its
+    # own URL (OBS_STORE_SELF_URL, from its pod name).
+    replicas: 4
+    # Unset, the ingesters flush to every store. Set it only to stage a store
+    # change: adding, raise replicas first and writeReplicas after; removing,
+    # lower writeReplicas first, hand off the leaving store (runbook), then
+    # lower replicas. On an upgrade the chart refuses replicas below the stores
+    # the running ingesters flush to.
+    # writeReplicas: 4
     persistence:
       size: 2Gi
     resources:
