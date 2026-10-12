@@ -1,12 +1,13 @@
 # The split topology: the five components as separate containers (three
-# ingesters behind a ring), with Grafana,
+# ingesters behind a ring, four stores behind a store ring), with Grafana,
 # Prometheus, and both producers exactly as in docker-compose.yml. The gateway
 # answers as `backend` on the Compose network, so every datasource, producer, and
 # runbook URL that names the backend reaches it unchanged — Grafana cannot tell
 # the difference, which tests/e2e/compose_smoke.sh checks.
 #
-# Every durable directory has one owner: each ingester keeps its own WALs, the store
-# keeps blocks and log chunks. No volume is shared between components.
+# Every durable directory has one owner: each ingester keeps its own WALs, each
+# store keeps the blocks and log chunks of the keys it owns. No volume is shared
+# between components.
 #
 # The components have no depends_on between one another, on purpose: each must
 # start with its peers down (tests/e2e/compose_split_test.go pins that).
@@ -22,6 +23,16 @@ x-ring-env: &ring-env
   OBS_REPLICATION_FACTOR: "3"
   OBS_INGESTER_TIMEOUT: "10s"
 
+# The store ring the ingesters flush to and the querier reads from: both must
+# place a key on the same stores (spec §9.1), so the list and the store
+# replication factor live in one place. R_s=3 on four stores: a flush needs a
+# per-key quorum of 2, so one store down is survivable and two down is not. The
+# compactor takes the list alone (it walks each store on its own and refuses
+# OBS_STORE_REPLICATION_FACTOR).
+x-store-ring-env: &store-ring-env
+  OBS_STORE_URL: http://store-1:8080,http://store-2:8080,http://store-3:8080,http://store-4:8080
+  OBS_STORE_REPLICATION_FACTOR: "3"
+
 x-ingester: &ingester
   restart: unless-stopped
   # Docker's default stop_grace_period is 10s: SIGTERM, then SIGKILL if the
@@ -29,6 +40,23 @@ x-ingester: &ingester
   # its 50s shutdown budget: a 10s HTTP drain, then a drain of its whole head
   # into the store. Against a slow or loaded store the default grace period can
   # SIGKILL it mid-flush; 60s covers the budget with margin.
+  stop_grace_period: 60s
+  build:
+    context: ../../
+    dockerfile: deployments/docker/Dockerfile
+    target: backend
+  healthcheck:
+    test: ["CMD", "/server", "-healthcheck"]
+    interval: 5s
+    timeout: 3s
+    retries: 12
+    start_period: 5s
+
+x-store: &store
+  restart: unless-stopped
+  # Matches the ingester's stop_grace_period: a store stop mid-flush (an
+  # ingester still delivering its 30s-timeout flush request) should finish
+  # that request rather than be SIGKILLed by Docker's 10s default.
   stop_grace_period: 60s
   build:
     context: ../../
@@ -78,7 +106,7 @@ services:
       OBS_TARGET: ingester
       OBS_DATA_DIR: /data
       OBS_LOG_LEVEL: info
-      OBS_STORE_URL: http://store:8080
+      <<: *store-ring-env
       # Demo-only, as in docker-compose.yml: at demo volume the 8 MiB default
       # would never flush, and the store's chunk path would never run.
       OBS_LOGS_FLUSH_THRESHOLD_BYTES: "16384"
@@ -114,8 +142,7 @@ services:
     environment:
       OBS_TARGET: querier
       OBS_LOG_LEVEL: info
-      <<: *ring-env
-      OBS_STORE_URL: http://store:8080
+      <<: [*ring-env, *store-ring-env]
     healthcheck:
       test: ["CMD", "/server", "-healthcheck"]
       interval: 5s
@@ -123,28 +150,42 @@ services:
       retries: 12
       start_period: 5s
 
-  store:
-    restart: unless-stopped
-    # Matches the ingester's stop_grace_period: a store stop mid-flush (an
-    # ingester still delivering its 30s-timeout flush request) should finish
-    # that request rather than be SIGKILLed by Docker's 10s default.
-    stop_grace_period: 60s
-    build:
-      context: ../../
-      dockerfile: deployments/docker/Dockerfile
-      target: backend
-    environment:
+  store-1:
+    <<: *store
+    environment: &store-env
       OBS_TARGET: store
       OBS_DATA_DIR: /data
       OBS_LOG_LEVEL: info
+      # Each store's own URL as OBS_STORE_URL lists it: it answers 421 to a
+      # request routed for another store, so a reshuffled container address
+      # cannot land a key's copy on a store that does not own it.
+      OBS_STORE_SELF_URL: http://store-1:8080
     volumes:
-      - obs-store-data:/data
-    healthcheck:
-      test: ["CMD", "/server", "-healthcheck"]
-      interval: 5s
-      timeout: 3s
-      retries: 12
-      start_period: 5s
+      - obs-store-1-data:/data
+
+  store-2:
+    <<: *store
+    environment:
+      <<: *store-env
+      OBS_STORE_SELF_URL: http://store-2:8080
+    volumes:
+      - obs-store-2-data:/data
+
+  store-3:
+    <<: *store
+    environment:
+      <<: *store-env
+      OBS_STORE_SELF_URL: http://store-3:8080
+    volumes:
+      - obs-store-3-data:/data
+
+  store-4:
+    <<: *store
+    environment:
+      <<: *store-env
+      OBS_STORE_SELF_URL: http://store-4:8080
+    volumes:
+      - obs-store-4-data:/data
 
   compactor:
     restart: unless-stopped
@@ -155,7 +196,7 @@ services:
     environment:
       OBS_TARGET: compactor
       OBS_LOG_LEVEL: info
-      OBS_STORE_URL: http://store:8080
+      OBS_STORE_URL: http://store-1:8080,http://store-2:8080,http://store-3:8080,http://store-4:8080
     healthcheck:
       test: ["CMD", "/server", "-healthcheck"]
       interval: 5s
@@ -238,6 +279,9 @@ volumes:
   obs-ingester-1-data:
   obs-ingester-2-data:
   obs-ingester-3-data:
-  obs-store-data:
+  obs-store-1-data:
+  obs-store-2-data:
+  obs-store-3-data:
+  obs-store-4-data:
   obs-grafana-data:
   obs-prometheus-data:
