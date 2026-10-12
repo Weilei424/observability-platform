@@ -104,7 +104,7 @@ These are properties of the whole system, not of the query languages.
 - **Every read goes to every member; nothing is pruned.** The querier reads
   every ingester in parallel, then every store in parallel, so read latency is
   the slowest ingester plus the slowest store, not the sum of all of them
-  (`TestStoreClusterReadsIngestersInParallel`). Every ingester read finishes
+  (`TestMergeHeadsWithReadsHeadsInParallel` in `internal/metrics` and `internal/logs` for the layer-generic parallelism; `TestStoreClusterReadsIngestersInParallel` for the ingesters). Every ingester read finishes
   before any store read starts: that order is what keeps a flush invisible
   ([../architecture/components.md](../architecture/components.md#reads-and-why-a-flush-is-invisible-to-them)).
   No member is skipped by selector: a series is placed by the hash of its full
@@ -202,10 +202,12 @@ These are properties of the whole system, not of the query languages.
   ring keyed like the ingester ring. A flush batch succeeds once every key in it
   has `200`s from W_s = R_s/2 + 1 of its stores; otherwise the ingester keeps
   the whole batch and retries it, and a re-flush leaves a second copy on the
-  stores that had taken it, which reads and compaction collapse. A read skips
+  stores that had taken it: reads collapse it, and for metrics compaction removes it
+  (log copies stay on disk). A read skips
   up to W_s−1 stores that fail with an outage. At R_s 3 one store down fails
   neither flushes nor reads; two down fail every flush batch with a key on
-  both, and reads answer `503`. R_s 1 with one store is the 6.3 behaviour.
+  both, and reads answer `503`. R_s 1 with one store matches 6.3 except that a store read now times out after
+  `OBS_INGESTER_TIMEOUT` (default 10s; 6.3 store reads had no timeout).
   `OBS_STORE_REPLICATION_FACTOR` must be equal on the ingesters and the querier,
   as `OBS_REPLICATION_FACTOR` must on the gateway and querier; neither process
   checks the other. Raising it does not re-replicate blocks already flushed at
@@ -268,6 +270,18 @@ These are properties of the whole system, not of the query languages.
   `obs-store-data` volume are gone from the file, so the four new stores start
   empty, and what was flushed before the upgrade is no longer read (the old
   volume stays on disk until removed by hand).
+- **Store reads now have a timeout.** The querier's store reads stop after
+  `OBS_INGESTER_TIMEOUT` (default 10s); in 6.3 they had none, so a slow store
+  that used to answer late now counts as a failed store, skipped up to W_s−1 of
+  them and otherwise `503`.
+- **A store handoff has a fixed deadline and holds log entries in memory.** The
+  whole handoff is bounded by 10 minutes, not configurable, and every retry
+  resends everything, so a store that needs longer can never be handed off.
+  `ExportStreams` also holds every log entry in memory before sending, so a
+  store with a large log volume can run out of memory during a handoff. Neither
+  loses data: the store keeps its copy until the handoff succeeds. See the
+  remove-a-store procedure in
+  [../runbooks/split-demo.md](../runbooks/split-demo.md#add-or-remove-a-store).
 - **Log chunks are stored RF × R_s times.** Every ingester replica flushes its
   own copy, to each of the key's R_s stores. Reads deduplicate by `(timestamp,
   line)`, so answers never change, but disk use is RF × R_s times a single
