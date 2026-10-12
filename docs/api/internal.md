@@ -11,8 +11,8 @@ component's own port. This is not a public API:
   version, and a protocol break becomes `/internal/v2`.
 
 The ingester serves the six read routes over its in-memory heads, plus the two
-push routes; the store serves the six over its blocks and log chunks, plus five
-routes of its own. The
+push routes; the store serves the six over its blocks and log chunks, plus six
+routes of its own, the handoff route among them. The
 querier, ingester, and compactor call them through `internal/rpc`'s clients.
 
 ## Encoding
@@ -156,6 +156,10 @@ rather than silently replaced.
 `{"streams":[{"labels":{"service":"api"},"entries":[[1758600000000000000,"line"]]}]}` →
 `{"streams":1,"entries":1}`
 
+Both flush routes answer `503` `{"error":"store is handing off: it takes no new
+flushes"}` once a handoff has closed the store's flush barrier, until the store
+restarts ([Handoff](#handoff-store-only)).
+
 ## Push — ingester only
 
 The gateway validates a write itself, then sends each ingester the part the
@@ -238,6 +242,52 @@ it restarts.
 |---|---|
 | `200` | every write this ingester acknowledged is in the store |
 | `503` | the drain did not complete; what is left stays in the WAL, and writes stay refused |
+
+## Handoff — store only
+
+```http
+POST /internal/v1/handoff
+```
+
+```json
+{"stores":["http://store-b:8080","http://store-c:8080"],"replication_factor":2}
+```
+
+A leaving store copies everything it holds to the stores that remain.
+`stores` is the target ring, the stores that stay; `replication_factor` is how
+many owners each series and stream has on it. The body is checked first, and a
+refused body leaves the store taking flushes. `400` for:
+
+- an empty `stores` list;
+- a URL that does not normalize to a base URL;
+- the same store listed twice;
+- a `replication_factor` below 1 or above the number of stores listed;
+- a target equal to the store's own URL, when `OBS_STORE_SELF_URL` is set.
+
+Without a self URL the store cannot spot itself: listing the leaving store
+among the targets fails later, with `503`, because its own barrier refuses the
+copy.
+
+Then the barrier closes, waiting for flushes already admitted to finish, and it
+stays closed until the store restarts, even when the handoff fails. Both
+flush-in routes answer `503` `{"error":"store is handing off: it takes no new
+flushes"}`. The store then sends every metrics series, then every log stream,
+to every owner on the target ring through their flush-in routes, in batches.
+Every owner must acknowledge every batch. The whole handoff is bounded by 10
+minutes; each batch request by the store's request timeout.
+
+`{"series":1204,"streams":38}` — the distinct series and the streams
+acknowledged.
+
+| Status | Meaning |
+|---|---|
+| `200` | every owner acknowledged every batch |
+| `400` | the body was refused; the barrier is still open |
+| `503` | the handoff did not complete; the barrier stays closed |
+
+A `503` is `{"series":n,"streams":m,"error":"..."}`: the counts acknowledged
+before the error. Retry until `200`: a retry resends everything, and the
+duplicates it leaves on the owners collapse on read and at compaction.
 
 ## Block maintenance — store only, driven by the compactor
 
