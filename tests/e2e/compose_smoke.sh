@@ -156,15 +156,16 @@ LOG_FILE=""
 # is checked after startup and again at the end.
 EXPECTED_SERVICES="backend grafana load-generator prometheus sample-app"
 
-# What differs by topology: the running set, which container holds log chunks,
+# What differs by topology: the running set, which containers hold log chunks,
 # which one a restart proves durability through, and whose logs a failure dumps.
 if [ "$TOPOLOGY" = split ]; then
-    EXPECTED_SERVICES="compactor gateway grafana ingester-1 ingester-2 ingester-3 load-generator prometheus querier sample-app store"
-    CHUNKS_SERVICE=store
+    EXPECTED_SERVICES="compactor gateway grafana ingester-1 ingester-2 ingester-3 load-generator prometheus querier sample-app store-1 store-2 store-3 store-4"
+    # Four stores at R_s 3: each holds the chunks of the keys it owns.
+    CHUNKS_SERVICE="store-1 store-2 store-3 store-4"
     # The flush marker's series is owned by whichever ingester the ring picks, so
     # the restart covers all three: each one's graceful stop flushes its own head.
     RESTART_SERVICE="ingester-1 ingester-2 ingester-3"
-    FAILURE_LOG_SERVICES="gateway ingester-1 ingester-2 ingester-3 querier store grafana sample-app"
+    FAILURE_LOG_SERVICES="gateway ingester-1 ingester-2 ingester-3 querier store-1 store-2 store-3 store-4 grafana sample-app"
 else
     CHUNKS_SERVICE=backend
     RESTART_SERVICE=backend
@@ -270,18 +271,20 @@ check_services() {
     fi
 }
 
-# chunk_count prints the number of persisted log chunk files. `docker compose cp`
+# chunk_count prints the number of persisted log chunk files, summed over every
+# container in CHUNKS_SERVICE (one in all-in-one, the four stores in split). `docker compose cp`
 # is used rather than `exec`, because the runtime image is distroless and has no
 # shell to run `ls` in.
 chunk_count() {
-    local tmp
-    tmp="$(mktemp -d)"
-    if dcq cp "$CHUNKS_SERVICE":/data/logs/chunks "$tmp/chunks" >/dev/null 2>&1; then
-        find "$tmp/chunks" -name '*.chunk' 2>/dev/null | wc -l
-    else
-        echo 0
-    fi
-    rm -rf "$tmp"
+    local tmp svc n=0
+    for svc in $CHUNKS_SERVICE; do
+        tmp="$(mktemp -d)"
+        if dcq cp "$svc":/data/logs/chunks "$tmp/chunks" >/dev/null 2>&1; then
+            n=$(( n + $(find "$tmp/chunks" -name '*.chunk' 2>/dev/null | wc -l) ))
+        fi
+        rm -rf "$tmp"
+    done
+    echo "$n"
 }
 
 teardown() {
@@ -754,11 +757,11 @@ echo ""
 echo "-- Platform self-observability --"
 
 # scrape_ok is true once Prometheus reports every expected target up: the one
-# backend in all-in-one, all seven component instances in split.
+# backend in all-in-one, all ten component instances in split.
 scrape_ok() {
     local q want body
     if [ "$TOPOLOGY" = split ]; then
-        q='count(up{service="observability-platform"} == 1)'; want=7
+        q='count(up{service="observability-platform"} == 1)'; want=10
     else
         q='up{job="observability-platform-backend"}'; want=1
     fi
@@ -910,10 +913,10 @@ if [ "$TOPOLOGY" = split ]; then
         log_fail "flush marker value $MARKER_VALUE absent after the ingester restart; body: $BODY"
     fi
 
-    block_count() {
+    block_count() { # <store service>
         local tmp n
         tmp="$(mktemp -d)"
-        if dcq cp store:/data/metrics/blocks "$tmp/blocks" >/dev/null 2>&1; then
+        if dcq cp "$1":/data/metrics/blocks "$tmp/blocks" >/dev/null 2>&1; then
             n="$(find "$tmp/blocks" -mindepth 1 -maxdepth 1 -type d | wc -l)"
         else
             n=0
@@ -921,10 +924,14 @@ if [ "$TOPOLOGY" = split ]; then
         rm -rf "$tmp"
         echo "$n"
     }
-    if [ "$(block_count)" -ge 1 ]; then
-        log_pass "the store holds at least one flushed block"
+    STORES_WITH_BLOCKS=""
+    for svc in $CHUNKS_SERVICE; do
+        [ "$(block_count "$svc")" -ge 1 ] && STORES_WITH_BLOCKS="$STORES_WITH_BLOCKS $svc"
+    done
+    if [ -n "$STORES_WITH_BLOCKS" ]; then
+        log_pass "at least one store holds a flushed block:$STORES_WITH_BLOCKS"
     else
-        log_fail "the store holds no block after the ingester's flush"
+        log_fail "no store holds a block after the ingesters' flush"
     fi
 
     # This script sets `pipefail` (top of file), and `dcq logs ... | grep -q
@@ -938,8 +945,9 @@ if [ "$TOPOLOGY" = split ]; then
     # because the target field was ever missing (every one of these services
     # writes it on their very first log line, at startup). Capturing to a file
     # first and grepping the file removes the pipe (and the SIGPIPE) entirely.
-    # The three ingesters are services ingester-N but all run target=ingester.
-    for svc in gateway ingester-1 ingester-2 ingester-3 querier store compactor; do
+    # The three ingesters are services ingester-N but all run target=ingester;
+    # likewise the four stores run target=store.
+    for svc in gateway ingester-1 ingester-2 ingester-3 querier store-1 store-2 store-3 store-4 compactor; do
         want="${svc%-[0-9]}"
         LOG_FILE="$(mktemp)"
         dcq logs --no-log-prefix "$svc" >"$LOG_FILE" 2>/dev/null
@@ -952,22 +960,44 @@ if [ "$TOPOLOGY" = split ]; then
         LOG_FILE=""
     done
 
-    # A store outage: reads fail closed with 503 unavailable, writes still
-    # land, for both families the spec covers (metrics and logs, §8.1) — not
-    # just metrics.
-    if dc stop store >/dev/null 2>&1; then
-        log_pass "store stopped"
+    # value_reads_back <metric> <number>: the metric's Grafana read carries that
+    # value. BODY keeps the last response for the FAIL message (wait_for runs in
+    # this shell). Polled with a deadline rather than read once: a single read
+    # straight after a store returns can race the querier's view of it.
+    value_reads_back() { # <metric> <number that must appear in the result>
+        BODY=$(promquery "$1")
+        printf '%s' "$BODY" | jq -e --argjson want "$2" \
+            '[.. | arrays | select(length > 0) | select(all(.[]; type == "number")) | .[]] | index($want)' >/dev/null 2>&1
+    }
+    reads_recovered() {
+        [ "$(curl -s "${CURL_TIMEOUTS[@]}" -o /dev/null -w '%{http_code}' -G "$BACKEND/api/v1/query" --data-urlencode 'query=compose_e2e_outage')" = "200" ]
+    }
+
+    # Spec §10: four stores at R_s 3, so a read skips at most W_s-1 = 1 store.
+    # One store down: writes land and reads still complete, for both families
+    # (metrics and logs), including the flushed marker that only the stores hold.
+    if dc stop store-1 >/dev/null 2>&1; then
+        log_pass "store-1 stopped"
     else
-        log_fail "store stop failed"
+        log_fail "store-1 stop failed"
     fi
-    OUTAGE=$(curl -s "${CURL_TIMEOUTS[@]}" -w '\n%{http_code}' -G "$BACKEND/api/v1/query" --data-urlencode 'query=compose_e2e_marker')
-    if [ "$(printf '%s' "$OUTAGE" | tail -1)" = "503" ] && grep -qF -- '"errorType":"unavailable"' <<< "$OUTAGE"; then
-        log_pass "a query with the store down answers 503 unavailable"
+    ONE_DOWN=$(curl -s "${CURL_TIMEOUTS[@]}" -w '\n%{http_code}' -G "$BACKEND/api/v1/query" --data-urlencode 'query=compose_e2e_flush_marker')
+    if [ "$(printf '%s' "$ONE_DOWN" | tail -1)" = "200" ]; then
+        log_pass "a query with one store down completes (200)"
     else
-        log_fail "a query with the store down answered: $OUTAGE"
+        log_fail "a query with one store down answered: $ONE_DOWN"
     fi
-    BODY=$(promquery 'compose_e2e_marker')
-    check_contains "Grafana surfaces the outage rather than an empty panel" "$BODY" "unavailable"
+    BODY=""
+    if wait_for "flush marker readable by value with one store down" "$READY_TIMEOUT" value_reads_back compose_e2e_flush_marker "$MARKER_VALUE"; then :
+    else
+        echo "    flush marker value $MARKER_VALUE absent with store-1 down; last body: $BODY"
+    fi
+    LOKI_ONE_DOWN=$(curl -s "${CURL_TIMEOUTS[@]}" -w '\n%{http_code}' -G "$BACKEND/loki/api/v1/query_range" --data-urlencode 'query={service="compose-e2e"}')
+    if [ "$(printf '%s' "$LOKI_ONE_DOWN" | tail -1)" = "200" ]; then
+        log_pass "a Loki query with one store down completes (200)"
+    else
+        log_fail "a Loki query with one store down answered: $(printf '%s' "$LOKI_ONE_DOWN" | head -c 300)"
+    fi
     # Stamped 10 s in the past, i.e. at least one 5 s Grafana step back: Grafana
     # aligns the range end down to a multiple of the step and the engine answers
     # each tick with the latest sample at or before it, so a sample stamped "now"
@@ -978,67 +1008,89 @@ if [ "$TOPOLOGY" = split ]; then
         -H "Content-Type: application/json" \
         -d "{\"metrics\":[{\"name\":\"compose_e2e_outage\",\"labels\":{\"run_id\":\"$RUN_ID\"},\"timestamp_ms\":$OUTAGE_MS,\"value\":1}]}")
     if [ "$OUTAGE_STATUS" = "204" ]; then
-        log_pass "writes land while the store is down (HTTP 204)"
+        log_pass "writes land while a store is down (HTTP 204)"
     else
-        log_fail "a write with the store down answered HTTP $OUTAGE_STATUS"
+        log_fail "a write with a store down answered HTTP $OUTAGE_STATUS"
     fi
-
-    # The logs family gets the same fail-closed contract, checked independently
-    # of any flush: a raw Loki query_range (what the querier answers directly,
-    # not through Grafana), the same query through Grafana's own datasource
-    # proxy (so a viewer sees the outage rather than an empty panel), and a
-    # Loki push, all while the store is still down. None of these read back
-    # specific content, so none depend on whether the queried stream has been
-    # flushed to the store yet.
-    LOKI_OUTAGE=$(curl -s "${CURL_TIMEOUTS[@]}" -w '\n%{http_code}' -G "$BACKEND/loki/api/v1/query_range" --data-urlencode 'query={service="compose-e2e"}')
-    if [ "$(printf '%s' "$LOKI_OUTAGE" | tail -1)" = "503" ] && grep -qF -- 'unavailable' <<< "$LOKI_OUTAGE"; then
-        log_pass "a Loki query with the store down answers 503 unavailable"
-    else
-        log_fail "a Loki query with the store down answered: $LOKI_OUTAGE"
-    fi
-    BODY=$(dsquery '{service=\"compose-e2e\"} |= \"\"')
-    check_contains "Grafana surfaces the Loki outage rather than empty logs" "$BODY" "unavailable"
     LOKI_OUTAGE_STATUS=$(curl -s "${CURL_TIMEOUTS[@]}" -o /dev/null -w "%{http_code}" -X POST "$BACKEND/loki/api/v1/push" \
         -H "Content-Type: application/json" \
         -d "{\"streams\":[{\"stream\":{\"service\":\"compose-e2e\",\"level\":\"info\",\"env\":\"local\"},\"values\":[[\"$(date +%s%N)\",\"outage push run_id=$RUN_ID\"]]}]}")
     if [ "$LOKI_OUTAGE_STATUS" = "204" ]; then
-        log_pass "a Loki push lands while the store is down (HTTP 204)"
+        log_pass "a Loki push lands while a store is down (HTTP 204)"
     else
-        log_fail "a Loki push with the store down answered HTTP $LOKI_OUTAGE_STATUS"
+        log_fail "a Loki push with a store down answered HTTP $LOKI_OUTAGE_STATUS"
+    fi
+    if dc start store-1 >/dev/null 2>&1; then
+        log_pass "store-1 started again"
+    else
+        log_fail "store-1 start failed"
+    fi
+    wait_for "store-1 is healthy again" "$READY_TIMEOUT" service_healthy store-1
+    BODY=""
+    if wait_for "the outage-time write reads back by value once store-1 recovers" "$READY_TIMEOUT" value_reads_back compose_e2e_outage 1; then :
+    else
+        echo "    the outage-time write's value is absent once store-1 recovered; last body: $BODY"
     fi
 
-    if dc start store >/dev/null 2>&1; then
-        log_pass "store started again"
+    # Two stores down: every key's three-store replica set loses at least one
+    # copy and the read can skip only one store, so reads fail closed with 503
+    # unavailable, for both families, and Grafana shows the outage rather than
+    # an empty panel. Writes still land (the ingesters' heads keep them).
+    for svc in store-1 store-2; do
+        if dc stop "$svc" >/dev/null 2>&1; then
+            log_pass "$svc stopped"
+        else
+            log_fail "$svc stop failed"
+        fi
+    done
+    OUTAGE=$(curl -s "${CURL_TIMEOUTS[@]}" -w '\n%{http_code}' -G "$BACKEND/api/v1/query" --data-urlencode 'query=compose_e2e_flush_marker')
+    if [ "$(printf '%s' "$OUTAGE" | tail -1)" = "503" ] && grep -qF -- '"errorType":"unavailable"' <<< "$OUTAGE"; then
+        log_pass "a query with two stores down answers 503 unavailable"
     else
-        log_fail "store start failed"
+        log_fail "a query with two stores down answered: $OUTAGE"
     fi
-    reads_recovered() {
-        [ "$(curl -s "${CURL_TIMEOUTS[@]}" -o /dev/null -w '%{http_code}' -G "$BACKEND/api/v1/query" --data-urlencode 'query=compose_e2e_outage')" = "200" ]
-    }
-    wait_for "reads recover once the store is back" "$READY_TIMEOUT" reads_recovered
+    BODY=$(promquery 'compose_e2e_marker')
+    check_contains "Grafana surfaces the outage rather than an empty panel" "$BODY" "unavailable"
+    LOKI_OUTAGE=$(curl -s "${CURL_TIMEOUTS[@]}" -w '\n%{http_code}' -G "$BACKEND/loki/api/v1/query_range" --data-urlencode 'query={service="compose-e2e"}')
+    if [ "$(printf '%s' "$LOKI_OUTAGE" | tail -1)" = "503" ] && grep -qF -- 'unavailable' <<< "$LOKI_OUTAGE"; then
+        log_pass "a Loki query with two stores down answers 503 unavailable"
+    else
+        log_fail "a Loki query with two stores down answered: $LOKI_OUTAGE"
+    fi
+    BODY=$(dsquery '{service=\"compose-e2e\"} |= \"\"')
+    check_contains "Grafana surfaces the Loki outage rather than empty logs" "$BODY" "unavailable"
+    TWO_DOWN_STATUS=$(curl -s "${CURL_TIMEOUTS[@]}" -o /dev/null -w "%{http_code}" -X POST "$BACKEND/api/v1/ingest/metrics" \
+        -H "Content-Type: application/json" \
+        -d "{\"metrics\":[{\"name\":\"compose_e2e_outage\",\"labels\":{\"run_id\":\"$RUN_ID\"},\"timestamp_ms\":$(( OUTAGE_MS + 1000 )),\"value\":2}]}")
+    if [ "$TWO_DOWN_STATUS" = "204" ]; then
+        log_pass "writes land while two stores are down (HTTP 204)"
+    else
+        log_fail "a write with two stores down answered HTTP $TWO_DOWN_STATUS"
+    fi
 
-    # Recovery is more than "the store answers again": the store's own,
+    # Always bring both back, whatever the checks above reported.
+    for svc in store-1 store-2; do
+        if dc start "$svc" >/dev/null 2>&1; then
+            log_pass "$svc started again"
+        else
+            log_fail "$svc start failed"
+        fi
+    done
+    wait_for "reads recover once the stores are back" "$READY_TIMEOUT" reads_recovered
+
+    # Recovery is more than "the stores answer again": the stores' own,
     # pre-outage data (flushed before the restart, earlier in this block) and
-    # the write made *during* the outage (buffered in the ingester's head
-    # while the store was down) must both still read back by value now that
-    # the store is back.
-    # Polled with a deadline rather than read once: a single read straight
-    # after recovery can race the querier's view of the store. BODY keeps the
-    # last response for the FAIL message (wait_for runs in this shell).
-    value_reads_back() { # <metric> <number that must appear in the result>
-        BODY=$(promquery "$1")
-        printf '%s' "$BODY" | jq -e --argjson want "$2" \
-            '[.. | arrays | select(length > 0) | select(all(.[]; type == "number")) | .[]] | index($want)' >/dev/null 2>&1
-    }
+    # the writes made *during* the outages (buffered in the ingesters' heads
+    # while stores were down) must all still read back by value.
     BODY=""
-    if wait_for "flush marker still readable by value once the store recovers" "$READY_TIMEOUT" value_reads_back compose_e2e_flush_marker "$MARKER_VALUE"; then :
+    if wait_for "flush marker still readable by value once the stores recover" "$READY_TIMEOUT" value_reads_back compose_e2e_flush_marker "$MARKER_VALUE"; then :
     else
-        echo "    flush marker value $MARKER_VALUE absent once the store recovered; last body: $BODY"
+        echo "    flush marker value $MARKER_VALUE absent once the stores recovered; last body: $BODY"
     fi
     BODY=""
-    if wait_for "the outage-time write reads back by value once the store recovers" "$READY_TIMEOUT" value_reads_back compose_e2e_outage 1; then :
+    if wait_for "the two-down write reads back by value once the stores recover" "$READY_TIMEOUT" value_reads_back compose_e2e_outage 2; then :
     else
-        echo "    the outage-time write's value is absent once the store recovered; last body: $BODY"
+        echo "    the two-down write's value is absent once the stores recovered; last body: $BODY"
     fi
 
     # Spec 10.1: at RF=3 on three ingesters the write quorum is 2. With one
