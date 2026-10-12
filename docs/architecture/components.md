@@ -247,7 +247,8 @@ removed without losing data.
   acknowledgements. Otherwise they return a `StoreQuorumError` (an outage only
   when every failure was one) and the head keeps the whole batch, exactly as a
   failed single-store flush did. A re-flush puts a second copy on the stores
-  that had acknowledged; reads and compaction collapse it. Outcomes are
+  that had acknowledged; reads collapse it, and for metrics compaction removes it
+  (log copies stay on disk). Outcomes are
   counted in `obs_ingester_store_flush_total{outcome}`: `full`, `degraded`
   (quorum met, some store failed), or `failed`.
 - **Stragglers.** A degraded batch's failed groups go to `rpc.StragglerQueue`,
@@ -381,7 +382,9 @@ the whole no-gap argument, and the reason the ingesters come first:
 Read the stores first and a flush landing between the two layers would be in
 neither answer. Reads within a layer may run in parallel, which is why read
 latency is the slowest ingester plus the slowest store, not the sum
-(`TestStoreClusterReadsIngestersInParallel`). No member is pruned by selector:
+(`TestMergeHeadsWithReadsHeadsInParallel` in `internal/metrics` and `internal/logs` for
+the layer-generic parallelism; `TestStoreClusterReadsIngestersInParallel` for the
+ingesters). No member is pruned by selector:
 a series is placed by the hash of its full label set, and no selector proves
 it names one ([../api/limitations.md](../api/limitations.md)).
 
