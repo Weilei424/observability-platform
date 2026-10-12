@@ -159,6 +159,9 @@ func TestReplicatedBlockSinkQuorumMissFailsTheBatch(t *testing.T) {
 	if !errors.As(err, &qe) || !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("err = %v, want a StoreQuorumError over ErrUnavailable", err)
 	}
+	if msg := err.Error(); !strings.Contains(msg, MemberLabel(stores[0].url)) || !strings.Contains(msg, qe.Cause.Error()) {
+		t.Errorf("message %q names neither a failing store nor the cause %q", msg, qe.Cause)
+	}
 	if len(q.items) != 0 {
 		t.Errorf("queued %v; a failed batch stays in the head, nothing is queued", q.items)
 	}
