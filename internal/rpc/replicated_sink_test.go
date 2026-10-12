@@ -181,16 +181,48 @@ func TestReplicatedBlockSinkProtocolErrorIsNotAnOutage(t *testing.T) {
 	}
 }
 
-// Review Focus 2: different keys fail on different stores, every key still at quorum.
+// Review Focus 2: different keys fail on different stores, every key still at
+// quorum. Two stores are down, and the batch keeps only keys that have at most
+// one of them among their replicas, so each down store misses its own keys and
+// is queued once with them.
 func TestReplicatedBlockSinkQueuesEachFailedStoreOnce(t *testing.T) {
-	stores := startStores(t, 5, map[int]int{0: http.StatusServiceUnavailable})
+	stores := startStores(t, 5, map[int]int{0: http.StatusServiceUnavailable, 1: http.StatusServiceUnavailable})
 	q := &recordQueue{}
-	sink, _ := storeSink(t, stores, 3, q, nil)
-	if _, err := sink.IngestSeriesChunks(context.Background(), seriesBatch(t, 40)); err != nil {
-		t.Fatal(err)
+	sink, r := storeSink(t, stores, 3, q, nil)
+	var batch []metrics.SeriesChunks
+	onDown := map[string]int{}
+	for _, sc := range seriesBatch(t, 80) {
+		reps, err := r.Replicas(sc.Labels.Hash(), 3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		on0, on1 := containsStr(reps, stores[0].url), containsStr(reps, stores[1].url)
+		if on0 && on1 {
+			continue
+		}
+		if on0 {
+			onDown[stores[0].url]++
+		}
+		if on1 {
+			onDown[stores[1].url]++
+		}
+		batch = append(batch, sc)
 	}
-	if len(q.items) != 1 {
-		t.Errorf("queued %v, want the failed store's one group", q.items)
+	if onDown[stores[0].url] == 0 || onDown[stores[1].url] == 0 {
+		t.Fatalf("keys on each down store = %v; the batch must fail keys on both", onDown)
+	}
+	if _, err := sink.IngestSeriesChunks(context.Background(), batch); err != nil {
+		t.Fatalf("every key has quorum, but the flush failed: %v", err)
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.items) != 2 || !containsStr(q.items, stores[0].url) || !containsStr(q.items, stores[1].url) {
+		t.Errorf("queued %v, want each down store's one group", q.items)
+	}
+	for _, s := range stores[:2] {
+		if len(s.bodies) != 1 {
+			t.Errorf("down store %s got %d requests, want 1", s.url, len(s.bodies))
+		}
 	}
 }
 
