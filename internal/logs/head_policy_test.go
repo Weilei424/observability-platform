@@ -264,7 +264,7 @@ func TestHeadFlushLeavesTheHeadIntactWhenABatchFails(t *testing.T) {
 }
 
 // flatEntry names an entry by its stream's "service" label instead of a
-// StreamID, so batchStreams's output (fresh StreamData values sharing the
+// StreamID, so BatchStreams's output (fresh StreamData values sharing the
 // input's Labels) can be compared to its input by value.
 type flatEntry struct {
 	svc  string
@@ -291,7 +291,7 @@ func flattenBatches(batches [][]StreamData) []flatEntry {
 	return out
 }
 
-// batchWireBytes sums a batch's estimated wire size the same way batchStreams
+// batchWireBytes sums a batch's estimated wire size the same way BatchStreams
 // does: each part's one-time open cost plus every one of its entries.
 func batchWireBytes(batch []StreamData) int {
 	n := 0
@@ -405,7 +405,7 @@ func TestBatchStreamsSizesByEstimatedWireBytes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			batches := batchStreams(tt.streams, tt.limit)
+			batches := BatchStreams(tt.streams, tt.limit)
 
 			if len(batches) != tt.wantBatches {
 				t.Fatalf("got %d batches, want %d", len(batches), tt.wantBatches)
