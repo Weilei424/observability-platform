@@ -31,9 +31,21 @@
   "ingester" (lookup "apps/v1" "StatefulSet" .Release.Namespace $ingName)
   "ingesterData" $ingesterData }}
 {{- include "backend.ringStagingCheck" (list . $live) }}
-{{- if gt (int .Values.split.store.replicas) 1 }}
-{{- fail "split.store.replicas must be 1 until Phase 6.4: a second store would hold blocks no querier reads" }}
+{{- if lt (int .Values.split.store.replicas) 1 }}
+{{- fail "split.store.replicas must be at least 1" }}
 {{- end }}
+{{- $storeWrite := int (include "backend.storeWriteCount" .) }}
+{{- if or (lt $storeWrite 1) (gt $storeWrite (int .Values.split.store.replicas)) }}
+{{- fail (printf "split.store.writeReplicas must be between 1 and split.store.replicas (%d), got %d: the ingesters may only flush to stores the querier and compactor read" (int .Values.split.store.replicas) $storeWrite) }}
+{{- end }}
+{{- if or (lt (int .Values.split.storeReplicationFactor) 1) (gt (int .Values.split.storeReplicationFactor) $storeWrite) }}
+{{- fail (printf "split.storeReplicationFactor (%d) must be at least 1 and must not exceed the stores the ingesters flush to (%d): every block needs that many distinct stores" (int .Values.split.storeReplicationFactor) $storeWrite) }}
+{{- end }}
+{{- /* The store staging check (backend.storeStagingCheck) over the live ingesters. */}}
+{{- $storeLive := dict
+  "ingester" (get $live "ingester")
+  "store" (lookup "apps/v1" "StatefulSet" .Release.Namespace (include "backend.componentName" (list . "store"))) }}
+{{- include "backend.storeStagingCheck" (list . $storeLive) }}
 {{- if gt (int .Values.split.compactor.replicas) 1 }}
 {{- fail "split.compactor.replicas must be 1: two compactors would plan and run the same compactions" }}
 {{- end }}
