@@ -20,8 +20,8 @@ func TestHelmPrometheusSplitScrapesEveryComponent(t *testing.T) {
 	raw := rawOf(t, cm)
 
 	blocks := regexp.MustCompile(`targets: \["([^"]+)"\]\s+labels:\s+service: observability-platform\s+component: ([a-z]+)`).FindAllStringSubmatch(raw, -1)
-	if len(blocks) != 7 {
-		t.Fatalf("split scrape config has %d labelled targets (four components plus three ingester pods), want 7:\n%s", len(blocks), raw)
+	if len(blocks) != 10 {
+		t.Fatalf("split scrape config has %d labelled targets (three components plus three ingester and four store pods), want 10:\n%s", len(blocks), raw)
 	}
 	for _, b := range blocks {
 		host, port := hostPortFromURL(t, "http://"+b[1])
@@ -60,5 +60,27 @@ func TestHelmPrometheusIngesterTargetsMatchTheRing(t *testing.T) {
 	}
 	if strings.Join(got, ",") != ring {
 		t.Errorf("ingester scrape targets %v, want the gateway's ring %s", got, ring)
+	}
+}
+
+// The store scrape targets are every store pod: exactly the list the backend
+// chart gives the querier at its default replicas, in the same order.
+func TestHelmPrometheusStoreTargetsMatchTheStores(t *testing.T) {
+	var stores string
+	for _, o := range renderSplit(t) {
+		if o.Kind == "ConfigMap" && o.Data["OBS_TARGET"] == "querier" {
+			stores = o.Data["OBS_STORE_URL"]
+		}
+	}
+	if stores == "" {
+		t.Fatal("querier ConfigMap has no OBS_STORE_URL")
+	}
+	raw := rawOf(t, findObject(t, renderChart(t, prometheusChart, "topology=split"), "ConfigMap", ""))
+	var got []string
+	for _, b := range regexp.MustCompile(`targets: \["([^"]+)"\]\s+labels:\s+service: observability-platform\s+component: store\b`).FindAllStringSubmatch(raw, -1) {
+		got = append(got, "http://"+b[1])
+	}
+	if strings.Join(got, ",") != stores {
+		t.Errorf("store scrape targets %v, want the querier's stores %s", got, stores)
 	}
 }
