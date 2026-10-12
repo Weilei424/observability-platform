@@ -36,6 +36,10 @@ type process struct {
 	cancel  context.CancelFunc
 	done    chan struct{}
 	started bool
+	// selectDelay, when set before start, holds every request to
+	// /internal/v1/metrics/select for that long before serving it: a slow
+	// member, test-only.
+	selectDelay time.Duration
 }
 
 func (p *process) start() {
@@ -50,7 +54,20 @@ func (p *process) start() {
 	ln := heldPortAt(p.t, p.cfg.HTTPAddr).serve()
 	ctx, cancel := context.WithCancel(context.Background())
 	p.app, p.cancel, p.done = a, cancel, make(chan struct{})
-	p.srv = &http.Server{Handler: a.Handler}
+	var h http.Handler = a.Handler
+	if d := p.selectDelay; d > 0 {
+		inner := h
+		h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/internal/v1/metrics/select" {
+				select {
+				case <-time.After(d):
+				case <-r.Context().Done():
+				}
+			}
+			inner.ServeHTTP(w, r)
+		})
+	}
+	p.srv = &http.Server{Handler: h}
 	go func() { _ = p.srv.Serve(ln) }()
 	go func() { a.Run(ctx); close(p.done) }()
 	p.started = true
@@ -182,6 +199,12 @@ type cluster struct {
 	gatewayURL, ingesterURL, storeURL, compactorURL string
 	ingesters                                       []*process
 	ingesterURLs                                    []string
+	// stores and storeURLs are every store, in ring order as configured;
+	// store and storeURL are the first. storeRF is the store replication
+	// factor the ingesters and querier use.
+	stores    []*process
+	storeURLs []string
+	storeRF   int
 }
 
 // startCluster is the one-ingester split cluster every 6.1 test runs on.
@@ -199,7 +222,9 @@ func (c *cluster) newIngester(t *testing.T) (*process, string) {
 		FlushInterval:           time.Hour, // count-based flushes only:
 		FlushSealedChunks:       1,         // flush as soon as a chunk seals
 		CompactionBaseRange:     2 * time.Hour, CompactionMultiplier: 4, CompactionLevels: 3,
-		StoreURL: c.storeURL, StoreURLs: []string{c.storeURL},
+		StoreURL: strings.Join(c.storeURLs, ","), StoreURLs: slices.Clone(c.storeURLs),
+		StoreReplicationFactor: c.storeRF,
+		StoreRetryMaxBytes:     64 << 20, StoreRetryMaxAge: time.Minute,
 	}}, "http://" + addr
 }
 
@@ -252,10 +277,41 @@ func startClusterN(t *testing.T, n int) *cluster { return startClusterRF(t, n, 1
 
 // startClusterRF is startClusterN with the gateway and querier replicating
 // every series and stream to rf ingesters.
-func startClusterRF(t *testing.T, n, rf int) *cluster {
+func startClusterRF(t *testing.T, n, rf int) *cluster { return startClusterStores(t, n, rf, 1, 1) }
+
+// newStore builds (but does not start) one store answering as its own URL.
+func newStore(t *testing.T) (*process, string) {
+	t.Helper()
+	addr := freeAddr(t)
+	u := "http://" + addr
+	return &process{t: t, cfg: &config.Config{
+		Target: config.TargetStore, HTTPAddr: addr, DataDir: t.TempDir(), LogLevel: "info",
+		WALSegmentMaxBytes: 1 << 20, WALSyncEveryN: 1,
+		LogsFlushThresholdBytes: 64,
+		MaintenanceInterval:     50 * time.Millisecond,
+		FlushInterval:           time.Hour,
+		FlushSealedChunks:       1,
+		CompactionBaseRange:     2 * time.Hour, CompactionMultiplier: 4, CompactionLevels: 3,
+		StoreSelfURL: u,
+	}}, u
+}
+
+// setStores restarts p (an ingester, the querier, or the compactor) over the
+// store list urls: one step of a store membership change (spec section 8).
+func setStores(p *process, urls []string) {
+	p.t.Helper()
+	p.stop()
+	p.cfg.StoreURL, p.cfg.StoreURLs = strings.Join(urls, ","), slices.Clone(urls)
+	p.start()
+	httpClient.CloseIdleConnections()
+}
+
+// startClusterStores is startClusterRF over stores stores, every flushed
+// series and stream going to rs of them.
+func startClusterStores(t *testing.T, n, rf, stores, rs int) *cluster {
 	t.Helper()
 	addr := map[config.Target]string{}
-	for _, target := range []config.Target{config.TargetGateway, config.TargetQuerier, config.TargetStore, config.TargetCompactor} {
+	for _, target := range []config.Target{config.TargetGateway, config.TargetQuerier, config.TargetCompactor} {
 		addr[target] = freeAddr(t)
 	}
 	peer := func(target config.Target) string { return "http://" + addr[target] }
@@ -270,10 +326,13 @@ func startClusterRF(t *testing.T, n, rf int) *cluster {
 			CompactionBaseRange:     2 * time.Hour, CompactionMultiplier: 4, CompactionLevels: 3,
 		}
 	}
-	c := &cluster{
-		gatewayURL: peer(config.TargetGateway),
-		storeURL:   peer(config.TargetStore), compactorURL: peer(config.TargetCompactor),
+	c := &cluster{gatewayURL: peer(config.TargetGateway), compactorURL: peer(config.TargetCompactor), storeRF: rs}
+	for range stores {
+		p, u := newStore(t)
+		c.stores = append(c.stores, p)
+		c.storeURLs = append(c.storeURLs, u)
 	}
+	c.store, c.storeURL = c.stores[0], c.storeURLs[0]
 	for range n {
 		p, u := c.newIngester(t)
 		c.ingesters = append(c.ingesters, p)
@@ -291,15 +350,15 @@ func startClusterRF(t *testing.T, n, rf int) *cluster {
 		x.ReplicationFactor, x.IngesterTimeout = rf, 2*time.Second
 	})
 	c.querier = mk(config.TargetQuerier, func(x *config.Config) {
-		x.IngesterURL, x.StoreURL = strings.Join(c.ingesterURLs, ","), peer(config.TargetStore)
-		x.StoreURLs = []string{x.StoreURL}
+		x.IngesterURL, x.StoreURL = strings.Join(c.ingesterURLs, ","), strings.Join(c.storeURLs, ",")
+		x.StoreURLs = slices.Clone(c.storeURLs)
+		x.StoreReplicationFactor = rs
 		x.IngesterURLs = slices.Clone(c.ingesterURLs)
 		x.ReplicationFactor, x.IngesterTimeout = rf, 2*time.Second
 	})
-	c.store = mk(config.TargetStore, func(*config.Config) {})
 	c.compactor = mk(config.TargetCompactor, func(x *config.Config) {
-		x.StoreURL = peer(config.TargetStore)
-		x.StoreURLs = []string{x.StoreURL}
+		x.StoreURL = strings.Join(c.storeURLs, ",")
+		x.StoreURLs = slices.Clone(c.storeURLs)
 	})
 
 	// Deliberately in dependency-reversed order: nothing waits for its peers.
@@ -311,7 +370,7 @@ func startClusterRF(t *testing.T, n, rf int) *cluster {
 	// registered once after the loop instead.
 	order := []*process{c.gateway, c.querier, c.compactor}
 	order = append(order, c.ingesters...)
-	order = append(order, c.store)
+	order = append(order, c.stores...)
 	for _, p := range order {
 		p.start()
 		t.Cleanup(p.stop)
