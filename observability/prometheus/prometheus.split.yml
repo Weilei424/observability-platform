@@ -2,10 +2,10 @@
 #
 # Same separation as prometheus.yml: this Prometheus stores metrics ABOUT the
 # platform, never the workload. One target per component process; the three
-# ingesters share component=ingester and differ by instance. The internals
-# dashboard filters its HTTP panels on component so a request the gateway
-# proxies is counted once, and plots up by component so an outage says which
-# process is down.
+# ingesters share component=ingester and the four stores component=store, each
+# differing by instance. The internals dashboard filters its HTTP panels on
+# component so a request the gateway proxies is counted once, and plots up by
+# component so an outage says which process is down.
 global:
   scrape_interval: 15s
   scrape_timeout: 10s
@@ -34,7 +34,19 @@ scrape_configs:
         labels:
           service: observability-platform
           component: querier
-      - targets: ["store:8080"]
+      - targets: ["store-1:8080"]
+        labels:
+          service: observability-platform
+          component: store
+      - targets: ["store-2:8080"]
+        labels:
+          service: observability-platform
+          component: store
+      - targets: ["store-3:8080"]
+        labels:
+          service: observability-platform
+          component: store
+      - targets: ["store-4:8080"]
         labels:
           service: observability-platform
           component: store
