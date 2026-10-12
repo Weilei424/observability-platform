@@ -249,3 +249,42 @@ func TestReplicatedChunkSinkDegradedAndFailed(t *testing.T) {
 		t.Errorf("queued %v on a failed batch", q2.items)
 	}
 }
+
+// WithRequireAll: one owner down fails the batch even though quorum holds --
+// the handoff needs every owner to take a copy.
+func TestReplicatedSinksRequireAllNeedEveryOwner(t *testing.T) {
+	stores := startStores(t, 3, map[int]int{1: http.StatusServiceUnavailable})
+	urls := make([]string, len(stores))
+	clients := map[string]*Client{}
+	for i, s := range stores {
+		urls[i] = s.url
+		c, err := NewClient("store", s.url)
+		if err != nil {
+			t.Fatal(err)
+		}
+		clients[s.url] = c
+	}
+	r, err := ring.New(urls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &recordQueue{}
+	_, err = NewReplicatedBlockSink(r, 3, clients, q, nil, WithRequireAll()).IngestSeriesChunks(context.Background(), seriesBatch(t, 5))
+	var qe *StoreQuorumError
+	if !errors.As(err, &qe) || qe.Quorum != 3 || qe.Failed != 5 || !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("block sink err = %v, want a StoreQuorumError needing 3 of 3 for all 5 series", err)
+	}
+	l, _ := logs.NewStreamLabels(map[string]string{"service": "a"})
+	err = NewReplicatedChunkSink(r, 3, clients, q, nil, WithRequireAll()).IngestStreams(context.Background(),
+		[]logs.StreamData{{Labels: l, Entries: []logs.LogEntry{{TimestampNs: 1, Line: "x"}}}})
+	if !errors.As(err, &qe) || qe.Quorum != 3 {
+		t.Fatalf("chunk sink err = %v, want a StoreQuorumError needing 3 of 3", err)
+	}
+	if len(q.items) != 0 {
+		t.Errorf("queued %v; a require-all flush queues nothing", q.items)
+	}
+	// Without the option the same outage is a degraded success.
+	if _, err := NewReplicatedBlockSink(r, 3, clients, nil, nil).IngestSeriesChunks(context.Background(), seriesBatch(t, 5)); err != nil {
+		t.Fatalf("quorum flush with one owner down: %v", err)
+	}
+}
