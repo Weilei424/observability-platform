@@ -262,6 +262,13 @@ func registeredMetricNames(t *testing.T) map[string]bool {
 	inst.LogFlush.Failures.Inc()
 	// The gateway's ring metrics, which the dashboard graphs per ingester.
 	observability.NewRingMetrics().Register(reg, []string{"http://seed:8080"}, true)
+	// The store ring's metrics: the ingester's flush quorum and retry queue, and
+	// the querier's per-store reads. The members gauge is shared by name between
+	// the roles, so the querier's counter is registered alone.
+	observability.NewStoreMetrics().RegisterIngester(reg, []string{"http://seed-store:8080"})
+	storeReads := observability.NewStoreMetrics()
+	storeReads.StoreReads.WithLabelValues("http://seed-store:8080", "ok").Inc()
+	reg.MustRegister(storeReads.StoreReads)
 
 	// Gather once and discard the result before the real read below.
 	//
