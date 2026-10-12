@@ -9,6 +9,8 @@ import (
 
 // MultiBlockManager runs each compaction and retention call against every
 // store in turn; one store failing is reported and skipped, and the rest run.
+// The observe metric counts calls to each store (compaction and retention),
+// not whole passes.
 type MultiBlockManager struct {
 	names    []string
 	managers []BlockManager
@@ -24,10 +26,21 @@ func NewMultiBlockManager(names []string, managers []BlockManager, outcome func(
 	return &MultiBlockManager{names: names, managers: managers, outcome: outcome, observe: observe, log: log}
 }
 
-// CompactOnce sums the plans executed across stores and returns the first
-// error after trying all of them.
+// CompactOnce compacts each store to stable in turn (repeating its CompactOnce
+// until it returns 0 or an error), so a failing store never stops the others
+// from reaching stable. It sums the plans executed and returns the first
+// error after trying all stores. Each store is observed once per call.
 func (m *MultiBlockManager) CompactOnce(plan func([]block.BlockInfo) [][]string) (int, error) {
-	return m.each("compaction", func(b BlockManager) (int, error) { return b.CompactOnce(plan) })
+	return m.each("compaction", func(b BlockManager) (int, error) {
+		total := 0
+		for {
+			n, err := b.CompactOnce(plan)
+			total += n
+			if err != nil || n == 0 {
+				return total, err
+			}
+		}
+	})
 }
 
 // ApplyRetention sums the blocks deleted across stores and returns the first
