@@ -259,7 +259,7 @@ func (h *Head) flushLocked(ctx context.Context) (bool, error) {
 	if len(h.head) == 0 {
 		return false, nil
 	}
-	for _, batch := range batchStreams(h.snapshotLocked(), h.opts.BatchBytes) {
+	for _, batch := range BatchStreams(h.snapshotLocked(), h.opts.BatchBytes) {
 		batchCtx, cancel := ctx, context.CancelFunc(func() {})
 		if h.opts.FlushTimeout > 0 {
 			batchCtx, cancel = context.WithTimeout(ctx, h.opts.FlushTimeout)
@@ -505,7 +505,7 @@ func streamOpenWireBytes(labels StreamLabels) int {
 	return n
 }
 
-// batchStreams splits streams into groups whose estimated wire size — what an
+// BatchStreams splits streams into groups whose estimated wire size — what an
 // IngestStreams request body would actually encode, not raw line length —
 // stays at or below limit, splitting a stream across groups when it alone
 // exceeds the limit; a single oversized entry travels alone. limit <= 0 means
@@ -513,7 +513,7 @@ func streamOpenWireBytes(labels StreamLabels) int {
 // resends batches the sink already has — duplicates the (ts, line) dedup on
 // read absorbs, as it already absorbs the crash window between chunk write
 // and checkpoint.
-func batchStreams(streams []StreamData, limit int) [][]StreamData {
+func BatchStreams(streams []StreamData, limit int) [][]StreamData {
 	if limit <= 0 {
 		return [][]StreamData{streams}
 	}
