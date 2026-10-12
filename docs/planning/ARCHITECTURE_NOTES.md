@@ -839,7 +839,9 @@ Decisions from the design:
   (`TestMergeHeadsFinishesEveryHeadBeforeTheStore`): a store registers a block before
   it acknowledges, an ingester drops data only after a quorum acknowledged, and every
   ingester read ends before any store read starts. Read latency is the slowest
-  ingester plus the slowest store (`TestStoreClusterReadsIngestersInParallel`). There
+  ingester plus the slowest store (`TestMergeHeadsWithReadsHeadsInParallel` in
+  `internal/metrics` and `internal/logs` for the layer-generic parallelism;
+  `TestStoreClusterReadsIngestersInParallel` for the ingesters). There
   is no concurrency cap.
 - **Store reads.** The store layer tolerates `W_s − 1` outages
   (`TestQuerierSkipsUpToQuorumMinusOneStores`), counted in
@@ -860,8 +862,8 @@ Decisions from the design:
   each failed store's outcome to queue it, so a hung store costs each batch its
   request timeout. One store at R_s 1 is a plain flush
   (`TestReplicatedBlockSinkSingleStoreIsPlainFlush`). A re-flush after a missed quorum
-  leaves a second copy on the stores that had acknowledged; reads and compaction
-  already collapse it. The ingester's store clients carry the 30 s
+  leaves a second copy on the stores that had acknowledged; reads collapse it, and for
+  metrics compaction removes it (log copies stay on disk). The ingester's store clients carry the 30 s
   `metrics.DefaultFlushTimeout` per request (ruling: the retry queue sends serially on
   the maintenance loop, and a hung store must not block it until shutdown). A drain's
   `200` now means "on W_s stores" (`TestIngesterDrainMeetsStoreQuorumWithOneStoreDown`,
