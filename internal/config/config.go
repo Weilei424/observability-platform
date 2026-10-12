@@ -433,6 +433,34 @@ func validatePeerURL(env string, target Target, raw string) (string, error) {
 	return canonicalURL(u), nil
 }
 
+// CanonicalPeerURL applies validatePeerURL's rules to a peer URL that arrives
+// outside the environment -- a store handoff's target list -- and returns the
+// peer's canonical spelling (canonicalURL), the one the rings use. Its errors
+// follow the same credentials rule: a URL with userinfo, or one that fails to
+// parse and contains "@", is never echoed.
+func CanonicalPeerURL(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		if strings.Contains(raw, "@") {
+			return "", fmt.Errorf("peer URL is not a valid URL (value withheld because it may contain credentials)")
+		}
+		return "", fmt.Errorf("peer URL %q is not a URL: %w", raw, err)
+	}
+	if u.User != nil {
+		return "", fmt.Errorf("peer URL must not contain a userinfo component (credentials)")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("peer URL %q must be an http or https URL", raw)
+	}
+	if u.Host == "" {
+		return "", fmt.Errorf("peer URL %q has no host", raw)
+	}
+	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery || strings.Contains(raw, "#") {
+		return "", fmt.Errorf("peer URL %q must be a base URL with no path, query, or fragment", raw)
+	}
+	return canonicalURL(u), nil
+}
+
 // canonicalURL is u's scheme and host in one spelling: lowercase, no trailing
 // dot on a name, an IP address in its canonical form (an IPv4-mapped IPv6
 // address as IPv4), and no default port for the scheme. Spellings of one peer
