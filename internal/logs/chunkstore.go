@@ -3,6 +3,7 @@ package logs
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -216,4 +217,43 @@ func (c *ChunkStore) fileStats() (chunks int, bytes int64, err error) {
 		bytes += fi.Size()
 	}
 	return chunks, bytes, nil
+}
+
+// ExportStreams calls fn with every persisted stream and all its entries, in
+// batches of at most batchBytes estimated wire bytes (BatchStreams), and
+// returns the number of distinct streams exported. ChunkStore has no block
+// structure, so each stream is exported once.
+func (c *ChunkStore) ExportStreams(ctx context.Context, batchBytes int, fn func([]StreamData) error) (streams int, err error) {
+	ids := make([]StreamID, 0)
+	for id := range c.streamIDs() {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(a, b int) bool { return ids[a] < ids[b] })
+	var all []StreamData
+	for _, id := range ids {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		labels, ok := c.StreamLabelSet(id)
+		if !ok {
+			continue
+		}
+		entries, err := c.StreamEntries(ctx, id, math.MinInt64, math.MaxInt64)
+		if err != nil {
+			return 0, err
+		}
+		if len(entries) == 0 {
+			continue
+		}
+		all = append(all, StreamData{Labels: labels, Entries: entries})
+	}
+	for _, batch := range BatchStreams(all, batchBytes) {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		if err := fn(batch); err != nil {
+			return 0, err
+		}
+	}
+	return len(all), nil
 }
