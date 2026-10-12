@@ -76,8 +76,8 @@ A weak distributed demo is worse than a strong single-node TSDB/log backend. Dis
 | Logs query engine | Loki-style selector parsing, time-range query, text filter scanning |
 | Compactor | Compaction planning, cadence, and retention policy; in split, the store executes |
 | Gateway | The public entry point in the split topology: proxies write routes to the ingester and read routes to the querier (6.1); ring-based write routing arrives in 6.2 |
-| Querier | The public read routes over the ingester and store, merged ingester-first |
-| Store | Persisted blocks and log chunks; flush-in; executes the compactor's plans |
+| Querier | The public read routes over every ingester, then every store, each layer read in parallel, merged ingester-first |
+| Store | Persisted blocks and log chunks of the keys it holds on the store ring (6.4); flush-in; executes the compactor's plans; hands off its data when removed |
 | Grafana | Visualization only; not a source of truth |
 
 ---
@@ -575,7 +575,9 @@ records the decisions and the one place the code diverged from it.
   The 6.1 argument still holds per ingester: a flush registers its block before the
   ingester discards, and all ingesters finish before the store starts, so a sample
   missing from every ingester answer was already in the store. Any ingester failing
-  fails the whole read (`503`). Parallel fanout and pruning stay with 6.4.
+  fails the whole read (`503`). (6.3 added tolerance of W-1 ingester outages; 6.4
+  made each layer's reads parallel and decided not to prune — see "Sharded and
+  replicated store".)
 - **Hybrid clock generations.** A write's generation is `max(previous + 1, now in Unix
   microseconds)` in every target, with an injectable clock. It is monotonic per series
   even if the clock steps back, and across ingesters it orders a moved series' writes by
@@ -633,7 +635,7 @@ records the decisions and the one place the code diverged from it.
 the next R distinct members clockwise, and the write outcome rule becomes a quorum rule.
 Reads already cover every member, so replicated duplicates are a dedup problem, not a
 completeness one; the merge already deduplicates, so 6.3 proves it rather than adding
-it (6.4 keeps parallel fanout and pruning).
+it (6.4 then made the reads parallel and ruled out pruning).
 
 ### Replication (introduced in 6.3)
 
@@ -801,6 +803,165 @@ records the decisions and where the code corrected the spec.
   `querier_tolerance_test.go`; `internal/config` (bounds); `tests/integration/
   replication_test.go` (one down, two down, hung, dedup); `tests/e2e` Helm tests;
   the Compose and kind smoke scripts.
+
+### Sharded and replicated store (introduced in 6.4)
+
+A query reads every ingester in parallel, then every store in parallel; flushed data
+is sharded over several stores by series/stream and replicated to R_s of them. The
+design is `docs/superpowers/specs/2026-10-11-phase-6.4-fanout-sharded-store-design.md`;
+this section records its decisions and the rulings taken while implementing it.
+
+Decisions from the design:
+
+| Question | Decision |
+|---|---|
+| Does 6.4 cover more than one store | Yes: shard the store (chosen over "ingester fanout only"). |
+| How a flush picks its stores | A hash ring over stores, keyed like the ingester ring (`Labels.Hash()`, `StreamLabels.Hash()`), so every ingester replica's copy of a series lands on the same stores and compaction there still merges them. |
+| Store failure | Replicate stores too: per-key flush quorum `W_s = R_s/2 + 1`; reads skip up to `W_s − 1` stores. |
+| Store RF setting and demo | Its own setting, `OBS_STORE_REPLICATION_FACTOR` (default 1, ingester and querier only); the Compose and Helm split run 4 stores at R_s 3. |
+| A store that missed a quorum flush | The ingester retries it from a bounded in-memory queue (64 MiB, 15 m, backoff 1 s → 1 m). |
+| Store membership changes | Adds are staged (querier and compactor first); a removal hands the leaving store's data to its new owners first (`POST /internal/v1/handoff`), one store per handoff. |
+| Pruning | None. A series is placed by the hash of its full label set, and no selector proves it names a full label set, so skipping any member could miss data. |
+
+- **Parallel layers, ingesters first.** `MergeHeadsWith` reads every member of a
+  layer concurrently, keeps each answer at its member index and folds them with
+  `Merge` in member order once the outcome is decided, so the answer equals the
+  sequential fold for every arrival order (`TestMergeHeadsWithAnswerIgnoresArrivalOrder`,
+  `TestMergeHeadsWithReadsHeadsInParallel`, in both `internal/metrics` and
+  `internal/logs`). It stops as soon as the read is decided — a non-skippable error,
+  or one outage past `Tolerate` — and cancels the rest; a read cancelled that way is
+  never observed as an outage (`TestMergeHeadsWithStopsEarlyAndDoesNotObserveCancelled`,
+  `TestMergeHeadsWithFailsAsSoonAsToleranceIsExceeded`,
+  `TestMergeHeadsWithCallerCancelIsNotAnOutage`); `OnSkip` gets the skipped indexes
+  sorted (`TestMergeHeadsWithOnSkipIsSorted`). The querier composes
+  `Merge(MergeHeadsWith(ingesters), MergeHeadsWith(stores))`, and `Merge` finishes its
+  first argument before the second, so the 6.1 no-gap argument holds unchanged
+  (`TestMergeHeadsFinishesEveryHeadBeforeTheStore`): a store registers a block before
+  it acknowledges, an ingester drops data only after a quorum acknowledged, and every
+  ingester read ends before any store read starts. Read latency is the slowest
+  ingester plus the slowest store (`TestStoreClusterReadsIngestersInParallel`). There
+  is no concurrency cap.
+- **Store reads.** The store layer tolerates `W_s − 1` outages
+  (`TestQuerierSkipsUpToQuorumMinusOneStores`), counted in
+  `obs_querier_store_reads_total{store,outcome}`; the request's `read answered by
+  replication` line names skipped stores as `store <host:port>`, apart from
+  ingesters. Store reads use the querier's `OBS_INGESTER_TIMEOUT` per request, so a
+  hung store is an outage rather than a request held open, as it was through 6.3.
+- **Replicated flush sinks.** `rpc.ReplicatedBlockSink` and `rpc.ReplicatedChunkSink`
+  sit behind the existing `metrics.BlockSink` and `logs.ChunkSink` seams. One batch
+  becomes one flush-in request per store, carrying the keys that store owns, all sent
+  concurrently; the batch succeeds only if every key reached W_s, otherwise a
+  `*StoreQuorumError` (an `ErrUnavailable` only when every failure was an outage) and
+  the head keeps the whole batch (`TestReplicatedBlockSinkSendsEachSeriesToItsStores`,
+  `TestReplicatedBlockSinkQuorumMissFailsTheBatch`,
+  `TestReplicatedBlockSinkProtocolErrorIsNotAnOutage`,
+  `TestReplicatedChunkSinkDegradedAndFailed`). Unlike the gateway's write router, the
+  sink waits for every store rather than answering at quorum: a degraded batch needs
+  each failed store's outcome to queue it, so a hung store costs each batch its
+  request timeout. One store at R_s 1 is a plain flush
+  (`TestReplicatedBlockSinkSingleStoreIsPlainFlush`). A re-flush after a missed quorum
+  leaves a second copy on the stores that had acknowledged; reads and compaction
+  already collapse it. The ingester's store clients carry the 30 s
+  `metrics.DefaultFlushTimeout` per request (ruling: the retry queue sends serially on
+  the maintenance loop, and a hung store must not block it until shutdown). A drain's
+  `200` now means "on W_s stores" (`TestIngesterDrainMeetsStoreQuorumWithOneStoreDown`,
+  `TestIngesterDrainFailsWithTwoStoresDown`).
+- **Straggler queue.** A degraded batch queues each failed store's request body once
+  (`TestReplicatedBlockSinkDegradedQueuesTheStraggler`,
+  `TestReplicatedBlockSinkQueuesEachFailedStoreOnce`). `rpc.StragglerQueue` resends
+  bodies unchanged, so a retried metrics flush is the same block content, oldest first
+  on the ingester's maintenance tick, each item backing off 1 s → 1 m; it drops by age
+  (`OBS_STORE_RETRY_MAX_AGE`, 15 m) and oldest-first past `OBS_STORE_RETRY_MAX_BYTES`
+  (64 MiB; 0 disables it), each drop a warning and
+  `obs_ingester_store_retries_total{outcome="dropped"}` (`TestStragglerQueueDeliversOnRetry`,
+  `TestStragglerQueueBacksOff`, `TestStragglerQueueDropsByAge`,
+  `TestStragglerQueueDropsOldestOverTheByteBound`, `TestStragglerQueueDropsAnOversizedItem`,
+  `TestStragglerQueueDisabledAtZeroBytes`). It is in memory: a restart loses it, a drain
+  does not wait for it, and a lost copy leaves the key on W_s of its R_s stores until
+  retention. That is the only store repair in 6.4.
+- **Store identity.** `OBS_STORE_SELF_URL` mounts `rpc.RequireMember` on the store's
+  internal routes, as `OBS_INGESTER_SELF_URL` does on the ingester; its `421` message
+  now says "this member is", not "this ingester is" (`TestStoreRefusesAnotherMembersRequest`,
+  `TestComposeSplitStoresKnowTheirOwnURL`, `TestSplitStorePodsKnowTheirOwnURL`).
+- **Configuration.** `OBS_STORE_URL` is a list on the ingester, querier, and compactor,
+  normalized and de-duplicated like `OBS_INGESTER_URL`; the apps read the parsed list
+  (`Config.StoreURLs`), with no fallback to the raw string. R_s is refused above the
+  store count and on targets that do not use it, and the retry bounds are refused off
+  the ingester (`TestStoreListIsNormalized`, `TestStoreDefaults`,
+  `TestStoreSettingsRejected`, `TestStoreSelfURLOnStore`, `TestStoreRetrySettingsOnIngester`).
+- **Compactor per store.** `compactor.MultiBlockManager` compacts each store to stable
+  before moving to the next, then applies retention to each; a failing store is
+  logged, counted in `obs_compactor_store_passes_total{store,outcome}` (one per store
+  per compaction or retention call, not per pass), and skipped
+  (`TestMultiCompactOnceRunsEveryStoreAndReportsFirstError`,
+  `TestMultiApplyRetentionRunsEveryStore`,
+  `TestRunOnceCompactsHealthyStoreToStableWhileAnotherFails`,
+  `TestStoreClusterCompactsEveryStore`). A review found the first cut letting one
+  failing store stop the healthy ones short of stable. Compaction never crosses
+  stores; logs still have no compaction or retention.
+- **Handoff.** The leaving store validates the whole body first and answers `400`
+  before touching its barrier (empty list, bad or duplicate URL, R_s out of range, its
+  own URL when `OBS_STORE_SELF_URL` is set). Without a self URL it cannot spot itself,
+  and a body naming it fails later with `503`, from its own barrier. Then the
+  `rpc.FlushBarrier` closes — waiting for flush-ins already admitted, so none lands
+  after the export's last snapshot — and stays closed until restart. Metrics are
+  exported block by block (ruling: flush-in refuses a duplicate series in one flush,
+  and blocks' chunks may overlap in time, so a series is sent once per block's
+  batches, and the copies dedup by generation), by block ID until no unexported block
+  remains, so a compaction, retention, or flush during the export skips nothing
+  (`TestExportSeriesCoversEverySeriesAndSample`,
+  `TestExportSeriesSurvivesCompactionDuringExport`,
+  `TestExportSeriesSurvivesRetentionDuringExport`,
+  `TestExportSeriesSeesBlockFlushedDuringExport`,
+  `TestExportStreamsYieldsEachStreamOnceWithAllEntries`). It sends through the
+  replicated sink with `WithRequireAll` — every owner, not a quorum, because the
+  leaving copy is the one being retired, and nothing is queued
+  (`TestReplicatedSinksRequireAllNeedEveryOwner`). Target clients are built per
+  request with the 30 s flush timeout, the whole handoff is bounded by 10 minutes,
+  and concurrent handoffs are allowed. `200` only when every owner acknowledged every
+  batch; a retry resends everything (`TestHandoffCopiesEverythingToEveryOwner`,
+  `TestHandoffClosesTheFlushBarrier`, `TestHandoffRefusesBadBodiesBeforeTheBarrier`,
+  `TestHandoffFailsWhileAnOwnerIsDownAndARetrySucceeds`, `TestHandoffOfAnEmptyStore`,
+  `TestHandoffFailingFirstBatchReportsZero`, `TestHandoffStopsWhenTheCallerCancels`).
+  The `503` series count can overstate (a series counts once any of its batches was
+  acknowledged).
+- **Membership.** Adding a store: querier and compactor first, then the ingesters one
+  at a time; old copies stay on their previous stores until retention
+  (`TestStoreClusterAddStore`). Removing: ingesters first, then the handoff, then the
+  querier and compactor; a read afterwards that also skips one store is complete
+  (`TestStoreClusterRemoveStoreWithHandoff`). Helm stages a store change with
+  `split.store.writeReplicas` (a prefix of `split.store.replicas`); the ingester pod
+  template records its store count (`observability-platform.dev/store-count`), and an
+  upgrade refuses `replicas` below it and any store-count change while the ingester
+  StatefulSet is rolling (`TestSplitIngesterRecordsItsStoreCount`,
+  `TestStoreStagingReadsTheRunningIngesters`). Ruled limitations, documented rather
+  than coded: growing the store count is staged by convention only; the check has no
+  floor from kept store PVCs, so a reinstall without the ingester StatefulSet and with
+  fewer stores hides the data on the PVCs past the new count; and the chart cannot
+  see the handoff.
+- **Upgrade from 6.3 (ruling).** A 6.3 release's blocks exist only on `store-0`. Until
+  retention, a `store-0` outage gives reads that report success but omit that older
+  data, and the 1 → 4 scale-up shows read and flush errors, plus `421`s from pods still
+  running the old store URL, until every store pod is ready. Re-replicating old data
+  would need a rebalance route outside 6.4's scope, so the docs carry a staged upgrade
+  instead (`replicas=4, writeReplicas=1, storeReplicationFactor=1`, then raise both).
+  Compose has no in-place path: the 6.3 `store` volume is not mounted by the 6.4 file.
+- **Deployment.** Compose split: `store-1`…`store-4`, each with its own volume and
+  self URL, one `x-store-ring-env` anchor for the ingesters and querier, a literal list
+  on the compactor (`TestComposeSplitStoreReplication`). Helm split: `split.store.replicas`
+  4, `split.storeReplicationFactor` 3 refused above the stores the ingesters flush to,
+  chart-owned `OBS_STORE_REPLICATION_FACTOR` and `OBS_STORE_SELF_URL`
+  (`TestSplitDefaultsToFourStores`, `TestSplitStoreReplicationRendered`,
+  `TestBackendRejectsTemplateOwnedTopologyKeys`, `TestHelmPrometheusStoreTargetsMatchTheStores`).
+  The Compose smoke checks one store down (reads complete) and two down (`503`); the
+  kind smoke checks every store pod holds blocks after a drain. Dashboard panels:
+  "Store flush quorum", "Store reads", "Store retry queue".
+- **Failure semantics (4 stores, R_s 3).** One store down: flushes `degraded`, its
+  copies queued, reads complete (`TestStoreClusterOneStoreDown`, which also sees the
+  queue fill the store once it returns). Two down: a batch with a key on both fails
+  and stays in the head, reads `503`, and both recover (`TestStoreClusterTwoStoresDown`).
+  Flushed data survives every store restarting, still on exactly its replica set
+  (`TestStoreClusterRestartKeepsStores`).
 
 ---
 
