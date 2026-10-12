@@ -36,7 +36,7 @@ func NewStoreMetrics() *StoreMetrics {
 		}, []string{"store", "outcome"}),
 		CompactorPass: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "obs_compactor_store_passes_total",
-			Help: "Compaction and retention passes against each store, by outcome.",
+			Help: "Compaction and retention calls to each store (not whole passes), by outcome.",
 		}, []string{"store", "outcome"}),
 		Members: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "obs_store_ring_members",
