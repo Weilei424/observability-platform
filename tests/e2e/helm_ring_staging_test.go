@@ -18,7 +18,7 @@ import (
 
 // helm template cannot look anything up, so these tests render a copy of the
 // backend chart with one extra template that runs backend.ringStagingCheck
-// over fixture objects, in the shape lookup returns them for a live release.
+// and backend.storeStagingCheck over fixture objects, in the shape lookup returns them for a live release.
 // The real split-configmaps.yaml still runs the check over empty lookups,
 // which passes, so a failure here comes from the fixture.
 
@@ -31,6 +31,7 @@ const stagingFixtureTemplate = `{{- if eq .Values.topology "split" }}
 {{- $_ := set $live "ingesterData" (int (include "backend.ingesterDataOrdinals" (list . $live.pvcs))) }}
 {{- end }}
 {{- include "backend.ringStagingCheck" (list . $live) }}
+{{- include "backend.storeStagingCheck" (list . $live) }}
 {{- end }}
 `
 
@@ -454,6 +455,82 @@ func TestRingStagingTreatsAPartialReleaseAsLive(t *testing.T) {
 		}, []string{"split.replicationFactor=3", "split.querier.replicationFactor=1"}, ""},
 		{"a preview of a partial release", map[string]any{"gatewayConfig": cm(3), "querierConfig": cm(3)},
 			[]string{"split.ingester.previous.replicas=3", "split.ingester.previous.writeReplicas=3"}, "previews only"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := renderWithLive(t, tc.live, tc.set...)
+			switch {
+			case tc.wantFailureMention == "" && err != nil:
+				t.Errorf("render failed, want success: %v\n%.600s", err, out)
+			case tc.wantFailureMention != "" && (err == nil || !strings.Contains(out, tc.wantFailureMention)):
+				t.Errorf("rendered (err %v), want a failure naming %q\n%.600s", err, tc.wantFailureMention, out)
+			}
+		})
+	}
+}
+
+// liveIngesters is the ingester StatefulSet as lookup returns it, its pods
+// flushing to storeCount stores (no annotation when storeCount < 0, as a
+// release from before Phase 6.4 has). rolling leaves its rollout unfinished.
+func liveIngesters(storeCount int, rolling bool) map[string]any {
+	annotations := map[string]any{"checksum/config": "x"}
+	if storeCount >= 0 {
+		annotations["observability-platform.dev/store-count"] = strconv.Itoa(storeCount)
+	}
+	status := map[string]any{"observedGeneration": 3, "replicas": 3, "updatedReplicas": 3, "currentRevision": "r2", "updateRevision": "r2"}
+	if rolling {
+		status = map[string]any{"observedGeneration": 3, "replicas": 3, "updatedReplicas": 1, "currentRevision": "r1", "updateRevision": "r2"}
+	}
+	return map[string]any{
+		"metadata": map[string]any{"name": "observability-ingester", "generation": 3},
+		"spec": map[string]any{
+			"replicas": 3,
+			"template": map[string]any{"metadata": map[string]any{"annotations": annotations}},
+		},
+		"status": status,
+	}
+}
+
+// liveStores is the store StatefulSet as lookup returns it.
+func liveStores(replicas int) map[string]any {
+	return map[string]any{"metadata": map[string]any{"name": "observability-store"}, "spec": map[string]any{"replicas": replicas}}
+}
+
+// A store leaves in stages (spec §9.2): the ingesters stop flushing to it
+// (split.store.writeReplicas), the operator hands it off, and only then do the
+// querier and compactor stop reading it (split.store.replicas). On an upgrade
+// the chart reads the store count the running ingesters' pod template records
+// and refuses a shrink below it.
+func TestStoreStagingReadsTheRunningIngesters(t *testing.T) {
+	helmAvailable(t)
+	const gw, q = "observability-backend", "observability-querier"
+	// live is a rolled-out 3/3 ring at RF 3, so only the store check can refuse.
+	live := func(ing, store map[string]any) map[string]any {
+		m := map[string]any{
+			"gateway": withRF(liveDeployment(gw, 3, rolledOut), 3), "querier": withRF(liveDeployment(q, 3, rolledOut), 3),
+			"gatewayConfig": liveConfigMap(3), "querierConfig": liveConfigMap(3), "ingester": ing,
+		}
+		if store != nil {
+			m["store"] = store
+		}
+		return m
+	}
+	for _, tc := range []struct {
+		name               string
+		live               map[string]any
+		set                []string
+		wantFailureMention string // "" means the render must succeed
+	}{
+		{"shrink in one step", live(liveIngesters(4, false), liveStores(4)), []string{"split.store.replicas=3"},
+			"split.store.replicas 3 is below the 4 stores the running ingesters flush to: first lower split.store.writeReplicas, hand off the leaving store (runbook), then shrink"},
+		{"shrink with writeReplicas set in the same upgrade", live(liveIngesters(4, false), liveStores(4)), []string{"split.store.replicas=3", "split.store.writeReplicas=3"},
+			"below the 4 stores the running ingesters flush to"},
+		{"remove stage 1: the ingesters stop flushing to store 3", live(liveIngesters(4, false), liveStores(4)), []string{"split.store.writeReplicas=3"}, ""},
+		{"remove stage 3: shrink once the ingesters flush to 3", live(liveIngesters(3, false), liveStores(4)), []string{"split.store.replicas=3"}, ""},
+		{"shrink while the ingesters still roll", live(liveIngesters(3, true), liveStores(4)), []string{"split.store.replicas=3"},
+			"statefulset/observability-ingester has not finished rolling out"},
+		{"no store change while the ingesters roll", live(liveIngesters(4, true), liveStores(4)), nil, ""},
+		{"add stage 1: a fifth store, read but not flushed to", live(liveIngesters(4, false), liveStores(4)), []string{"split.store.replicas=5", "split.store.writeReplicas=4"}, ""},
+		{"a release before the annotation", live(liveIngesters(-1, false), liveStores(1)), nil, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := renderWithLive(t, tc.live, tc.set...)
