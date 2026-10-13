@@ -82,3 +82,49 @@ func TestGatherKeepsTheFirstProtocolError(t *testing.T) {
 		t.Errorf("observed %v, want %v", seen, want)
 	}
 }
+
+// With nothing but outages queued, the outage that exceeded Tolerate is
+// returned, not a later queued one.
+func TestGatherReturnsTheOutageThatExceededTolerate(t *testing.T) {
+	errA := fmt.Errorf("A: %w", errGatherOutage)
+	errB := fmt.Errorf("B: %w", errGatherOutage)
+	var seen []string
+	_, _, _, err := gather(context.Background(), gatherHeads(3, 0, &seen), queued(
+		headResult[[]string]{i: 0, err: errA},
+		headResult[[]string]{i: 1, err: errB},
+	), wrapStrs)
+	if err != errA {
+		t.Fatalf("err = %v, want %v", err, errA)
+	}
+	if want := []string{"0 A: outage", "1 B: outage"}; !slices.Equal(seen, want) {
+		t.Errorf("observed %v, want %v", seen, want)
+	}
+}
+
+// A protocol error that arrives while the queued results are being taken came
+// after the decision, so the deciding outage stands and the late error is not taken.
+func TestGatherIgnoresAResultArrivingAfterTheDecision(t *testing.T) {
+	errA := fmt.Errorf("A: %w", errGatherOutage)
+	errB := fmt.Errorf("B: %w", errGatherOutage)
+	ch := make(chan headResult[[]string], 3)
+	ch <- headResult[[]string]{i: 0, err: errA}
+	ch <- headResult[[]string]{i: 1, err: errB}
+	var seen []string
+	th := gatherHeads(3, 0, &seen)
+	th.opts.Observe = func(h int, err error) {
+		seen = append(seen, fmt.Sprint(h, " ", err))
+		if h == 1 {
+			ch <- headResult[[]string]{i: 2, err: errors.New("late protocol error")}
+		}
+	}
+	_, _, _, err := gather(context.Background(), th, ch, wrapStrs)
+	if err != errA {
+		t.Fatalf("err = %v, want the deciding outage %v", err, errA)
+	}
+	if len(ch) != 1 {
+		t.Errorf("%d results left queued, want the late one left alone", len(ch))
+	}
+	if want := []string{"0 A: outage", "1 B: outage"}; !slices.Equal(seen, want) {
+		t.Errorf("observed %v, want %v", seen, want)
+	}
+}
