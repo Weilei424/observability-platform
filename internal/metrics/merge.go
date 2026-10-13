@@ -233,7 +233,8 @@ type headResult[T any] struct {
 // decided read returns err: the first non-skippable error, or else the outage
 // that exceeded Tolerate. Results already queued when the read is decided are
 // taken and observed too, so a protocol error that is already in wins over an
-// outage that happened to be taken first. Otherwise it returns every answer by
+// outage that happened to be taken first; a result that arrives after the
+// decision is left alone, and a queued outage never replaces the deciding one. Otherwise it returns every answer by
 // head index, the skipped heads, and the last outage.
 func gather[T any](ctx context.Context, t tolerantHeads, results <-chan headResult[T], wrap func(T) Source) (answers []Source, skipped []int, lastOutage, err error) {
 	answers = make([]Source, len(t.heads))
@@ -261,19 +262,17 @@ func gather[T any](ctx context.Context, t tolerantHeads, results <-chan headResu
 		if fatal == nil && len(skipped) <= t.opts.Tolerate {
 			continue
 		}
-		for n++; n < len(t.heads); n++ {
-			select {
-			case r := <-results:
-				take(r)
-				continue
-			default:
-			}
-			break
+		// The read is decided here. Only the results queued at this moment
+		// are taken; one that arrives while they are taken came after the
+		// decision and cannot change it.
+		decidedBy := lastOutage
+		for range len(results) {
+			take(<-results)
 		}
 		if fatal != nil {
 			return nil, nil, nil, fatal
 		}
-		return nil, nil, nil, lastOutage
+		return nil, nil, nil, decidedBy
 	}
 	return answers, skipped, lastOutage, nil
 }
