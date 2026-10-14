@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -15,8 +16,9 @@ import (
 )
 
 // StoreQuorumError is a flush in which some key could not reach W_s stores.
-// The head keeps the whole batch; its Cause is the worst store failure, so
-// errors.Is(err, ErrUnavailable) holds only when every failure was an outage.
+// The head keeps the whole batch; its Cause is the worst store failure (see
+// storeCause), so errors.Is(err, ErrUnavailable) holds only when every failure
+// was an outage.
 type StoreQuorumError struct {
 	Kind                      string // "series" or "streams"
 	Failed, Total, Quorum, RF int
@@ -137,7 +139,7 @@ func replicateFlush(ctx context.Context, kind string, keys []uint64, r *ring.Rin
 		}
 		slices.Sort(culprits)
 		return &StoreQuorumError{Kind: kind, Failed: failedKeys, Total: len(keys), Quorum: need, RF: rf,
-			Stores: slices.Compact(culprits), Cause: worst(causes)}
+			Stores: slices.Compact(culprits), Cause: storeCause(causes)}
 	}
 	for store, res := range failedStore {
 		if q != nil {
@@ -152,6 +154,27 @@ func replicateFlush(ctx context.Context, kind string, keys []uint64, r *ring.Rin
 		}
 	}
 	return nil
+}
+
+// storeCause picks a StoreQuorumError's Cause: a protocol error first, then a
+// cancellation, and an outage only when every failure was an outage -- unlike
+// the router's worst, which puts an outage over a cancellation.
+func storeCause(errs []error) error {
+	var unavailable, canceled error
+	for _, err := range errs {
+		switch {
+		case errors.Is(err, ErrUnavailable):
+			unavailable = err
+		case errors.Is(err, context.Canceled):
+			canceled = err
+		default:
+			return err
+		}
+	}
+	if canceled != nil {
+		return canceled
+	}
+	return unavailable
 }
 
 // ReplicatedBlockSink flushes sealed chunks to every store that owns each
