@@ -931,12 +931,35 @@ Already delivered by 6.2/6.3 and kept: merge metrics by series/time, merge logs 
 - [x] Verify: kind split in CI with four store pods each holding blocks after a drain — job "Helm + Kubernetes E2E (kind, split)" passed in CI on 2026-10-13 at `446f8f1` (https://github.com/Weilei424/observability-platform/actions/runs/38327779359/job/115071006424)
 
 ### Phase 6.5 — Multi-Tenant Boundaries
-- [ ] Read tenant ID from request header
-- [ ] Add tenant-aware metrics series identity
-- [ ] Add tenant-aware log stream identity
-- [ ] Add tenant-aware query filtering
-- [ ] Add tenant-aware retention configuration
-- [ ] Add per-tenant active series limit
-- [ ] Add per-tenant active stream limit
-- [ ] Test: Tenant A cannot query Tenant B metrics
-- [ ] Test: Tenant A cannot query Tenant B logs
+Spec: `docs/superpowers/specs/2026-10-13-phase-6.5-multi-tenant-design.md` · Plan: `docs/superpowers/plans/2026-10-13-phase-6.5-multi-tenant.md`
+
+**Tenant identity**
+- [ ] Read tenant ID from `X-Scope-OrgID`: validated (1–150 bytes of `[A-Za-z0-9!_.*'()-]`, not `.`/`..`; `a|b` refused), default tenant `anonymous`, `OBS_TENANT_REQUIRED` (`401`) on public routes
+- [ ] Tenant-aware metrics series identity: reserved `__tenant__` label, absent for the default tenant (pre-6.5 data unchanged); clients cannot send it; stored-label decoders accept it
+- [ ] Tenant-aware log stream identity: the same label on streams
+- [ ] Tenant over internal RPC: clients always send the header; ingester and store read and push routes refuse a request without it (`400`)
+
+**Isolation**
+- [ ] Tenant-aware query filtering: tenant wrappers around every served local source (all-in-one, ingester, store); per-tenant label names and values; `__tenant__` never returned
+- [ ] Test: Tenant A cannot query Tenant B metrics (query, query_range, series, labels, label values; all-in-one and split)
+- [ ] Test: Tenant A cannot query Tenant B logs (query_range, labels, label values; all-in-one and split)
+
+**Overrides and limits**
+- [ ] `OBS_TENANT_OVERRIDES_FILE` with per-tenant retention and limits; env defaults `OBS_MAX_ACTIVE_SERIES_PER_TENANT`, `OBS_MAX_ACTIVE_STREAMS_PER_TENANT`, `OBS_MAX_METRICS_PUSH_BYTES`, `OBS_MAX_LOGS_PUSH_BYTES`
+- [ ] Per-tenant push size cap (`413`)
+- [ ] Per-tenant active series limit (`429`), exact in all-in-one, ⌈limit × RF ÷ N⌉ per split ingester; `rpc.ErrLimited` with precedence 500 > 429 > 503 > 499
+- [ ] Per-tenant active stream limit (`429`), same rules
+
+**Retention**
+- [ ] Tenant-aware retention configuration: per-tenant metrics blocks (`meta.json` `tenant`), compaction never merges tenants, retention per block by its tenant
+- [ ] Logs retention (new): per-tenant chunk file deletion, reads skip a deleted chunk; `POST /internal/v1/logs/retention` on stores, called by the compactor
+
+**Observability and deployment**
+- [ ] `obs_tenant_active_series{tenant}`, `obs_tenant_active_streams{tenant}`, `obs_tenant_limit_rejections_total{tenant,limit}`, `obs_logs_retention_deleted_chunks_total`; `tenant` in request logs; dashboard panels
+- [ ] Compose (both stacks) with the demo overrides file; Grafana team-b datasources; smoke tenant checks
+- [ ] Helm `tenants.*` values, overrides ConfigMap, render tests; kind smoke tenant checks
+- [ ] Docs: API, internal API, limitations, components, runbooks (6.4 → 6.5 upgrade order), Helm README, architecture notes
+
+**Verification**
+- [ ] `go test -race ./...`, lint, `helm lint`, `make smoke-compose-split`, `make smoke-compose`
+- [ ] Verify: kind split in CI with the tenant checks
