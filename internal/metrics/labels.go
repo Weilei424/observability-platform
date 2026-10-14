@@ -17,3 +17,12 @@ func NewLabels(m map[string]string) (Labels, error) {
 func newOutputLabels(m map[string]string) Labels {
 	return labels.NewUnvalidated(m)
 }
+
+// NewStoredLabels is NewLabels for a series read back from storage or an
+// internal peer: the tenant label is allowed (labels.NewStored).
+func NewStoredLabels(m map[string]string) (Labels, error) {
+	if err := validateMetricName(m); err != nil {
+		return Labels{}, err
+	}
+	return labels.NewStored(m)
+}
