@@ -622,10 +622,14 @@ closes the gap. It is a query-engine feature, so it was deliberately kept out of
 - Tenant-aware retention configuration.
 - Basic per-tenant limits for ingest payload size and active series/streams.
 
+**Planned design (2026-10-13):** a tenant is a reserved `__tenant__` label in the series/stream identity, absent for the default tenant `anonymous`, so pre-6.5 data needs no migration; the tenant travels in the request context and the `X-Scope-OrgID` header on internal RPC; wrappers around every served local source filter by it. Limits and retention come from environment defaults plus an optional overrides file. Logs gain retention in this phase. Spec: `docs/superpowers/specs/2026-10-13-phase-6.5-multi-tenant-design.md`.
+
 **DoD:**
 - Tenant A cannot query Tenant B data.
 - Tenant limits are enforced and tested.
 - Metrics expose tenant-scoped active series/stream counts without leaking data.
+- Each tenant's retention applies to its metrics blocks and log chunks.
+- Pre-6.5 data stays readable as the default tenant's.
 
 ---
 
