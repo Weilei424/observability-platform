@@ -177,7 +177,7 @@ func metricsPush(w http.ResponseWriter, r *http.Request, ing metrics.Ingester, i
 	}
 	var batch []metrics.PendingSample
 	for _, s := range req.Series {
-		labels, err := metrics.NewLabels(s.Labels)
+		labels, err := metrics.NewStoredLabels(s.Labels)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid series labels: "+err.Error())
 			return
@@ -218,7 +218,7 @@ func logsPush(w http.ResponseWriter, r *http.Request, ing logs.Ingester, im *obs
 	}
 	var batch []logs.PendingEntry
 	for _, s := range req.Streams {
-		labels, err := logs.NewStreamLabels(s.Labels)
+		labels, err := logs.NewStoredStreamLabels(s.Labels)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid stream labels: "+err.Error())
 			return
