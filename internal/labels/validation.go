@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/masonwheeler/observability-platform/internal/tenant"
 )
 
 var labelNameRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
@@ -24,11 +26,22 @@ func (e *ValidationError) Error() string {
 // metric-name charset rule is a metrics-domain concern enforced by the caller.
 // Limits match the WAL encoding constraints: ≤255 labels, ≤255-byte name,
 // ≤65535-byte value.
-func validateLabelMap(m map[string]string) error {
+func validateLabelMap(m map[string]string, allowTenant bool) error {
 	if len(m) > 255 {
 		return &ValidationError{Field: "labels", Message: "too many labels: maximum is 255"}
 	}
 	for k, v := range m {
+		if k == tenant.Label && allowTenant {
+			// A stored tenant label names a non-default tenant; the default
+			// tenant is the label's absence, never its value.
+			if v == tenant.Default {
+				return &ValidationError{Field: k, Message: "the default tenant carries no tenant label"}
+			}
+			if err := tenant.Validate(v); err != nil {
+				return &ValidationError{Field: k, Message: err.Error()}
+			}
+			continue
+		}
 		if k != "__name__" {
 			if strings.HasPrefix(k, "__") {
 				return &ValidationError{Field: k, Message: "label name with __ prefix is reserved"}
