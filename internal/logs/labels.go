@@ -16,3 +16,12 @@ func NewStreamLabels(m map[string]string) (StreamLabels, error) {
 func StreamIDOf(l StreamLabels) StreamID {
 	return StreamID(l.Hash())
 }
+
+// NewStoredStreamLabels is NewStreamLabels for a stream read back from storage
+// or an internal peer: the tenant label is allowed (labels.NewStored).
+func NewStoredStreamLabels(m map[string]string) (StreamLabels, error) {
+	if len(m) == 0 {
+		return StreamLabels{}, &ValidationError{Field: "labels", Message: "stream must have at least one label"}
+	}
+	return labels.NewStored(m)
+}
