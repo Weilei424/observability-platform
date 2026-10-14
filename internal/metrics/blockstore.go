@@ -1434,7 +1434,7 @@ func blockPairsToLabels(pairs []block.LabelPair) (Labels, error) {
 	for _, p := range pairs {
 		m[p.Name] = p.Value
 	}
-	return NewLabels(m)
+	return NewStoredLabels(m)
 }
 
 func labelsToPairs(l Labels) []block.LabelPair {
