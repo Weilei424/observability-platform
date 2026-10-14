@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -178,6 +179,12 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Parsed here rather than with GetInt64, which turns a malformed value
+	// into 0 -- a valid setting that turns the straggler queue off.
+	storeRetryMaxBytes, err := strconv.ParseInt(strings.TrimSpace(v.GetString("store_retry_max_bytes")), 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("config: OBS_STORE_RETRY_MAX_BYTES must be a whole number of bytes: %w", err)
+	}
 
 	cfg := &Config{
 		HTTPAddr:                v.GetString("http_addr"),
@@ -195,7 +202,7 @@ func Load() (*Config, error) {
 		IngesterTimeout:         ingesterTimeout,
 		StoreReplicationFactor:  v.GetInt("store_replication_factor"),
 		StoreSelfURL:            v.GetString("store_self_url"),
-		StoreRetryMaxBytes:      v.GetInt64("store_retry_max_bytes"),
+		StoreRetryMaxBytes:      storeRetryMaxBytes,
 		StoreRetryMaxAge:        storeRetryMaxAge,
 		MaintenanceInterval:     maintenanceInterval,
 		FlushInterval:           flushInterval,
