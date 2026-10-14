@@ -77,7 +77,7 @@ func readChunkFileHeader(path string) (StreamID, StreamLabels, int64, int64, err
 		m[string(name)] = string(val)
 		fileHeaderLen += 1 + int(nl) + 2 + len(val)
 	}
-	labels, err := NewStreamLabels(m)
+	labels, err := NewStoredStreamLabels(m)
 	if err != nil {
 		return 0, StreamLabels{}, 0, 0, fmt.Errorf("logs: invalid labels in chunk file: %w", err)
 	}
@@ -233,7 +233,7 @@ func decodeChunkFileHeader(data []byte) (StreamID, StreamLabels, []byte, error) 
 		m[name] = string(data[pos : pos+vl])
 		pos += vl
 	}
-	labels, err := NewStreamLabels(m)
+	labels, err := NewStoredStreamLabels(m)
 	if err != nil {
 		return 0, StreamLabels{}, nil, fmt.Errorf("logs: invalid labels in chunk file: %w", err)
 	}
