@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"hash/fnv"
 	"sort"
+
+	"github.com/masonwheeler/observability-platform/internal/tenant"
 )
 
 // Label is a single name/value pair.
@@ -19,13 +21,52 @@ type Labels struct {
 	hash  uint64  // computed once at construction
 }
 
-// New validates, normalizes, and hashes a label set. __name__ is treated as an
-// ordinary label and is not required.
+// New validates, normalizes, and hashes a label set from a client. __name__ is
+// treated as an ordinary label and is not required; every other __-prefixed
+// name, the tenant label included, is refused.
 func New(m map[string]string) (Labels, error) {
-	if err := validateLabelMap(m); err != nil {
+	if err := validateLabelMap(m, false); err != nil {
 		return Labels{}, err
 	}
 	return build(m), nil
+}
+
+// NewStored is New for a label set read back from storage or an internal
+// peer: it also accepts the tenant label with a valid non-default tenant ID.
+func NewStored(m map[string]string) (Labels, error) {
+	if err := validateLabelMap(m, true); err != nil {
+		return Labels{}, err
+	}
+	return build(m), nil
+}
+
+// WithTenant returns l acting for tenant id: l itself for the default tenant,
+// l plus the tenant label otherwise. id must already be valid.
+func WithTenant(l Labels, id string) Labels {
+	if id == tenant.Default {
+		return l
+	}
+	m := l.Map()
+	m[tenant.Label] = id
+	return build(m)
+}
+
+// TenantOf returns the tenant a label set belongs to.
+func TenantOf(l Labels) string {
+	if v, ok := l.Get(tenant.Label); ok {
+		return v
+	}
+	return tenant.Default
+}
+
+// Without returns l minus the label name; l itself when it has no such label.
+func Without(l Labels, name string) Labels {
+	if _, ok := l.Get(name); !ok {
+		return l
+	}
+	m := l.Map()
+	delete(m, name)
+	return build(m)
 }
 
 // NewUnvalidated builds a Labels without validation (e.g. aggregation output).
