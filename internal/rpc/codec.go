@@ -390,7 +390,7 @@ func seriesToWire(sds []metrics.SeriesData) []wireSeries {
 func seriesFromWire(ws []wireSeries) ([]metrics.SeriesData, error) {
 	out := make([]metrics.SeriesData, len(ws))
 	for i, w := range ws {
-		l, err := metrics.NewLabels(w.Labels)
+		l, err := metrics.NewStoredLabels(w.Labels)
 		if err != nil {
 			return nil, fmt.Errorf("rpc: series labels: %w", err)
 		}
@@ -425,7 +425,7 @@ func streamsToWire(sds []logs.StreamData) []wireStream {
 func streamsFromWire(ws []wireStream) ([]logs.StreamData, error) {
 	out := make([]logs.StreamData, len(ws))
 	for i, w := range ws {
-		l, err := logs.NewStreamLabels(w.Labels)
+		l, err := logs.NewStoredStreamLabels(w.Labels)
 		if err != nil {
 			return nil, fmt.Errorf("rpc: stream labels: %w", err)
 		}
