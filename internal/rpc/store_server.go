@@ -61,7 +61,7 @@ func metricsFlush(w http.ResponseWriter, r *http.Request, blocks *metrics.BlockS
 	}
 	series := make([]metrics.SeriesChunks, 0, len(req.Series))
 	for i, ws := range req.Series {
-		l, err := metrics.NewLabels(ws.Labels)
+		l, err := metrics.NewStoredLabels(ws.Labels)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("series %d: %v", i, err))
 			return
@@ -131,7 +131,7 @@ func logsFlush(w http.ResponseWriter, r *http.Request, chunks *logs.ChunkStore, 
 	streams := make([]logs.StreamData, 0, len(req.Streams))
 	entries := 0
 	for i, ws := range req.Streams {
-		l, err := logs.NewStreamLabels(ws.Labels)
+		l, err := logs.NewStoredStreamLabels(ws.Labels)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("stream %d: %v", i, err))
 			return
