@@ -928,7 +928,7 @@ Already delivered by 6.2/6.3 and kept: merge metrics by series/time, merge logs 
 - [x] Integration (3 ingesters RF 3, 4 stores R_s 3): sharded flush read back with each store holding exactly its keys; one store down (and its copies arrive after it returns); two down (flush fails, reads `503`, recovery); compaction per store; add a store; remove a store with handoff then read while skipping one store; parallel ingester reads; restart persistence — `tests/integration` `TestStoreClusterFlushedDataIsShardedAndReadBack`, `TestStoreClusterOneStoreDown`, `TestStoreClusterTwoStoresDown`, `TestStoreClusterCompactsEveryStore`, `TestStoreClusterAddStore`, `TestStoreClusterRemoveStoreWithHandoff`, `TestStoreClusterReadsIngestersInParallel`, `TestStoreClusterRestartKeepsStores`
 - [x] Render tests: Compose and Helm store self URLs equal ring entries; R_s rendered and bounded; staging refusals — `TestComposeSplitStoresKnowTheirOwnURL`, `TestSplitStorePodsKnowTheirOwnURL`, `TestComposeSplitStoreReplication`, `TestSplitStoreReplicationRendered`, `TestStoreStagingReadsTheRunningIngesters`
 - [x] `go test -race ./...`, lint, `make smoke-compose-split` 123/0, `make smoke-compose` (all-in-one) 71/0, all on 2026-10-12
-- [ ] Verify: kind split in CI with four store pods each holding blocks after a drain (local kind could not start a cluster)
+- [x] Verify: kind split in CI with four store pods each holding blocks after a drain — job "Helm + Kubernetes E2E (kind, split)" passed in CI on 2026-10-13 at `446f8f1` (https://github.com/Weilei424/observability-platform/actions/runs/38327779359/job/115071006424)
 
 ### Phase 6.5 — Multi-Tenant Boundaries
 - [ ] Read tenant ID from request header
