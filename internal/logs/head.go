@@ -93,7 +93,7 @@ func OpenHead(walDir string, segMaxBytes int64, syncEveryN int, flushThreshold i
 		for _, p := range pairs {
 			m[p.Name] = p.Value
 		}
-		sl, err := NewStreamLabels(m)
+		sl, err := NewStoredStreamLabels(m)
 		if err != nil {
 			// Skip the record, but say so. Log WAL records carry no checksum, so a
 			// structurally valid record can still hold semantically corrupt labels
