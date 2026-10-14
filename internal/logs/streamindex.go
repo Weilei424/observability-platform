@@ -223,7 +223,7 @@ func loadManifest(path string) (*streamIndex, error) {
 			m[kname] = string(data[pos : pos+kvl])
 			pos += kvl
 		}
-		labels, err := NewStreamLabels(m)
+		labels, err := NewStoredStreamLabels(m)
 		if err != nil {
 			return nil, fmt.Errorf("logs: invalid labels in manifest record %d: %w", i, err)
 		}
