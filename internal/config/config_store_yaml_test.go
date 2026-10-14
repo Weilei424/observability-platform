@@ -52,3 +52,41 @@ func TestStoreSettingsFromYAMLLoadOnTheIngester(t *testing.T) {
 		t.Fatalf("cfg = %+v", cfg)
 	}
 }
+
+// A malformed retry bound is refused, from the environment or config.yaml,
+// rather than read as 0, which would turn the straggler queue off.
+func TestMalformedStoreRetryBoundsAreRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name, env, yaml, wantErr string
+	}{
+		{"bytes in env", "bogus", "", "OBS_STORE_RETRY_MAX_BYTES must be a whole number"},
+		{"bytes in YAML", "", "store_retry_max_bytes: bogus\n", "OBS_STORE_RETRY_MAX_BYTES must be a whole number"},
+		{"fractional bytes in YAML", "", "store_retry_max_bytes: 1.5\n", "OBS_STORE_RETRY_MAX_BYTES must be a whole number"},
+		{"age in YAML", "", "store_retry_max_age: soon\n", "OBS_STORE_RETRY_MAX_AGE"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearStoreEnv(t)
+			t.Setenv("OBS_TARGET", "ingester")
+			t.Setenv("OBS_STORE_URL", "http://s1:1")
+			if tc.env != "" {
+				t.Setenv("OBS_STORE_RETRY_MAX_BYTES", tc.env)
+			}
+			_, err := loadWithYAML(t, tc.yaml)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// An explicit 0 still loads: it is the documented way to turn the queue off.
+func TestZeroStoreRetryMaxBytesLoads(t *testing.T) {
+	clearStoreEnv(t)
+	t.Setenv("OBS_TARGET", "ingester")
+	t.Setenv("OBS_STORE_URL", "http://s1:1")
+	t.Setenv("OBS_STORE_RETRY_MAX_BYTES", "0")
+	cfg, err := loadWithYAML(t, "")
+	if err != nil || cfg.StoreRetryMaxBytes != 0 {
+		t.Fatalf("cfg = %+v, err = %v", cfg, err)
+	}
+}
