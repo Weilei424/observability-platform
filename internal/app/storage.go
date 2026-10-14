@@ -21,7 +21,7 @@ func replayMetricsWAL(walLog *slog.Logger, walDir string, checkpoint int, append
 		for _, p := range pairs {
 			lm[p.Name] = p.Value
 		}
-		labels, err := metrics.NewLabels(lm)
+		labels, err := metrics.NewStoredLabels(lm)
 		if err != nil {
 			walLog.Warn("WAL replay: skipping record with invalid labels", slog.String("error", err.Error()))
 			return
