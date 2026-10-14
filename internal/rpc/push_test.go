@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/masonwheeler/observability-platform/internal/drain"
+	"github.com/masonwheeler/observability-platform/internal/labels"
 	"github.com/masonwheeler/observability-platform/internal/logs"
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/observability"
@@ -135,5 +136,27 @@ func TestPushToADrainingIngesterIsAnOutage(t *testing.T) {
 	}
 	if len(m.got) != 0 || len(l.got) != 0 {
 		t.Errorf("a draining ingester appended %d samples and %d lines", len(m.got), len(l.got))
+	}
+}
+
+func TestMetricsPushAcceptsTenantLabel(t *testing.T) {
+	m, l := &recordingMetrics{}, &recordingLogs{}
+	r := chi.NewRouter()
+	r.Route("/internal/v1", func(r chi.Router) { MountWrites(r, m, l, observability.NewIngestMetrics()) })
+	srv := httptest.NewServer(r)
+	t.Cleanup(srv.Close)
+	body := `{"series":[{"labels":{"__name__":"up","__tenant__":"team-b"},"samples":[[1,"1"]]}]}`
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/internal/v1/metrics/push", strings.NewReader(body))
+	req.Header.Set("X-Scope-OrgID", "team-b")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", resp.StatusCode)
+	}
+	if len(m.got) != 1 || labels.TenantOf(m.got[0].Labels) != "team-b" {
+		t.Fatalf("ingester got %+v", m.got)
 	}
 }
