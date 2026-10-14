@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/masonwheeler/observability-platform/internal/logs"
 	"github.com/masonwheeler/observability-platform/internal/metrics"
@@ -321,5 +322,73 @@ func TestReplicatedSinksRequireAllNeedEveryOwner(t *testing.T) {
 	// Without the option the same outage is a degraded success.
 	if _, err := NewReplicatedBlockSink(r, 3, clients, nil, nil).IngestSeriesChunks(context.Background(), seriesBatch(t, 5)); err != nil {
 		t.Fatalf("quorum flush with one owner down: %v", err)
+	}
+}
+
+// A quorum miss's cause is an outage only when every failure was an outage; a
+// cancellation among them wins, and a protocol error wins over both.
+func TestStoreCausePrefersProtocolThenCancellation(t *testing.T) {
+	outage := fmt.Errorf("%w: s1 down", ErrUnavailable)
+	canceled := fmt.Errorf("s2: %w", context.Canceled)
+	protocol := errors.New("s3 bad answer")
+	for _, tc := range []struct {
+		name string
+		errs []error
+		want error
+	}{
+		{"outages only", []error{outage, outage}, outage},
+		{"outage then cancellation", []error{outage, canceled}, canceled},
+		{"cancellation then outage", []error{canceled, outage}, canceled},
+		{"protocol among both", []error{outage, protocol, canceled}, protocol},
+	} {
+		if got := storeCause(tc.errs); got != tc.want {
+			t.Errorf("%s: cause = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// One store answers, one is down, and one is cancelled mid-flush: the batch
+// misses quorum, and the error is a cancellation, not an outage.
+func TestReplicatedBlockSinkOutageAndCancellationIsNotAnOutage(t *testing.T) {
+	stores := startStores(t, 2, map[int]int{1: http.StatusServiceUnavailable})
+	downAnswered := make(chan struct{})
+	// It reads the body first: the server notices the client went away only once
+	// the body is consumed.
+	hung := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		<-r.Context().Done()
+	}))
+	t.Cleanup(hung.Close)
+	stores = append(stores, &fakeStore{url: hung.URL})
+	// Cancel once the down store has taken its request, so its 503 is (almost
+	// always) in before the cancellation; if it is not, both failures are
+	// cancellations and the assertion below still holds.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		for {
+			stores[1].mu.Lock()
+			n := len(stores[1].bodies)
+			stores[1].mu.Unlock()
+			if n > 0 {
+				close(downAnswered)
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	go func() {
+		<-downAnswered
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	sink, _ := storeSink(t, stores, 3, &recordQueue{}, nil)
+	_, err := sink.IngestSeriesChunks(ctx, seriesBatch(t, 5))
+	var qe *StoreQuorumError
+	if !errors.As(err, &qe) {
+		t.Fatalf("err = %v, want a StoreQuorumError", err)
+	}
+	if errors.Is(err, ErrUnavailable) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want a cancellation, not an outage", err)
 	}
 }
