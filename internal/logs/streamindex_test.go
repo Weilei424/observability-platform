@@ -155,3 +155,39 @@ func assertSameIndex(t *testing.T, want, got *streamIndex) {
 		t.Fatalf("postings series count %d != %d", got.postings.SeriesCount(), want.postings.SeriesCount())
 	}
 }
+
+func TestStreamIndex_ManifestKeepsTheTenantLabel(t *testing.T) {
+	dir := t.TempDir()
+	chunksDir := filepath.Join(dir, "chunks")
+	if err := os.MkdirAll(chunksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m := map[string]string{"service": "api", "__tenant__": "team-b"}
+	labels, err := NewStoredStreamLabels(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := StreamIDOf(labels)
+	c := logchunk.NewChunk()
+	c.Append(100, "line")
+	ref, err := writeChunkFile(chunksDir, id, labels, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x := newStreamIndex()
+	x.add(id, labels, ref)
+	manifest := filepath.Join(dir, "streams.index")
+	if err := x.writeManifest(manifest); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadManifest(manifest)
+	if err != nil {
+		t.Fatalf("loadManifest of a tenant stream: %v", err)
+	}
+	assertSameIndex(t, x, loaded)
+	rebuilt, err := rebuildFromScan(chunksDir)
+	if err != nil {
+		t.Fatalf("rebuildFromScan: %v", err)
+	}
+	assertSameIndex(t, x, rebuilt)
+}
