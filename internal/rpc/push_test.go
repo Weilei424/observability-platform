@@ -36,7 +36,7 @@ func pushServer(t *testing.T) (*Client, *recordingMetrics, *recordingLogs, *obse
 	t.Helper()
 	m, l, im := &recordingMetrics{}, &recordingLogs{}, observability.NewIngestMetrics()
 	r := chi.NewRouter()
-	r.Route("/internal/v1", func(r chi.Router) { MountWrites(r, m, l, im) })
+	r.Route("/internal/v1", func(r chi.Router) { MountWrites(r, m, l, im, nil, nil) })
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 	c, err := NewClient("ingester", srv.URL)
@@ -119,7 +119,9 @@ func TestPushToADrainingIngesterIsAnOutage(t *testing.T) {
 	}
 	m, l := &recordingMetrics{}, &recordingLogs{}
 	r := chi.NewRouter()
-	r.Route("/internal/v1", func(r chi.Router) { MountWrites(r, g.Metrics(m), g.Logs(l), observability.NewIngestMetrics()) })
+	r.Route("/internal/v1", func(r chi.Router) {
+		MountWrites(r, g.Metrics(m), g.Logs(l), observability.NewIngestMetrics(), nil, nil)
+	})
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 	c, err := NewClient("ingester", srv.URL)
@@ -142,7 +144,7 @@ func TestPushToADrainingIngesterIsAnOutage(t *testing.T) {
 func TestMetricsPushAcceptsTenantLabel(t *testing.T) {
 	m, l := &recordingMetrics{}, &recordingLogs{}
 	r := chi.NewRouter()
-	r.Route("/internal/v1", func(r chi.Router) { MountWrites(r, m, l, observability.NewIngestMetrics()) })
+	r.Route("/internal/v1", func(r chi.Router) { MountWrites(r, m, l, observability.NewIngestMetrics(), nil, nil) })
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 	body := `{"series":[{"labels":{"__name__":"up","__tenant__":"team-b"},"samples":[[1,"1"]]}]}`
