@@ -135,7 +135,7 @@ func TestComposeSplitComponentEnvironmentsLoad(t *testing.T) {
 				// Viper treats an empty variable as unset, so "" restores a default —
 				// except OBS_DATA_DIR, which config reads with LookupEnv and refuses
 				// when empty. The stateless components do not set it; give it the default.
-				for _, k := range []string{"OBS_TARGET", "OBS_INGESTER_URL", "OBS_STORE_URL", "OBS_QUERIER_URL", "OBS_INGESTER_SELF_URL", "OBS_STORE_REPLICATION_FACTOR", "OBS_STORE_SELF_URL", "OBS_STORE_RETRY_MAX_BYTES", "OBS_STORE_RETRY_MAX_AGE", "OBS_LOG_LEVEL", "OBS_LOGS_FLUSH_THRESHOLD_BYTES"} {
+				for _, k := range []string{"OBS_TARGET", "OBS_INGESTER_URL", "OBS_STORE_URL", "OBS_QUERIER_URL", "OBS_INGESTER_SELF_URL", "OBS_STORE_REPLICATION_FACTOR", "OBS_STORE_SELF_URL", "OBS_STORE_RETRY_MAX_BYTES", "OBS_STORE_RETRY_MAX_AGE", "OBS_LOG_LEVEL", "OBS_LOGS_FLUSH_THRESHOLD_BYTES", "OBS_TENANT_REQUIRED", "OBS_TENANT_OVERRIDES_FILE", "OBS_MAX_ACTIVE_SERIES_PER_TENANT", "OBS_MAX_ACTIVE_STREAMS_PER_TENANT", "OBS_MAX_METRICS_PUSH_BYTES", "OBS_MAX_LOGS_PUSH_BYTES"} {
 					t.Setenv(k, "")
 				}
 				t.Setenv("OBS_DATA_DIR", "data")
