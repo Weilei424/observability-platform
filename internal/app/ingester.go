@@ -173,7 +173,7 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 				r.Use(rpc.RequireMember(cfg.IngesterSelfURL))
 			}
 			rpc.MountDrain(r, drainHeads, ingesterDrainTimeout)
-			rpc.MountReads(r, head, logs.AsSource(logHead))
+			rpc.MountReads(r, head, logHead)
 			rpc.MountWrites(r, gate.Metrics(writes), gate.Logs(logHead), inst.Ingest)
 		},
 	})
