@@ -11,8 +11,10 @@ import (
 	"unicode/utf8"
 
 	"github.com/masonwheeler/observability-platform/internal/drain"
+	"github.com/masonwheeler/observability-platform/internal/labels"
 	"github.com/masonwheeler/observability-platform/internal/logs"
 	"github.com/masonwheeler/observability-platform/internal/observability"
+	"github.com/masonwheeler/observability-platform/internal/tenant"
 )
 
 type lokiPushRequest struct {
@@ -45,7 +47,7 @@ func (s *Server) handleLokiPush(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 4<<20)
+	r.Body = http.MaxBytesReader(w, r.Body, s.pushCap(r, defaultLogsPushBytes, (*tenant.Limits).MaxLogsPushBytes))
 
 	// Read the whole body so its UTF-8 validity can be checked BEFORE JSON
 	// decoding. encoding/json silently replaces malformed UTF-8 in strings with
@@ -56,6 +58,9 @@ func (s *Server) handleLokiPush(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		// Exceeding the MaxBytesReader cap surfaces here as a read error.
+		if s.rejectOversizePush(w, r, err) {
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "request body too large or unreadable"})
 		return
 	}
@@ -130,6 +135,7 @@ func (s *Server) handleLokiPush(w http.ResponseWriter, r *http.Request) {
 			}
 			continue
 		}
+		sl = labels.WithTenant(sl, tenant.From(r.Context()))
 		for _, v := range st.Values {
 			if len(v) != 2 {
 				recordValidationError(i, "values", "each value must be a [timestamp, line] pair; structured metadata is not supported", 1)
