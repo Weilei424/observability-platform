@@ -24,6 +24,14 @@ func Compact(blocksDir, tmpDir string, sources []*Reader) (Meta, error) {
 		return Meta{}, fmt.Errorf("block: Compact requires at least 2 sources, got %d", len(sources))
 	}
 
+	tenantID := sources[0].Meta().Tenant
+	for _, r := range sources[1:] {
+		if m := r.Meta(); m.Tenant != tenantID {
+			return Meta{}, fmt.Errorf("block: Compact refuses to merge tenants %q and %q (blocks %s, %s)",
+				tenantID, m.Tenant, sources[0].Meta().BlockID, m.BlockID)
+		}
+	}
+
 	// Sort sources by MinTime only for deterministic series/output order; dedup
 	// precedence is per-sample generation, independent of source order.
 	ordered := make([]*Reader, len(sources))
@@ -78,6 +86,7 @@ func Compact(blocksDir, tmpDir string, sources []*Reader) (Meta, error) {
 		return Meta{}, err
 	}
 	w.SetCompaction(maxLevel+1, sourceIDs)
+	w.SetTenant(tenantID)
 
 	for _, id := range order {
 		chunks := rechunk(aggByID[id].samples)
