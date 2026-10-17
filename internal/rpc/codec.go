@@ -232,6 +232,7 @@ type wireBlockInfo struct {
 	MinTime   int64  `json:"min_time"`
 	MaxTime   int64  `json:"max_time"`
 	SizeBytes int64  `json:"size_bytes"`
+	Tenant    string `json:"tenant,omitempty"`
 }
 
 type metricsSelectRequest struct {
