@@ -16,6 +16,11 @@ import (
 // peer, the route, and the cause.
 var ErrUnavailable = errors.New("peer unavailable")
 
+// ErrLimited marks a write a peer refused because the tenant is at its active
+// series or stream limit (429). It is neither an outage nor a protocol bug:
+// retrying the same write cannot succeed until series go idle.
+var ErrLimited = errors.New("tenant limit exceeded")
+
 const (
 	// selectBodyLimit bounds a select or maintenance request: a few matchers.
 	selectBodyLimit = 1 << 20
