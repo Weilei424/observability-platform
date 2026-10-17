@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/masonwheeler/observability-platform/internal/tenant"
 	"io"
 	"net"
 	"net/http"
@@ -142,6 +143,7 @@ func (c *Client) callInto(ctx context.Context, method, path string, query url.Va
 	}
 	req.Header.Set(chimiddleware.RequestIDHeader, requestID(ctx))
 	req.Header.Set(MemberHeader, c.member)
+	req.Header.Set(tenant.Header, tenant.From(ctx))
 
 	resp, err := c.http.Do(req)
 	if err != nil {
