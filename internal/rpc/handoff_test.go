@@ -45,7 +45,7 @@ func newHandoffStore(t *testing.T, self string, wrap func(http.Handler) http.Han
 	barrier := &rpc.FlushBarrier{}
 	r := chi.NewRouter()
 	r.Route("/internal/v1", func(r chi.Router) {
-		rpc.MountReads(r, bs, logs.AsSource(cs))
+		rpc.MountReads(r, bs, cs)
 		rpc.MountStore(r, bs, cs, barrier)
 		rpc.MountHandoff(r, bs, cs, barrier, self, metrics.DefaultFlushTimeout)
 	})
