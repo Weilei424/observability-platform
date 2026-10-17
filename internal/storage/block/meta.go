@@ -23,6 +23,10 @@ type Meta struct {
 	// all blocks) so replayed and new writes always outrank persisted data for
 	// last-write-wins. Blocks written before generations existed unmarshal as 0.
 	MaxGen int64 `json:"max_gen"`
+	// Tenant is the one tenant every series in this block belongs to. The default
+	// tenant is the empty string, so blocks written before multi-tenancy (no
+	// field) read as the default tenant.
+	Tenant string `json:"tenant,omitempty"`
 }
 
 // EffectiveLevel returns the compaction level, treating a missing/zero level
@@ -42,6 +46,7 @@ type BlockInfo struct {
 	MinTime   int64
 	MaxTime   int64
 	SizeBytes int64
+	Tenant    string // "" is the default tenant
 }
 
 // ReadMeta reads and parses meta.json from a block directory.
