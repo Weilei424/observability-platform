@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/masonwheeler/observability-platform/internal/config"
+	"github.com/masonwheeler/observability-platform/internal/limits"
 	"github.com/masonwheeler/observability-platform/internal/logs"
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/observability"
@@ -94,6 +95,12 @@ type Deps struct {
 	// limit (limit is "push_bytes"). It may be nil.
 	OnTenantReject func(tenant, limit string)
 
+	// SeriesGate and StreamGate, when set, admit local metrics and log writes
+	// against each tenant's active series and stream limits (a refusal is a
+	// 429). Nil gates append directly.
+	SeriesGate *limits.Gate
+	StreamGate *limits.Gate
+
 	// Middleware wraps every route after the request ID and the request's
 	// logger are set, so it can log with them.
 	Middleware []func(http.Handler) http.Handler
@@ -128,6 +135,8 @@ type Server struct {
 	tenants        *tenant.Limits
 	tenantRequired bool
 	onTenantReject func(tenant, limit string)
+	seriesGate     *limits.Gate
+	streamGate     *limits.Gate
 }
 
 func New(d Deps) *Server {
@@ -172,6 +181,8 @@ func New(d Deps) *Server {
 		tenants:        d.Tenants,
 		tenantRequired: d.TenantRequired,
 		onTenantReject: d.OnTenantReject,
+		seriesGate:     d.SeriesGate,
+		streamGate:     d.StreamGate,
 	}
 	if d.Upstreams != nil {
 		s.gateway = newGatewayProxies(d.Upstreams)
