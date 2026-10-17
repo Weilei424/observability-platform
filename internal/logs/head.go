@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/masonwheeler/observability-platform/internal/labels"
 	"github.com/masonwheeler/observability-platform/internal/storage/fsutil"
 	"github.com/masonwheeler/observability-platform/internal/storage/index"
 	"github.com/masonwheeler/observability-platform/internal/storage/logwal"
@@ -66,12 +67,14 @@ type HeadOptions struct {
 // entries the sink already has — never a moment in which an entry is readable
 // nowhere.
 type Head struct {
-	mu          syncx.Mutex
-	head        map[StreamID]*memoryStream
-	wal         logWAL
-	sink        ChunkSink
-	headBytes   int64
-	flushThresh int64
+	mu   syncx.Mutex
+	head map[StreamID]*memoryStream
+	// tenantStreams counts head streams per tenant; zero entries are absent.
+	tenantStreams map[string]int
+	wal           logWAL
+	sink          ChunkSink
+	headBytes     int64
+	flushThresh   int64
 
 	opts         HeadOptions
 	backoffUntil time.Time
@@ -87,6 +90,7 @@ func OpenHead(walDir string, segMaxBytes int64, syncEveryN int, flushThreshold i
 		return nil, fmt.Errorf("logs: mkdir %s: %w", walDir, err)
 	}
 	head := make(map[StreamID]*memoryStream)
+	tenantStreams := make(map[string]int)
 	var headBytes int64
 	if err := logwal.Replay(walDir, func(pairs []logwal.LabelPair, tsNs int64, line string) {
 		m := make(map[string]string, len(pairs))
@@ -110,6 +114,7 @@ func OpenHead(walDir string, segMaxBytes int64, syncEveryN int, flushThreshold i
 		if hs == nil {
 			hs = &memoryStream{labels: sl}
 			head[id] = hs
+			tenantStreams[labels.TenantOf(sl)]++
 		}
 		hs.entries = append(hs.entries, LogEntry{StreamID: id, TimestampNs: tsNs, Line: line})
 		headBytes += int64(8 + len(line))
@@ -138,7 +143,7 @@ func OpenHead(walDir string, segMaxBytes int64, syncEveryN int, flushThreshold i
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
-	return &Head{head: head, wal: lw, sink: sink, headBytes: headBytes, flushThresh: flushThreshold, opts: opts}, nil
+	return &Head{head: head, tenantStreams: tenantStreams, wal: lw, sink: sink, headBytes: headBytes, flushThresh: flushThreshold, opts: opts}, nil
 }
 
 // Append writes the record to the WAL, buffers it in the head, and, once
@@ -146,17 +151,18 @@ func OpenHead(walDir string, segMaxBytes int64, syncEveryN int, flushThreshold i
 // strict (all-in-one) head returns that attempt's error; a tolerant head may
 // instead skip the attempt during its backoff window or swallow its failure —
 // the flush hook, not this return value, is what reports it in that case.
-func (h *Head) Append(labels StreamLabels, tsNs int64, line string) error {
+func (h *Head) Append(lbls StreamLabels, tsNs int64, line string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if err := h.wal.WriteRecord(labelsToWALPairs(labels), tsNs, line); err != nil {
+	if err := h.wal.WriteRecord(labelsToWALPairs(lbls), tsNs, line); err != nil {
 		return err
 	}
-	id := StreamIDOf(labels)
+	id := StreamIDOf(lbls)
 	hs := h.head[id]
 	if hs == nil {
-		hs = &memoryStream{labels: labels}
+		hs = &memoryStream{labels: lbls}
 		h.head[id] = hs
+		h.tenantStreams[labels.TenantOf(lbls)]++
 	}
 	hs.entries = append(hs.entries, LogEntry{StreamID: id, TimestampNs: tsNs, Line: line})
 	h.headBytes += int64(8 + len(line))
@@ -274,6 +280,7 @@ func (h *Head) flushLocked(ctx context.Context) (bool, error) {
 		return true, err
 	}
 	h.head = make(map[StreamID]*memoryStream)
+	h.tenantStreams = make(map[string]int)
 	h.headBytes = 0
 	return true, nil
 }
@@ -358,6 +365,42 @@ func (h *Head) LabelValues(name string) []string {
 		}
 	}
 	return sortedKeys(set)
+}
+
+// TenantCounter reports how many streams a tenant holds in the head, and
+// whether a stream is there at all: what the per-tenant admission gate reads.
+type TenantCounter interface {
+	TenantStreams(id string) int
+	HasStream(id StreamID) bool
+}
+
+var _ TenantCounter = (*Head)(nil)
+
+// TenantStreams returns the number of head streams tenant id holds.
+func (h *Head) TenantStreams(id string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.tenantStreams[id]
+}
+
+// HasStream reports whether the head holds stream id.
+func (h *Head) HasStream(id StreamID) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	_, ok := h.head[id]
+	return ok
+}
+
+// TenantStreamCounts returns a copy of the per-tenant head stream counts;
+// tenants with none are omitted.
+func (h *Head) TenantStreamCounts() map[string]int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make(map[string]int, len(h.tenantStreams))
+	for k, v := range h.tenantStreams {
+		out[k] = v
+	}
+	return out
 }
 
 // StreamCount returns the number of streams buffered in the head.
