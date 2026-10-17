@@ -175,33 +175,49 @@ func (s *Server) handleIngestMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var appendErrors []error
-	var appended int
-	log := observability.Component(observability.FromContext(r.Context()), "metrics_ingest")
-	for i, ps := range samples {
-		if err := s.ingester.Append(ps.Labels, ps.TimestampMs, ps.Value); err != nil {
-			if errors.Is(err, drain.ErrDraining) {
-				// A draining ingester refuses the rest of the batch: 503, so the
-				// client retries it against the ring, not a server error.
-				s.ingest.SamplesIngested.Add(float64(appended))
-				s.ingest.SamplesRejected.WithLabelValues(observability.ReasonAppend).Add(float64(len(appendErrors) + len(samples) - i))
-				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
-				return
+	appendLocal := func() error {
+		var appendErrors []error
+		var appended int
+		log := observability.Component(observability.FromContext(r.Context()), "metrics_ingest")
+		for i, ps := range samples {
+			if err := s.ingester.Append(ps.Labels, ps.TimestampMs, ps.Value); err != nil {
+				if errors.Is(err, drain.ErrDraining) {
+					// A draining ingester refuses the rest of the batch: 503, so the
+					// client retries it against the ring, not a server error.
+					s.ingest.SamplesIngested.Add(float64(appended))
+					s.ingest.SamplesRejected.WithLabelValues(observability.ReasonAppend).Add(float64(len(appendErrors) + len(samples) - i))
+					writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+					return nil
+				}
+				log.Error("ingester append failed", "err", err)
+				appendErrors = append(appendErrors, err)
+				continue
 			}
-			log.Error("ingester append failed", "err", err)
-			appendErrors = append(appendErrors, err)
-			continue
+			appended++
 		}
-		appended++
+		// Count what actually landed, before the error branch: a partial append leaves
+		// those samples in the store, and reporting zero would understate ingest.
+		s.ingest.SamplesIngested.Add(float64(appended))
+		s.ingest.SamplesRejected.WithLabelValues(observability.ReasonAppend).Add(float64(len(appendErrors)))
+		if len(appendErrors) > 0 {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+			return nil
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+		return nil
+
 	}
-	// Count what actually landed, before the error branch: a partial append leaves
-	// those samples in the store, and reporting zero would understate ingest.
-	s.ingest.SamplesIngested.Add(float64(appended))
-	s.ingest.SamplesRejected.WithLabelValues(observability.ReasonAppend).Add(float64(len(appendErrors)))
-	if len(appendErrors) > 0 {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+	if s.seriesGate == nil {
+		_ = appendLocal()
 		return
 	}
-
-	w.WriteHeader(http.StatusNoContent)
+	keys := map[string][]uint64{}
+	for _, ps := range samples {
+		t := mlabels.TenantOf(ps.Labels)
+		keys[t] = append(keys[t], ps.Labels.Hash())
+	}
+	if err := s.seriesGate.Admit(keys, appendLocal); err != nil {
+		s.writeLimitError(w, r, "metrics_ingest", err)
+	}
 }
