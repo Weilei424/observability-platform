@@ -82,7 +82,7 @@ func TestRouterDoesNotCountOneIngesterTwice(t *testing.T) {
 		r.Use(func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) { RequireMember(self)(next).ServeHTTP(w, req) })
 		})
-		MountWrites(r, f.metrics, f.logs, observability.NewIngestMetrics())
+		MountWrites(r, f.metrics, f.logs, observability.NewIngestMetrics(), nil, nil)
 	})
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
