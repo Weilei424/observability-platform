@@ -15,7 +15,20 @@ import (
 // MountReads registers the read routes over the given sources. The ingester
 // mounts them over its heads, the store over its blocks and chunks; the
 // querier's clients call them.
-func MountReads(r chi.Router, m metrics.Source, l logs.Source) {
+//
+// Every route needs X-Scope-OrgID (RequireTenant) and answers only that
+// tenant's data with the tenant label stripped (metrics.TenantSource,
+// logs.TenantSource), which is why the logs side is the local Reader.
+func MountReads(r chi.Router, m metrics.Source, lr logs.Reader) {
+	m = metrics.TenantSource(m)
+	l := logs.TenantSource(lr)
+	r.Group(func(r chi.Router) {
+		r.Use(RequireTenant)
+		mountReads(r, m, l)
+	})
+}
+
+func mountReads(r chi.Router, m metrics.Source, l logs.Source) {
 	r.Post("/metrics/select", func(w http.ResponseWriter, req *http.Request) { metricsSelect(w, req, m) })
 	r.Get("/metrics/labels", labelNamesRoute(m.SelectLabelNames, "metrics"))
 	r.Get("/metrics/label-values", labelValuesRoute(m.SelectLabelValues, "metrics"))
@@ -152,8 +165,11 @@ func nonNil(s []string) []string {
 // and a malformed body is a 400. ingest counts what lands; rejections were
 // counted by the gateway, except append failures, counted here.
 func MountWrites(r chi.Router, m metrics.Ingester, l logs.Ingester, ingest *observability.IngestMetrics) {
-	r.Post("/metrics/push", func(w http.ResponseWriter, req *http.Request) { metricsPush(w, req, m, ingest) })
-	r.Post("/logs/push", func(w http.ResponseWriter, req *http.Request) { logsPush(w, req, l, ingest) })
+	r.Group(func(r chi.Router) {
+		r.Use(RequireTenant)
+		r.Post("/metrics/push", func(w http.ResponseWriter, req *http.Request) { metricsPush(w, req, m, ingest) })
+		r.Post("/logs/push", func(w http.ResponseWriter, req *http.Request) { logsPush(w, req, l, ingest) })
+	})
 }
 
 // PushGenerationsHeader, set to "1" on the metrics push route's answers, says
