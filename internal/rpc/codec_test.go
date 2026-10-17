@@ -239,3 +239,25 @@ func TestPushSampleCarriesTheGatewaysGeneration(t *testing.T) {
 		}
 	}
 }
+
+func TestBlockInfoTenantSurvivesTheWire(t *testing.T) {
+	in := blocksResponse{Blocks: []wireBlockInfo{{ID: "x", Tenant: "team-b"}}}
+	raw, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out blocksResponse
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Blocks[0].Tenant != "team-b" {
+		t.Fatalf("Tenant = %q, want team-b", out.Blocks[0].Tenant)
+	}
+	var old blocksResponse
+	if err := json.Unmarshal([]byte(`{"blocks":[{"id":"x","level":1}]}`), &old); err != nil {
+		t.Fatal(err)
+	}
+	if old.Blocks[0].Tenant != "" {
+		t.Fatalf("absent tenant decoded as %q, want empty", old.Blocks[0].Tenant)
+	}
+}
