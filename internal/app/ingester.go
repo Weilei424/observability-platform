@@ -174,7 +174,7 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 			}
 			rpc.MountDrain(r, drainHeads, ingesterDrainTimeout)
 			rpc.MountReads(r, head, logHead)
-			rpc.MountWrites(r, gate.Metrics(writes), gate.Logs(logHead), inst.Ingest)
+			rpc.MountWrites(r, gate.Metrics(writes), gate.Logs(logHead), inst.Ingest, nil, nil)
 		},
 	})
 	mcfg := maintenanceConfig(cfg)
