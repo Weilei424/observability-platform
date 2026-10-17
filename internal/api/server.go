@@ -10,6 +10,7 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/logs"
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/observability"
+	"github.com/masonwheeler/observability-platform/internal/tenant"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -81,6 +82,18 @@ type Deps struct {
 	// Writes, required with Upstreams, routes the gateway's validated writes.
 	Writes WriteRouter
 
+	// Tenants answers per-tenant limits (push caps). Nil keeps the fixed caps:
+	// 1 MiB for metrics pushes, 4 MiB for logs pushes.
+	Tenants *tenant.Limits
+
+	// TenantRequired makes a public request without X-Scope-OrgID a 401;
+	// otherwise it acts for the default tenant.
+	TenantRequired bool
+
+	// OnTenantReject, when set, is told of each request refused by a tenant
+	// limit (limit is "push_bytes"). It may be nil.
+	OnTenantReject func(tenant, limit string)
+
 	// Middleware wraps every route after the request ID and the request's
 	// logger are set, so it can log with them.
 	Middleware []func(http.Handler) http.Handler
@@ -111,6 +124,10 @@ type Server struct {
 	gateway     *gatewayProxies
 	writes      WriteRouter
 	middleware  []func(http.Handler) http.Handler
+
+	tenants        *tenant.Limits
+	tenantRequired bool
+	onTenantReject func(tenant, limit string)
 }
 
 func New(d Deps) *Server {
@@ -151,6 +168,10 @@ func New(d Deps) *Server {
 		internal:    d.Internal,
 		ready:       d.Ready,
 		writes:      d.Writes,
+
+		tenants:        d.Tenants,
+		tenantRequired: d.TenantRequired,
+		onTenantReject: d.OnTenantReject,
 	}
 	if d.Upstreams != nil {
 		s.gateway = newGatewayProxies(d.Upstreams)
