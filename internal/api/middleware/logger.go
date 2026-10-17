@@ -3,11 +3,29 @@ package middleware
 import (
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/masonwheeler/observability-platform/internal/observability"
+	"github.com/masonwheeler/observability-platform/internal/tenant"
 )
+
+// maxLoggedTenant bounds a rejected (invalid) tenant header echoed into the log.
+const maxLoggedTenant = 150
+
+// tenantForLog is the tenant the request names: the resolved ID, the default
+// when absent, or the raw (truncated) header when it is invalid.
+func tenantForLog(h http.Header) string {
+	if id, status, _ := tenant.Resolve(h, false); status == 0 {
+		return id
+	}
+	raw := strings.TrimSpace(h.Get(tenant.Header))
+	if len(raw) > maxLoggedTenant {
+		raw = raw[:maxLoggedTenant]
+	}
+	return raw
+}
 
 // Logger stores a request-scoped logger (carrying only "request_id") in the
 // request context for handlers to derive their own component logger from, and
@@ -25,6 +43,7 @@ func Logger(log *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
+			tenantID := tenantForLog(r.Header)
 			ww := chimiddleware.NewWrapResponseWriter(w, r.ProtoMajor)
 
 			reqLog := log.With(slog.String("request_id", chimiddleware.GetReqID(r.Context())))
@@ -52,6 +71,7 @@ func Logger(log *slog.Logger) func(http.Handler) http.Handler {
 				observability.Component(reqLog, "api").Info("request",
 					"method", r.Method,
 					"path", r.URL.Path,
+					"tenant", tenantID,
 					"status", status,
 					"duration", time.Since(start).String(),
 				)
