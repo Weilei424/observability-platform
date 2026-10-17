@@ -16,6 +16,7 @@ import (
 
 	"github.com/masonwheeler/observability-platform/internal/app"
 	"github.com/masonwheeler/observability-platform/internal/config"
+	"github.com/masonwheeler/observability-platform/internal/tenant"
 )
 
 // unreachable is a peer URL nothing listens on: port 1 is refused at once.
@@ -38,7 +39,11 @@ func withPeers(cfg *config.Config) *config.Config {
 
 func do(h http.Handler, method, target, body string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(method, target, strings.NewReader(body)))
+	req := httptest.NewRequest(method, target, strings.NewReader(body))
+	// Internal read and push routes refuse a request without a tenant; the
+	// public routes treat the default tenant as no header at all.
+	req.Header.Set(tenant.Header, tenant.Default)
+	h.ServeHTTP(rec, req)
 	return rec
 }
 
