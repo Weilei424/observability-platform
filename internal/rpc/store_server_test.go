@@ -37,7 +37,7 @@ func newStoreFixture(t *testing.T) storeFixture {
 	}
 	r := chi.NewRouter()
 	r.Route("/internal/v1", func(r chi.Router) {
-		rpc.MountReads(r, bs, logs.AsSource(cs))
+		rpc.MountReads(r, bs, cs)
 		rpc.MountStore(r, bs, cs, &rpc.FlushBarrier{})
 	})
 	srv := httptest.NewServer(r)
