@@ -384,14 +384,14 @@ func TestLokiPush_JsonWithCharset_Returns204(t *testing.T) {
 	}
 }
 
-func TestLokiPush_OversizeBody_Returns400(t *testing.T) {
+func TestLokiPush_OversizeBody_Returns413(t *testing.T) {
 	srv, _ := newPushServer(t)
 	// A body larger than the 4 MiB MaxBytesReader cap must be rejected at read time.
 	big := strings.Repeat("a", 5<<20)
 	body := `{"streams":[{"stream":{"service":"api"},"values":[["1700000000000000000","` + big + `"]]}]}`
 	rr := postPush(t, srv, body, "application/json")
-	if rr.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400 for oversize body", rr.Code)
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want 413 for oversize body", rr.Code)
 	}
 }
 
