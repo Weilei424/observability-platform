@@ -11,6 +11,7 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/app"
 	"github.com/masonwheeler/observability-platform/internal/config"
 	"github.com/masonwheeler/observability-platform/internal/rpc"
+	"github.com/masonwheeler/observability-platform/internal/tenant"
 )
 
 // An ingester that knows its own URL refuses an internal request addressed to
@@ -33,6 +34,7 @@ func TestIngesterRefusesAnotherMembersRequest(t *testing.T) {
 		{"", http.StatusNoContent},
 	} {
 		req := httptest.NewRequest(http.MethodPost, "/internal/v1/metrics/push", strings.NewReader(push))
+		req.Header.Set(tenant.Header, tenant.Default)
 		if tc.member != "" {
 			req.Header.Set(rpc.MemberHeader, tc.member)
 		}
