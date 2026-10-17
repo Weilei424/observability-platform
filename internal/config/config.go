@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+
+	"github.com/masonwheeler/observability-platform/internal/tenant"
 )
 
 // Target is the component a process runs. One binary serves all of them.
@@ -50,6 +52,12 @@ var requiredPeers = map[Target][]peerKey{
 	TargetQuerier:   {peerIngester, peerStore},
 }
 
+// optionalPeers lists peer URLs a target accepts but does not need. The
+// ingester's OBS_INGESTER_URL is its ring: unset, it is a ring of one.
+var optionalPeers = map[Target][]peerKey{
+	TargetIngester: {peerIngester},
+}
+
 type Config struct {
 	HTTPAddr                string
 	DataDir                 string
@@ -83,7 +91,16 @@ type Config struct {
 	StoreRetryMaxBytes int64
 	StoreRetryMaxAge   time.Duration
 
-	ReplicationFactor int           // OBS_REPLICATION_FACTOR: replicas per series/stream; gateway and querier (Phase 6.3)
+	// Tenancy (Phase 6.5).
+	TenantRequired            bool                       // OBS_TENANT_REQUIRED
+	TenantOverridesFile       string                     // OBS_TENANT_OVERRIDES_FILE
+	TenantOverrides           map[string]tenant.Override // parsed from TenantOverridesFile at Load
+	MaxActiveSeriesPerTenant  int                        // OBS_MAX_ACTIVE_SERIES_PER_TENANT; 0 = unlimited
+	MaxActiveStreamsPerTenant int                        // OBS_MAX_ACTIVE_STREAMS_PER_TENANT; 0 = unlimited
+	MaxMetricsPushBytes       int64                      // OBS_MAX_METRICS_PUSH_BYTES
+	MaxLogsPushBytes          int64                      // OBS_MAX_LOGS_PUSH_BYTES
+
+	ReplicationFactor int           // OBS_REPLICATION_FACTOR: replicas per series/stream; gateway, querier and ingester (Phase 6.3)
 	IngesterTimeout   time.Duration // OBS_INGESTER_TIMEOUT: bounds each routed write and ingester read
 
 	MaintenanceInterval  time.Duration
@@ -132,6 +149,12 @@ func Load() (*Config, error) {
 	v.SetDefault("store_self_url", "")
 	v.SetDefault("store_retry_max_bytes", int64(64<<20))
 	v.SetDefault("store_retry_max_age", "15m")
+	v.SetDefault("tenant_required", false)
+	v.SetDefault("tenant_overrides_file", "")
+	v.SetDefault("max_active_series_per_tenant", 0)
+	v.SetDefault("max_active_streams_per_tenant", 0)
+	v.SetDefault("max_metrics_push_bytes", int64(1<<20))
+	v.SetDefault("max_logs_push_bytes", int64(4<<20))
 
 	v.SetConfigName("config")
 	v.SetConfigType("yaml")
@@ -186,6 +209,27 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("config: OBS_STORE_RETRY_MAX_BYTES must be a whole number of bytes: %w", err)
 	}
 
+	tenantRequired, err := strconv.ParseBool(strings.TrimSpace(v.GetString("tenant_required")))
+	if err != nil {
+		return nil, fmt.Errorf("config: OBS_TENANT_REQUIRED must be true or false: %w", err)
+	}
+	maxSeries, err := strconv.Atoi(strings.TrimSpace(v.GetString("max_active_series_per_tenant")))
+	if err != nil {
+		return nil, fmt.Errorf("config: OBS_MAX_ACTIVE_SERIES_PER_TENANT must be a whole number: %w", err)
+	}
+	maxStreams, err := strconv.Atoi(strings.TrimSpace(v.GetString("max_active_streams_per_tenant")))
+	if err != nil {
+		return nil, fmt.Errorf("config: OBS_MAX_ACTIVE_STREAMS_PER_TENANT must be a whole number: %w", err)
+	}
+	maxMetricsPush, err := strconv.ParseInt(strings.TrimSpace(v.GetString("max_metrics_push_bytes")), 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("config: OBS_MAX_METRICS_PUSH_BYTES must be a whole number of bytes: %w", err)
+	}
+	maxLogsPush, err := strconv.ParseInt(strings.TrimSpace(v.GetString("max_logs_push_bytes")), 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("config: OBS_MAX_LOGS_PUSH_BYTES must be a whole number of bytes: %w", err)
+	}
+
 	cfg := &Config{
 		HTTPAddr:                v.GetString("http_addr"),
 		DataDir:                 dataDir,
@@ -212,6 +256,13 @@ func Load() (*Config, error) {
 		CompactionMultiplier:    v.GetInt("compaction_multiplier"),
 		CompactionLevels:        v.GetInt("compaction_levels"),
 		Retention:               retention,
+
+		TenantRequired:            tenantRequired,
+		TenantOverridesFile:       strings.TrimSpace(v.GetString("tenant_overrides_file")),
+		MaxActiveSeriesPerTenant:  maxSeries,
+		MaxActiveStreamsPerTenant: maxStreams,
+		MaxMetricsPushBytes:       maxMetricsPush,
+		MaxLogsPushBytes:          maxLogsPush,
 	}
 
 	if cfg.DataDir == "" {
@@ -277,11 +328,56 @@ func Load() (*Config, error) {
 		}
 	}
 
+	if cfg.MaxActiveSeriesPerTenant < 0 {
+		return nil, fmt.Errorf("config: OBS_MAX_ACTIVE_SERIES_PER_TENANT must be >= 0")
+	}
+	if cfg.MaxActiveStreamsPerTenant < 0 {
+		return nil, fmt.Errorf("config: OBS_MAX_ACTIVE_STREAMS_PER_TENANT must be >= 0")
+	}
+	if cfg.MaxMetricsPushBytes <= 0 || cfg.MaxMetricsPushBytes > tenant.MaxPushBytes {
+		return nil, fmt.Errorf("config: OBS_MAX_METRICS_PUSH_BYTES must be > 0 and <= %d", tenant.MaxPushBytes)
+	}
+	if cfg.MaxLogsPushBytes <= 0 || cfg.MaxLogsPushBytes > tenant.MaxPushBytes {
+		return nil, fmt.Errorf("config: OBS_MAX_LOGS_PUSH_BYTES must be > 0 and <= %d", tenant.MaxPushBytes)
+	}
+	tenantTargets := map[string][]Target{
+		"tenant_required":               {TargetAllInOne, TargetGateway, TargetQuerier},
+		"tenant_overrides_file":         {TargetAllInOne, TargetGateway, TargetIngester, TargetCompactor},
+		"max_active_series_per_tenant":  {TargetAllInOne, TargetIngester},
+		"max_active_streams_per_tenant": {TargetAllInOne, TargetIngester},
+		"max_metrics_push_bytes":        {TargetAllInOne, TargetGateway},
+		"max_logs_push_bytes":           {TargetAllInOne, TargetGateway},
+	}
+	for key, targets := range tenantTargets {
+		if explicit(key) && !slices.Contains(targets, cfg.Target) {
+			return nil, fmt.Errorf("config: OBS_%s is set but target %s does not use it; unset it", strings.ToUpper(key), cfg.Target)
+		}
+	}
+
 	if err := cfg.validateTopology(); err != nil {
 		return nil, err
 	}
 
+	if cfg.TenantOverridesFile != "" {
+		cfg.TenantOverrides, err = tenant.LoadOverrides(cfg.TenantOverridesFile)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return cfg, nil
+}
+
+// TenantLimits answers per-tenant retention and limits: the env defaults plus
+// the overrides file.
+func (c *Config) TenantLimits() *tenant.Limits {
+	return tenant.NewLimits(tenant.Defaults{
+		Retention:           c.Retention,
+		MaxActiveSeries:     c.MaxActiveSeriesPerTenant,
+		MaxActiveStreams:    c.MaxActiveStreamsPerTenant,
+		MaxMetricsPushBytes: c.MaxMetricsPushBytes,
+		MaxLogsPushBytes:    c.MaxLogsPushBytes,
+	}, c.TenantOverrides)
 }
 
 func parseDuration(s, name string) (time.Duration, error) {
@@ -337,11 +433,12 @@ func (c *Config) validateTopology() error {
 	fields := map[peerKey]*string{peerIngester: &c.IngesterURL, peerStore: &c.StoreURL, peerQuerier: &c.QuerierURL}
 	for _, p := range []peerKey{peerIngester, peerStore, peerQuerier} {
 		needed := slices.Contains(required, p)
+		optional := slices.Contains(optionalPeers[c.Target], p)
 		v := *fields[p]
 		switch {
 		case needed && v == "":
 			return fmt.Errorf("config: target %s requires %s", c.Target, p.env)
-		case !needed && v != "":
+		case !needed && !optional && v != "":
 			return fmt.Errorf("config: %s is set but target %s does not use it; unset it", p.env, c.Target)
 		case v != "" && (p == peerIngester || p == peerStore):
 			urls, err := validatePeerList(p.env, c.Target, v)
@@ -396,7 +493,9 @@ func (c *Config) validateTopology() error {
 		}
 		c.StoreSelfURL = self
 	}
-	if (c.Target == TargetGateway || c.Target == TargetQuerier) && c.ReplicationFactor > len(c.IngesterURLs) {
+	// An ingester with no OBS_INGESTER_URL is a ring of one: the check applies
+	// only where there is a list to compare against.
+	if (c.Target == TargetGateway || c.Target == TargetQuerier || (c.Target == TargetIngester && len(c.IngesterURLs) > 0)) && c.ReplicationFactor > len(c.IngesterURLs) {
 		return fmt.Errorf("config: OBS_REPLICATION_FACTOR %d is larger than the %d ingesters in OBS_INGESTER_URL", c.ReplicationFactor, len(c.IngesterURLs))
 	}
 	return nil
