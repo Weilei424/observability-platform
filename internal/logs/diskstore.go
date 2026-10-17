@@ -41,6 +41,11 @@ func NewStore(walDir, chunksDir, indexDir string, segMaxBytes int64, syncEveryN 
 	return &Store{head: head, chunks: chunks}, nil
 }
 
+// TenantStreams, HasStream and TenantStreamCounts report the head only.
+func (s *Store) TenantStreams(id string) int        { return s.head.TenantStreams(id) }
+func (s *Store) HasStream(id StreamID) bool         { return s.head.HasStream(id) }
+func (s *Store) TenantStreamCounts() map[string]int { return s.head.TenantStreamCounts() }
+
 // SetFlushHook installs fn on the head; see Head.SetFlushHook.
 func (s *Store) SetFlushHook(fn func(err error)) { s.head.SetFlushHook(fn) }
 
