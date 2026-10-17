@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/masonwheeler/observability-platform/internal/labels"
 	"github.com/masonwheeler/observability-platform/internal/storage/chunk"
 	"github.com/masonwheeler/observability-platform/internal/storage/index"
 )
@@ -55,11 +56,14 @@ type memorySeries struct {
 // MemoryStore is a chunk-backed in-memory Ingester. Samples are encoded using
 // Gorilla/XOR compression inside sealed and unsealed chunks. Safe for concurrent use.
 type MemoryStore struct {
-	mu      sync.RWMutex
-	series  map[SeriesID]*memorySeries
-	idx     *index.MemPostings
-	nextGen int64        // the smallest generation the next append may take
-	clock   func() int64 // Unix µs; see nextGenerationLocked
+	mu     sync.RWMutex
+	series map[SeriesID]*memorySeries
+	// tenantSeries counts head series per tenant: the population obs_active_series
+	// reports. Zero entries are deleted. Guarded by mu.
+	tenantSeries map[string]int
+	idx          *index.MemPostings
+	nextGen      int64        // the smallest generation the next append may take
+	clock        func() int64 // Unix µs; see nextGenerationLocked
 }
 
 // wallMicros is the default generation clock.
@@ -68,10 +72,11 @@ func wallMicros() int64 { return time.Now().UnixMicro() }
 // NewMemoryStore returns an empty MemoryStore.
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		series:  make(map[SeriesID]*memorySeries),
-		idx:     index.NewMemPostings(),
-		nextGen: 1, // generation 0 is reserved for legacy (pre-generation) chunks
-		clock:   wallMicros,
+		series:       make(map[SeriesID]*memorySeries),
+		tenantSeries: make(map[string]int),
+		idx:          index.NewMemPostings(),
+		nextGen:      1, // generation 0 is reserved for legacy (pre-generation) chunks
+		clock:        wallMicros,
 	}
 }
 
@@ -134,8 +139,8 @@ func (s *MemoryStore) AppendTrackedGen(labels Labels, timestampMs int64, value f
 	return s.appendInternal(labels, timestampMs, value, walSeg, gen)
 }
 
-func (s *MemoryStore) appendInternal(labels Labels, timestampMs int64, value float64, walSeg int, gen int64) error {
-	id := SeriesID(labels.Hash())
+func (s *MemoryStore) appendInternal(lbls Labels, timestampMs int64, value float64, walSeg int, gen int64) error {
+	id := SeriesID(lbls.Hash())
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -157,9 +162,10 @@ func (s *MemoryStore) appendInternal(labels Labels, timestampMs int64, value flo
 
 	ms, ok := s.series[id]
 	if !ok {
-		ms = &memorySeries{labels: labels}
+		ms = &memorySeries{labels: lbls}
 		s.series[id] = ms
-		s.idx.Add(uint64(id), labelsToIndexPairs(labels))
+		s.tenantSeries[labels.TenantOf(lbls)]++
+		s.idx.Add(uint64(id), labelsToIndexPairs(lbls))
 	}
 	if len(ms.chunks) == 0 || ms.chunks[len(ms.chunks)-1].Sealed() {
 		ms.chunks = append(ms.chunks, chunk.NewChunk())
@@ -310,8 +316,48 @@ func (s *MemoryStore) RemoveEmptySeries(id SeriesID) bool {
 		return false
 	}
 	delete(s.series, id)
+	t := labels.TenantOf(ms.labels)
+	if s.tenantSeries[t]--; s.tenantSeries[t] <= 0 {
+		delete(s.tenantSeries, t)
+	}
 	s.idx.Delete(uint64(id), labelsToIndexPairs(ms.labels))
 	return true
+}
+
+// TenantCounter reports how many series a tenant holds in the head, and whether
+// a series is there at all: what the per-tenant admission gate reads.
+type TenantCounter interface {
+	TenantSeries(id string) int
+	HasSeries(id SeriesID) bool
+}
+
+var _ TenantCounter = (*MemoryStore)(nil)
+
+// TenantSeries returns the number of head series tenant id holds.
+func (s *MemoryStore) TenantSeries(id string) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.tenantSeries[id]
+}
+
+// HasSeries reports whether the head holds series id.
+func (s *MemoryStore) HasSeries(id SeriesID) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.series[id]
+	return ok
+}
+
+// TenantSeriesCounts returns a copy of the per-tenant head series counts;
+// tenants with none are omitted.
+func (s *MemoryStore) TenantSeriesCounts() map[string]int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]int, len(s.tenantSeries))
+	for k, v := range s.tenantSeries {
+		out[k] = v
+	}
+	return out
 }
 
 func labelsToIndexPairs(l Labels) []index.Pair {
