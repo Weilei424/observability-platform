@@ -118,7 +118,7 @@ func TestInternalReadsRefuseAMissingTenant(t *testing.T) {
 func TestInternalPushRefusesAMissingTenant(t *testing.T) {
 	r := chi.NewRouter()
 	r.Route("/internal/v1", func(r chi.Router) {
-		rpc.MountWrites(r, nil, nil, observability.NewIngestMetrics())
+		rpc.MountWrites(r, nil, nil, observability.NewIngestMetrics(), nil, nil)
 	})
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
