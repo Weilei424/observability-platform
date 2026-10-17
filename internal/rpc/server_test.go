@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/masonwheeler/observability-platform/internal/tenant"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -24,17 +25,25 @@ func (brokenMetrics) Select(context.Context, metrics.SelectParams) ([]metrics.Se
 	return nil, errors.New("disk on fire")
 }
 
+// emptyLogs is a logs.Reader holding one stream, {service="api"}, with no
+// entries.
 type emptyLogs struct{}
 
-func (emptyLogs) SelectStreams(context.Context, []index.Pair, int64, int64) ([]logs.StreamData, error) {
+func (emptyLogs) stream() logs.StreamLabels {
+	l, _ := logs.NewStreamLabels(map[string]string{"service": "api"})
+	return l
+}
+func (e emptyLogs) MatchingStreamIDs([]index.Pair) []logs.StreamID {
+	return []logs.StreamID{logs.StreamIDOf(e.stream())}
+}
+func (emptyLogs) StreamEntries(context.Context, logs.StreamID, int64, int64) ([]logs.LogEntry, error) {
 	return nil, nil
 }
-func (emptyLogs) SelectLabelNames(context.Context) ([]string, error) { return []string{"service"}, nil }
-func (emptyLogs) SelectLabelValues(context.Context, string) ([]string, error) {
-	return []string{"api"}, nil
-}
+func (e emptyLogs) StreamLabelSet(logs.StreamID) (logs.StreamLabels, bool) { return e.stream(), true }
+func (emptyLogs) LabelNames() []string                                     { return []string{"service"} }
+func (emptyLogs) LabelValues(string) []string                              { return []string{"api"} }
 
-func readsServer(t *testing.T, m metrics.Source, l logs.Source) *httptest.Server {
+func readsServer(t *testing.T, m metrics.Source, l logs.Reader) *httptest.Server {
 	t.Helper()
 	r := chi.NewRouter()
 	r.Route("/internal/v1", func(r chi.Router) { rpc.MountReads(r, m, l) })
@@ -45,7 +54,12 @@ func readsServer(t *testing.T, m metrics.Source, l logs.Source) *httptest.Server
 
 func post(t *testing.T, url, body string) (*http.Response, string) {
 	t.Helper()
-	resp, err := http.Post(url, "application/json", strings.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(tenant.Header, tenant.Default)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +160,7 @@ func TestLabelRoutes(t *testing.T) {
 		"/internal/v1/logs/labels":                    `{"names":["service"]}`,
 		"/internal/v1/logs/label-values?name=service": `{"values":["api"]}`,
 	} {
-		resp, err := http.Get(srv.URL + path)
+		resp, err := getWithTenant(srv.URL + path)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -157,7 +171,7 @@ func TestLabelRoutes(t *testing.T) {
 			t.Errorf("GET %s = %d %s, want 200 %s", path, resp.StatusCode, b.String(), want)
 		}
 	}
-	if resp, _ := http.Get(srv.URL + "/internal/v1/metrics/label-values"); resp.StatusCode != http.StatusBadRequest {
+	if resp, _ := getWithTenant(srv.URL + "/internal/v1/metrics/label-values"); resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("label-values without a name = %d, want 400", resp.StatusCode)
 	}
 }
@@ -176,4 +190,13 @@ func TestLogsSelectRouteRejectsEmptyMatcherName(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status %d body %s, want 400", resp.StatusCode, body)
 	}
+}
+
+func getWithTenant(url string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set(tenant.Header, tenant.Default)
+	return http.DefaultClient.Do(req)
 }
