@@ -21,15 +21,18 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/storage/index"
 )
 
+// emptyLogs is a logs.Reader with no streams.
 type emptyLogs struct{}
 
-func (emptyLogs) SelectStreams(context.Context, []index.Pair, int64, int64) ([]logs.StreamData, error) {
+func (emptyLogs) MatchingStreamIDs([]index.Pair) []logs.StreamID { return nil }
+func (emptyLogs) StreamEntries(context.Context, logs.StreamID, int64, int64) ([]logs.LogEntry, error) {
 	return nil, nil
 }
-func (emptyLogs) SelectLabelNames(context.Context) ([]string, error) { return nil, nil }
-func (emptyLogs) SelectLabelValues(context.Context, string) ([]string, error) {
-	return nil, nil
+func (emptyLogs) StreamLabelSet(logs.StreamID) (logs.StreamLabels, bool) {
+	return logs.StreamLabels{}, false
 }
+func (emptyLogs) LabelNames() []string        { return nil }
+func (emptyLogs) LabelValues(string) []string { return nil }
 
 func readsPeer(t *testing.T) string {
 	t.Helper()
