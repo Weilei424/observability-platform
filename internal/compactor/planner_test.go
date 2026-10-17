@@ -104,3 +104,26 @@ func TestPlan_EmptyAndSingle(t *testing.T) {
 		t.Fatal("Plan(single) should be nil")
 	}
 }
+
+func TestPlan_NeverGroupsTwoTenants(t *testing.T) {
+	infos := []block.BlockInfo{
+		{ID: "a1", Tenant: "", MinTime: 0, MaxTime: 10},
+		{ID: "b1", Tenant: "team-b", MinTime: 5, MaxTime: 15},
+		{ID: "a2", Tenant: "", MinTime: 20, MaxTime: 30},
+		{ID: "b2", Tenant: "team-b", MinTime: 25, MaxTime: 35},
+	}
+	got := Plan(infos, []int64{100})
+	if len(got) != 1 || len(got[0]) != 2 || got[0][0] != "a1" || got[0][1] != "a2" {
+		t.Fatalf("Plan = %v, want [[a1 a2]]", got)
+	}
+}
+
+func TestPlan_OneBlockPerTenantNoPlan(t *testing.T) {
+	infos := []block.BlockInfo{
+		{ID: "a1", Tenant: "", MinTime: 0, MaxTime: 10},
+		{ID: "b1", Tenant: "team-b", MinTime: 5, MaxTime: 15},
+	}
+	if got := Plan(infos, []int64{100}); got != nil {
+		t.Fatalf("Plan = %v, want nil", got)
+	}
+}
