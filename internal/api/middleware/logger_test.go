@@ -211,3 +211,23 @@ func TestLoggerWithoutUpstreamRequestIDDoesNotPanic(t *testing.T) {
 		t.Errorf("request_id = %v, want \"\" (no upstream RequestID middleware)", lines[0]["request_id"])
 	}
 }
+
+func TestAccessLogCarriesTheTenant(t *testing.T) {
+	for _, tc := range []struct{ header, want string }{
+		{"team-b", "team-b"},
+		{"", "anonymous"},
+		{strings.Repeat("x", 300), strings.Repeat("x", 150)},
+	} {
+		var buf bytes.Buffer
+		h := Logger(slog.New(slog.NewJSONHandler(&buf, nil)))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+		req := httptest.NewRequest(http.MethodGet, "/widgets", nil)
+		if tc.header != "" {
+			req.Header.Set("X-Scope-OrgID", tc.header)
+		}
+		h.ServeHTTP(httptest.NewRecorder(), req)
+		lines := decodeLoggerTestLines(t, &buf)
+		if got := lines[len(lines)-1]["tenant"]; got != tc.want {
+			t.Fatalf("tenant = %v, want %q", got, tc.want)
+		}
+	}
+}
