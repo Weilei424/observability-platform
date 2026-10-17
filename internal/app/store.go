@@ -58,7 +58,7 @@ func buildStore(cfg *config.Config, log *slog.Logger) (*App, error) {
 			if cfg.StoreSelfURL != "" {
 				r.Use(rpc.RequireMember(cfg.StoreSelfURL))
 			}
-			rpc.MountReads(r, blocks, logs.AsSource(chunks))
+			rpc.MountReads(r, blocks, chunks)
 			rpc.MountStore(r, blocks, chunks, barrier)
 			rpc.MountHandoff(r, blocks, chunks, barrier, cfg.StoreSelfURL, metrics.DefaultFlushTimeout)
 		},
