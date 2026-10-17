@@ -314,6 +314,9 @@ func (h *HeadStore) GenerationExhausted() bool               { return h.mem.Gene
 func (h *HeadStore) OldestHeadSegment() int                  { return h.mem.OldestHeadSegment() }
 func (h *HeadStore) SetHeadFence(walSeg int)                 { h.mem.SetHeadFence(walSeg) }
 func (h *HeadStore) SealedChunkCount() int                   { return h.mem.SealedChunkCount() }
+func (h *HeadStore) TenantSeries(id string) int              { return h.mem.TenantSeries(id) }
+func (h *HeadStore) HasSeries(id SeriesID) bool              { return h.mem.HasSeries(id) }
+func (h *HeadStore) TenantSeriesCounts() map[string]int      { return h.mem.TenantSeriesCounts() }
 func (h *HeadStore) Cardinality() (series, names, pairs int) { return h.mem.Cardinality() }
 func (h *HeadStore) SelectSeries(sel Selector) ([]MatchedSeries, error) {
 	return h.mem.SelectSeries(sel)
