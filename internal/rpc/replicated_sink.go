@@ -157,12 +157,15 @@ func replicateFlush(ctx context.Context, kind string, keys []uint64, r *ring.Rin
 }
 
 // storeCause picks a StoreQuorumError's Cause: a protocol error first, then a
-// cancellation, and an outage only when every failure was an outage -- unlike
+// limit refusal (a store never answers 429; this only keeps it from being
+// misclassified), then a cancellation, and an outage only when every failure was an outage -- unlike
 // the router's worst, which puts an outage over a cancellation.
 func storeCause(errs []error) error {
-	var unavailable, canceled error
+	var limited, unavailable, canceled error
 	for _, err := range errs {
 		switch {
+		case errors.Is(err, ErrLimited):
+			limited = err
 		case errors.Is(err, ErrUnavailable):
 			unavailable = err
 		case errors.Is(err, context.Canceled):
@@ -170,6 +173,9 @@ func storeCause(errs []error) error {
 		default:
 			return err
 		}
+	}
+	if limited != nil {
+		return limited
 	}
 	if canceled != nil {
 		return canceled
