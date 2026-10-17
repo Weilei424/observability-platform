@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/masonwheeler/observability-platform/internal/limits"
 	"github.com/masonwheeler/observability-platform/internal/observability"
 	"github.com/masonwheeler/observability-platform/internal/rpc"
 )
@@ -21,6 +22,26 @@ const statusClientClosedConnection = 499
 // fails that way is not a bad query; it is an outage, and says so with 503.
 // All-in-one never produces such an error.
 func isUnavailable(err error) bool { return errors.Is(err, rpc.ErrUnavailable) }
+
+// isLimited reports whether err means a tenant is at its active series or
+// stream limit, here or on an ingester: a 429, not an outage.
+func isLimited(err error) bool {
+	var le *limits.LimitError
+	return errors.Is(err, rpc.ErrLimited) || errors.As(err, &le)
+}
+
+// writeLimitError answers a local write the admission gate refused: 429 with
+// the limit message. Any other error from the gate is unexpected: 500.
+func (s *Server) writeLimitError(w http.ResponseWriter, r *http.Request, component string, err error) {
+	log := observability.Component(observability.FromContext(r.Context()), component)
+	if isLimited(err) {
+		log.Warn("write refused by tenant limit", slog.String("error", err.Error()))
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": err.Error()})
+		return
+	}
+	log.Error("write admission failed", slog.String("error", err.Error()))
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+}
 
 // isCanceled reports whether err means the caller's context was canceled
 // (Grafana abandoning the request) rather than the query itself failing. It is
@@ -84,6 +105,13 @@ func (s *Server) writeRouteError(w http.ResponseWriter, r *http.Request, compone
 			attrs = append(attrs, slog.String("cause", qe.Cause.Error()))
 		}
 		switch {
+		case isLimited(err):
+			log.Warn("write refused by tenant limit", attrs...)
+			msg := qe.Error()
+			if qe.Cause != nil {
+				msg = qe.Cause.Error()
+			}
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": msg})
 		case isUnavailable(err):
 			log.Warn("write quorum not met", attrs...)
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": qe.Error()})
@@ -96,6 +124,10 @@ func (s *Server) writeRouteError(w http.ResponseWriter, r *http.Request, compone
 		return
 	}
 	switch {
+	case isLimited(err):
+		observability.Component(observability.FromContext(r.Context()), component).Warn(
+			"write refused by tenant limit", slog.String("error", err.Error()))
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": err.Error()})
 	case isUnavailable(err):
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "ingester unavailable"})
 	case isCanceled(err):
