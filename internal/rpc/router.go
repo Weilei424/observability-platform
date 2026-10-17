@@ -461,6 +461,8 @@ func OutcomeOf(err error) string {
 	switch {
 	case err == nil:
 		return "ok"
+	case errors.Is(err, ErrLimited):
+		return "limited"
 	case errors.Is(err, ErrUnavailable):
 		return "unavailable"
 	default:
@@ -469,12 +471,14 @@ func OutcomeOf(err error) string {
 }
 
 // worst picks the error the caller answers with: a protocol error (any error
-// that is neither an outage nor a cancellation) first, then an outage, then a
-// cancellation.
+// that is neither a limit refusal, an outage, nor a cancellation) first, then
+// a limit refusal, an outage, and a cancellation.
 func worst(errs []error) error {
-	var unavailable, canceled error
+	var limited, unavailable, canceled error
 	for _, err := range errs {
 		switch {
+		case errors.Is(err, ErrLimited):
+			limited = err
 		case errors.Is(err, ErrUnavailable):
 			unavailable = err
 		case errors.Is(err, context.Canceled):
@@ -482,6 +486,9 @@ func worst(errs []error) error {
 		default:
 			return fmt.Errorf("rpc: write routing: %w", err)
 		}
+	}
+	if limited != nil {
+		return limited
 	}
 	if unavailable != nil {
 		return unavailable
