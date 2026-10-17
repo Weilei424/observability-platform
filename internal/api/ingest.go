@@ -3,13 +3,46 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 
 	"github.com/masonwheeler/observability-platform/internal/drain"
+	mlabels "github.com/masonwheeler/observability-platform/internal/labels"
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/observability"
+	"github.com/masonwheeler/observability-platform/internal/tenant"
 )
+
+const (
+	defaultMetricsPushBytes = 1 << 20
+	defaultLogsPushBytes    = 4 << 20
+)
+
+// pushCap is the push-body cap for the request's tenant: its configured limit,
+// or def when no limits are configured.
+func (s *Server) pushCap(r *http.Request, def int64, limit func(*tenant.Limits, string) int64) int64 {
+	if s.tenants == nil {
+		return def
+	}
+	return limit(s.tenants, tenant.From(r.Context()))
+}
+
+// rejectOversizePush answers 413 when err is a body-over-cap error, reporting
+// whether it did.
+func (s *Server) rejectOversizePush(w http.ResponseWriter, r *http.Request, err error) bool {
+	var mbe *http.MaxBytesError
+	if !errors.As(err, &mbe) {
+		return false
+	}
+	id := tenant.From(r.Context())
+	if s.onTenantReject != nil {
+		s.onTenantReject(id, "push_bytes")
+	}
+	writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
+		"error": fmt.Sprintf("push body exceeds %d bytes for tenant %s", mbe.Limit, id)})
+	return true
+}
 
 type ingestRequest struct {
 	Metrics []ingestEntry `json:"metrics"`
@@ -29,16 +62,22 @@ type ingestErrorItem struct {
 }
 
 func (s *Server) handleIngestMetrics(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	r.Body = http.MaxBytesReader(w, r.Body, s.pushCap(r, defaultMetricsPushBytes, (*tenant.Limits).MaxMetricsPushBytes))
 
 	dec := json.NewDecoder(r.Body)
 	var req ingestRequest
 	if err := dec.Decode(&req); err != nil {
+		if s.rejectOversizePush(w, r, err) {
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
 		return
 	}
 	// A well-formed request is exactly one JSON object; anything after it is malformed.
 	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if s.rejectOversizePush(w, r, err) {
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unexpected trailing data after JSON body"})
 		return
 	}
@@ -108,6 +147,7 @@ func (s *Server) handleIngestMetrics(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		labels = mlabels.WithTenant(labels, tenant.From(r.Context()))
 		samples = append(samples, metrics.PendingSample{Labels: labels, TimestampMs: *entry.TimestampMs, Value: *entry.Value})
 	}
 
