@@ -33,7 +33,7 @@ func (b *BlockManager) CompactOnce(plan func([]block.BlockInfo) [][]string) (int
 	}
 	infos := make([]block.BlockInfo, len(list.Blocks))
 	for i, w := range list.Blocks {
-		infos[i] = block.BlockInfo{ID: w.ID, Level: w.Level, MinTime: w.MinTime, MaxTime: w.MaxTime, SizeBytes: w.SizeBytes}
+		infos[i] = block.BlockInfo{ID: w.ID, Level: w.Level, MinTime: w.MinTime, MaxTime: w.MaxTime, SizeBytes: w.SizeBytes, Tenant: w.Tenant}
 	}
 	groups := plan(infos)
 	if len(groups) == 0 {
