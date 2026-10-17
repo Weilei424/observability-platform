@@ -181,6 +181,11 @@ func (c *Client) callInto(ctx context.Context, method, path string, query url.Va
 			c.http.CloseIdleConnections()
 			return fmt.Errorf("%w: %s %s answered %d: %s", ErrUnavailable, c.peer, path, resp.StatusCode, errorMessage(raw))
 		}
+		// A 429 is a tenant over its active series/stream limit: a refusal,
+		// not an outage, and not a protocol disagreement.
+		if resp.StatusCode == http.StatusTooManyRequests {
+			return fmt.Errorf("%w: %s %s: %s", ErrLimited, c.peer, path, errorMessage(raw))
+		}
 		// A 5xx is the peer failing; a 499 is the peer having seen this
 		// request as abandoned (statusClientClosedRequest) -- neither is the
 		// two sides disagreeing about the protocol, so both are an outage.
