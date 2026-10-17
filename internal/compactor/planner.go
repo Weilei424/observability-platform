@@ -28,7 +28,7 @@ func Ranges(base, multiplier int64, levels int) []int64 {
 // Plan selects the first group of >=2 time-aligned blocks eligible to merge,
 // scanning ranges smallest-first. A block is eligible for range R when its span
 // is < R and it lies entirely within one R-aligned window [k*R, (k+1)*R).
-// Returns the chosen group's IDs wrapped in a single-element slice, or nil when
+// Blocks of different tenants are never grouped. Returns the chosen group's IDs wrapped in a single-element slice, or nil when
 // nothing should be compacted.
 func Plan(infos []block.BlockInfo, ranges []int64) [][]string {
 	sorted := make([]block.BlockInfo, len(infos))
@@ -39,8 +39,12 @@ func Plan(infos []block.BlockInfo, ranges []int64) [][]string {
 		if r <= 0 {
 			continue
 		}
-		groups := make(map[int64][]string)
-		var windowOrder []int64
+		type windowKey struct {
+			tenant string
+			w      int64
+		}
+		groups := make(map[windowKey][]string)
+		var windowOrder []windowKey
 		for _, b := range sorted {
 			// MaxTime >= MinTime for a valid block, so the difference only wraps
 			// negative when the true span overflows int64; treat that as at/above
@@ -52,11 +56,11 @@ func Plan(infos []block.BlockInfo, ranges []int64) [][]string {
 			if floorDiv(b.MinTime, r) != floorDiv(b.MaxTime, r) {
 				continue // straddles a window boundary
 			}
-			w := floorDiv(b.MinTime, r)
-			if _, ok := groups[w]; !ok {
-				windowOrder = append(windowOrder, w)
+			k := windowKey{b.Tenant, floorDiv(b.MinTime, r)}
+			if _, ok := groups[k]; !ok {
+				windowOrder = append(windowOrder, k)
 			}
-			groups[w] = append(groups[w], b.ID)
+			groups[k] = append(groups[k], b.ID)
 		}
 		for _, w := range windowOrder {
 			if len(groups[w]) >= 2 {
