@@ -50,6 +50,8 @@ type walHead interface {
 	queryStore
 	Source
 	SealHeadChunks() int
+	TenantCounter
+	TenantSeriesCounts() map[string]int
 	FlushBlockContext(ctx context.Context) (bool, error)
 }
 
@@ -128,6 +130,11 @@ func (s *WALStore) QueryRange(id SeriesID, startMs, endMs int64) ([]Sample, erro
 
 func (s *WALStore) LabelNames() []string          { return s.store.LabelNames() }
 func (s *WALStore) LabelValues(n string) []string { return s.store.LabelValues(n) }
+
+// The tenant counts are the head's alone; see MemoryStore.TenantSeries.
+func (s *WALStore) TenantSeries(id string) int         { return s.store.TenantSeries(id) }
+func (s *WALStore) HasSeries(id SeriesID) bool         { return s.store.HasSeries(id) }
+func (s *WALStore) TenantSeriesCounts() map[string]int { return s.store.TenantSeriesCounts() }
 
 var _ Source = (*WALStore)(nil)
 
