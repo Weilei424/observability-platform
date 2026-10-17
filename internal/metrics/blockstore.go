@@ -464,6 +464,11 @@ func (bs *BlockStore) LabelValues(name string) []string {
 	return out
 }
 
+// TenantSeries, HasSeries and TenantSeriesCounts report the head only, not blocks.
+func (bs *BlockStore) TenantSeries(id string) int         { return bs.mem.TenantSeries(id) }
+func (bs *BlockStore) HasSeries(id SeriesID) bool         { return bs.mem.HasSeries(id) }
+func (bs *BlockStore) TenantSeriesCounts() map[string]int { return bs.mem.TenantSeriesCounts() }
+
 // Cardinality returns distinct counts of series, label names, and label pairs
 // across memory and all loaded blocks (deduplicated by series fingerprint).
 func (bs *BlockStore) Cardinality() (series, names, pairs int) {
