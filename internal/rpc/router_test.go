@@ -49,7 +49,7 @@ func startIngesters(t *testing.T, n int, status map[int]int, hang map[int]bool) 
 		} else if code := status[i]; code != 0 {
 			r.HandleFunc("/*", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(code) })
 		} else {
-			r.Route("/internal/v1", func(r chi.Router) { MountWrites(r, f.metrics, f.logs, observability.NewIngestMetrics()) })
+			r.Route("/internal/v1", func(r chi.Router) { MountWrites(r, f.metrics, f.logs, observability.NewIngestMetrics(), nil, nil) })
 		}
 		f.srv = httptest.NewServer(r)
 		t.Cleanup(f.srv.Close)
@@ -616,7 +616,7 @@ func genIngester(t *testing.T) (string, *genRecorder) {
 	t.Helper()
 	m := &genRecorder{}
 	r := chi.NewRouter()
-	r.Route("/internal/v1", func(r chi.Router) { MountWrites(r, m, &recordingLogs{}, observability.NewIngestMetrics()) })
+	r.Route("/internal/v1", func(r chi.Router) { MountWrites(r, m, &recordingLogs{}, observability.NewIngestMetrics(), nil, nil) })
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 	return srv.URL, m
@@ -629,7 +629,7 @@ func heldIngester(t *testing.T, hold, after string) (string, *genRecorder) {
 	t.Helper()
 	m := &genRecorder{}
 	r := chi.NewRouter()
-	r.Route("/internal/v1", func(r chi.Router) { MountWrites(r, m, &recordingLogs{}, observability.NewIngestMetrics()) })
+	r.Route("/internal/v1", func(r chi.Router) { MountWrites(r, m, &recordingLogs{}, observability.NewIngestMetrics(), nil, nil) })
 	applied := make(chan struct{})
 	var once sync.Once
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -866,7 +866,7 @@ func (a arrivalStamper) Append(l metrics.Labels, ts int64, v float64) error {
 func TestRouterSendsNothingWhenTheGenerationAskFails(t *testing.T) {
 	m := arrivalStamper{&genRecorder{}}
 	r := chi.NewRouter()
-	r.Route("/internal/v1", func(r chi.Router) { MountWrites(r, m, &recordingLogs{}, observability.NewIngestMetrics()) })
+	r.Route("/internal/v1", func(r chi.Router) { MountWrites(r, m, &recordingLogs{}, observability.NewIngestMetrics(), nil, nil) })
 	var asks atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		body, _ := io.ReadAll(req.Body)
