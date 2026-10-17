@@ -157,7 +157,7 @@ func newConformance(t *testing.T) conformance {
 	}
 	round(700)
 
-	serve := func(m metrics.Source, l logs.Source) *rpc.Client {
+	serve := func(m metrics.Source, l logs.Reader) *rpc.Client {
 		router := chi.NewRouter()
 		router.Route("/internal/v1", func(r chi.Router) { rpc.MountReads(r, m, l) })
 		srv := httptest.NewServer(router)
@@ -168,8 +168,8 @@ func newConformance(t *testing.T) conformance {
 		}
 		return c
 	}
-	ing := serve(head, logs.AsSource(logHead))
-	st := serve(storeBlocks, logs.AsSource(chunks))
+	ing := serve(head, logHead)
+	st := serve(storeBlocks, chunks)
 
 	return conformance{
 		aioMetrics:    aioStore,
