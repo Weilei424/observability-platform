@@ -36,6 +36,7 @@ type seriesData struct {
 type Writer struct {
 	blocksDir  string
 	blockID    string
+	tenant     string
 	workDir    string // temp directory; cleared after Commit
 	series     []seriesData
 	seriesIDs  map[uint64]struct{} // guards against duplicate series IDs
@@ -75,6 +76,10 @@ func (w *Writer) SetCompaction(level int, sources []string) {
 	w.level = level
 	w.sources = sources
 }
+
+// SetTenant records the tenant (empty for the default tenant) that owns every
+// series in this block. Call before Commit.
+func (w *Writer) SetTenant(id string) { w.tenant = id }
 
 // AddSeries enqueues one series with its sealed chunks for writing. The labels
 // are canonicalized (sorted by name) so the written block always satisfies the
@@ -144,6 +149,7 @@ func (w *Writer) Commit() (Meta, error) {
 		Level:      level,
 		Sources:    w.sources,
 		MaxGen:     w.maxGen,
+		Tenant:     w.tenant,
 	}
 	if err := writeMeta(w.workDir, meta); err != nil {
 		return Meta{}, err
