@@ -13,8 +13,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/masonwheeler/observability-platform/internal/labels"
 	"github.com/masonwheeler/observability-platform/internal/storage/block"
 	"github.com/masonwheeler/observability-platform/internal/storage/chunk"
+	"github.com/masonwheeler/observability-platform/internal/tenant"
 )
 
 // BlockStore wraps a MemoryStore and a list of loaded block Readers.
@@ -518,6 +520,7 @@ func (bs *BlockStore) BlockInfos() []block.BlockInfo {
 			MinTime:   m.MinTime,
 			MaxTime:   m.MaxTime,
 			SizeBytes: dirSizeBytes(filepath.Join(bs.blockDir, m.BlockID)),
+			Tenant:    m.Tenant,
 		})
 	}
 	sort.Slice(infos, func(i, j int) bool { return infos[i].MinTime < infos[j].MinTime })
@@ -756,12 +759,53 @@ func validateSeriesChunks(series []SeriesChunks) error {
 	return nil
 }
 
-// ingestLocked is IngestSeriesChunks for a caller that holds flushMu.
+// ingestLocked is IngestSeriesChunks for a caller that holds flushMu. Each
+// block belongs to exactly one tenant, so series are grouped by tenant (the
+// default tenant is "") and each group is written, validated and published as
+// its own block, in sorted tenant order. It returns the first block's meta with
+// NumSeries and NumSamples summed over all blocks written.
+//
+// A failure part-way leaves the earlier tenants' blocks in place: the caller
+// retries the whole batch, reads deduplicate the repeated series by generation,
+// and compaction merges the duplicates.
 func (bs *BlockStore) ingestLocked(series []SeriesChunks) (block.Meta, error) {
+	groups := make(map[string][]SeriesChunks)
+	for _, sc := range series {
+		id := labels.TenantOf(sc.Labels)
+		if id == tenant.Default {
+			id = ""
+		}
+		groups[id] = append(groups[id], sc)
+	}
+	ids := make([]string, 0, len(groups))
+	for id := range groups {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	var first block.Meta
+	for i, id := range ids {
+		meta, err := bs.writeOneBlock(groups[id], id)
+		if err != nil {
+			return block.Meta{}, err
+		}
+		if i == 0 {
+			first = meta
+			continue
+		}
+		first.NumSeries += meta.NumSeries
+		first.NumSamples += meta.NumSamples
+	}
+	return first, nil
+}
+
+// writeOneBlock writes series (all of one tenant) as one block and publishes it.
+func (bs *BlockStore) writeOneBlock(series []SeriesChunks, tenantID string) (block.Meta, error) {
 	w, err := block.NewWriter(bs.blockDir, bs.tmpDir)
 	if err != nil {
 		return block.Meta{}, fmt.Errorf("blockstore: new writer: %w", err)
 	}
+	w.SetTenant(tenantID)
 
 	for _, sc := range series {
 		pairs := labelsToPairs(sc.Labels)
