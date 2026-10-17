@@ -1,6 +1,7 @@
 package block_test
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -317,5 +318,56 @@ func TestCompact_LabelMismatchSameID_Errors(t *testing.T) {
 func TestCompact_FewerThanTwoSources_Errors(t *testing.T) {
 	if _, err := block.Compact(t.TempDir(), t.TempDir(), nil); err == nil {
 		t.Fatal("Compact with <2 sources: want error")
+	}
+}
+
+func writeTenantBlock(t *testing.T, blocks, tmp, tenantID string, ts int64) *block.Reader {
+	t.Helper()
+	w, err := block.NewWriter(blocks, tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.SetTenant(tenantID)
+	if err := w.AddSeries(1, []block.LabelPair{{Name: "__name__", Value: "x"}},
+		[]*chunk.Chunk{makeChunk(t, [][2]int64{{ts, 1}})}); err != nil {
+		t.Fatal(err)
+	}
+	meta, err := w.Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := block.OpenReader(filepath.Join(blocks, meta.BlockID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func TestCompact_RefusesMixedTenantsAndWritesNothing(t *testing.T) {
+	dir := t.TempDir()
+	blocks, tmp := filepath.Join(dir, "blocks"), filepath.Join(dir, "tmp")
+	a := writeTenantBlock(t, blocks, tmp, "", 1000)
+	b := writeTenantBlock(t, blocks, tmp, "team-b", 2000)
+	before, _ := os.ReadDir(blocks)
+	if _, err := block.Compact(blocks, tmp, []*block.Reader{a, b}); err == nil {
+		t.Fatal("Compact over two tenants succeeded, want error")
+	}
+	after, _ := os.ReadDir(blocks)
+	if len(after) != len(before) {
+		t.Fatalf("blocks dir entries %d -> %d, want unchanged", len(before), len(after))
+	}
+}
+
+func TestCompact_CarriesTenantToMergedBlock(t *testing.T) {
+	dir := t.TempDir()
+	blocks, tmp := filepath.Join(dir, "blocks"), filepath.Join(dir, "tmp")
+	a := writeTenantBlock(t, blocks, tmp, "team-b", 1000)
+	b := writeTenantBlock(t, blocks, tmp, "team-b", 2000)
+	m, err := block.Compact(blocks, tmp, []*block.Reader{a, b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Tenant != "team-b" {
+		t.Fatalf("merged Tenant = %q, want team-b", m.Tenant)
 	}
 }
