@@ -30,7 +30,7 @@ func MountStore(r chi.Router, blocks *metrics.BlockStore, chunks *logs.ChunkStor
 		infos := blocks.BlockInfos()
 		out := blocksResponse{Blocks: make([]wireBlockInfo, len(infos))}
 		for i, b := range infos {
-			out.Blocks[i] = wireBlockInfo{ID: b.ID, Level: b.Level, MinTime: b.MinTime, MaxTime: b.MaxTime, SizeBytes: b.SizeBytes}
+			out.Blocks[i] = wireBlockInfo{ID: b.ID, Level: b.Level, MinTime: b.MinTime, MaxTime: b.MaxTime, SizeBytes: b.SizeBytes, Tenant: b.Tenant}
 		}
 		writeJSON(w, http.StatusOK, out)
 	})
