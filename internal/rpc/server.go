@@ -7,6 +7,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/masonwheeler/observability-platform/internal/drain"
+	mlabels "github.com/masonwheeler/observability-platform/internal/labels"
+	"github.com/masonwheeler/observability-platform/internal/limits"
 	"github.com/masonwheeler/observability-platform/internal/logs"
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/observability"
@@ -163,12 +165,14 @@ func nonNil(s []string) []string {
 // ingester the samples and lines the ring assigns it, already validated. The
 // labels are validated again — a protocol bug must not write invalid data —
 // and a malformed body is a 400. ingest counts what lands; rejections were
-// counted by the gateway, except append failures, counted here.
-func MountWrites(r chi.Router, m metrics.Ingester, l logs.Ingester, ingest *observability.IngestMetrics) {
+// counted by the gateway, except append failures, counted here. A gate, when
+// non-nil, admits each push against its tenants' active series or stream
+// limits and the refusal is a 429; a nil gate appends directly.
+func MountWrites(r chi.Router, m metrics.Ingester, l logs.Ingester, ingest *observability.IngestMetrics, seriesGate, streamGate *limits.Gate) {
 	r.Group(func(r chi.Router) {
 		r.Use(RequireTenant)
-		r.Post("/metrics/push", func(w http.ResponseWriter, req *http.Request) { metricsPush(w, req, m, ingest) })
-		r.Post("/logs/push", func(w http.ResponseWriter, req *http.Request) { logsPush(w, req, l, ingest) })
+		r.Post("/metrics/push", func(w http.ResponseWriter, req *http.Request) { metricsPush(w, req, m, ingest, seriesGate) })
+		r.Post("/logs/push", func(w http.ResponseWriter, req *http.Request) { logsPush(w, req, l, ingest, streamGate) })
 	})
 }
 
@@ -179,7 +183,7 @@ func MountWrites(r chi.Router, m metrics.Ingester, l logs.Ingester, ingest *obse
 // an ingester from before 6.3, which would refuse the sample.
 const PushGenerationsHeader = "X-Obs-Push-Generations"
 
-func metricsPush(w http.ResponseWriter, r *http.Request, ing metrics.Ingester, im *observability.IngestMetrics) {
+func metricsPush(w http.ResponseWriter, r *http.Request, ing metrics.Ingester, im *observability.IngestMetrics, gate *limits.Gate) {
 	if _, ok := ing.(metrics.GenIngester); ok {
 		w.Header().Set(PushGenerationsHeader, "1")
 	}
@@ -203,27 +207,49 @@ func metricsPush(w http.ResponseWriter, r *http.Request, ing metrics.Ingester, i
 		}
 	}
 	gi, takesGen := ing.(metrics.GenIngester)
-	for i, p := range batch {
-		var err error
-		if takesGen && p.Gen != 0 {
-			// The gateway's generation, stored exactly, so every replica
-			// agrees on which of two writes is newer.
-			err = gi.AppendWithGeneration(p.Labels, p.TimestampMs, p.Value, p.Gen)
-		} else {
-			err = ing.Append(p.Labels, p.TimestampMs, p.Value)
+	appendAll := func() error {
+		for i, p := range batch {
+			var err error
+			if takesGen && p.Gen != 0 {
+				// The gateway's generation, stored exactly, so every replica
+				// agrees on which of two writes is newer.
+				err = gi.AppendWithGeneration(p.Labels, p.TimestampMs, p.Value, p.Gen)
+			} else {
+				err = ing.Append(p.Labels, p.TimestampMs, p.Value)
+			}
+			if err != nil {
+				im.SamplesIngested.Add(float64(i))
+				im.SamplesRejected.WithLabelValues(observability.ReasonAppend).Add(float64(len(batch) - i))
+				return err
+			}
 		}
-		if err != nil {
-			im.SamplesIngested.Add(float64(i))
-			im.SamplesRejected.WithLabelValues(observability.ReasonAppend).Add(float64(len(batch) - i))
-			internalError(w, r, "metrics push append failed", err)
+		return nil
+	}
+	var err error
+	if gate == nil {
+		err = appendAll()
+	} else {
+		keys := map[string][]uint64{}
+		for _, p := range batch {
+			t := mlabels.TenantOf(p.Labels)
+			keys[t] = append(keys[t], p.Labels.Hash())
+		}
+		err = gate.Admit(keys, appendAll)
+	}
+	if err != nil {
+		var le *limits.LimitError
+		if errors.As(err, &le) {
+			writeError(w, http.StatusTooManyRequests, le.Error())
 			return
 		}
+		internalError(w, r, "metrics push append failed", err)
+		return
 	}
 	im.SamplesIngested.Add(float64(len(batch)))
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func logsPush(w http.ResponseWriter, r *http.Request, ing logs.Ingester, im *observability.IngestMetrics) {
+func logsPush(w http.ResponseWriter, r *http.Request, ing logs.Ingester, im *observability.IngestMetrics, gate *limits.Gate) {
 	body, ok := readBody(w, r, FlushBodyLimit)
 	if !ok {
 		return
@@ -243,13 +269,35 @@ func logsPush(w http.ResponseWriter, r *http.Request, ing logs.Ingester, im *obs
 			batch = append(batch, logs.PendingEntry{Labels: labels, TimestampNs: e.T, Line: e.Line})
 		}
 	}
-	for i, e := range batch {
-		if err := ing.Append(e.Labels, e.TimestampNs, e.Line); err != nil {
-			im.LogLinesIngested.Add(float64(i))
-			im.LogLinesRejected.WithLabelValues(observability.ReasonAppend).Add(float64(len(batch) - i))
-			internalError(w, r, "logs push append failed", err)
+	appendAll := func() error {
+		for i, e := range batch {
+			if err := ing.Append(e.Labels, e.TimestampNs, e.Line); err != nil {
+				im.LogLinesIngested.Add(float64(i))
+				im.LogLinesRejected.WithLabelValues(observability.ReasonAppend).Add(float64(len(batch) - i))
+				return err
+			}
+		}
+		return nil
+	}
+	var err error
+	if gate == nil {
+		err = appendAll()
+	} else {
+		keys := map[string][]uint64{}
+		for _, e := range batch {
+			t := mlabels.TenantOf(e.Labels)
+			keys[t] = append(keys[t], uint64(logs.StreamIDOf(e.Labels)))
+		}
+		err = gate.Admit(keys, appendAll)
+	}
+	if err != nil {
+		var le *limits.LimitError
+		if errors.As(err, &le) {
+			writeError(w, http.StatusTooManyRequests, le.Error())
 			return
 		}
+		internalError(w, r, "logs push append failed", err)
+		return
 	}
 	im.LogLinesIngested.Add(float64(len(batch)))
 	w.WriteHeader(http.StatusNoContent)
