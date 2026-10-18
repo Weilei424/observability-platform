@@ -2,6 +2,7 @@ package compactor
 
 import (
 	"context"
+	"github.com/masonwheeler/observability-platform/internal/tenant"
 	"log/slog"
 	"time"
 
@@ -32,7 +33,7 @@ type WALSizer interface {
 // store component, which executes each plan under its own lock.
 type BlockManager interface {
 	CompactOnce(plan func([]block.BlockInfo) [][]string) (int, error)
-	ApplyRetention(now time.Time, retention time.Duration) (int, error)
+	ApplyRetention(now time.Time, policy tenant.RetentionPolicy) (int, error)
 }
 
 // Config controls maintenance cadence and policy.
@@ -42,7 +43,7 @@ type Config struct {
 	FlushSealedChunks   int
 	FlushWALBytes       int64
 	Ranges              []int64 // ascending compaction ranges in ms
-	Retention           time.Duration
+	RetentionPolicy     tenant.RetentionPolicy
 	// SkipFinalFlush leaves out Run's flush on shutdown: the ingester drains
 	// its whole head on the way out instead (WALStore.Drain), and a flush
 	// first would only stack another bounded wait onto the pod's grace period.
@@ -155,7 +156,7 @@ func (c *Compactor) applyRetention() {
 	if c.blocks == nil {
 		return
 	}
-	deleted, err := c.blocks.ApplyRetention(c.clock(), c.cfg.Retention)
+	deleted, err := c.blocks.ApplyRetention(c.clock(), c.cfg.RetentionPolicy)
 	if err != nil {
 		c.log.Warn("retention failed", slog.String("error", err.Error()))
 	}
