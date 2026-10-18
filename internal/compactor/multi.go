@@ -1,6 +1,7 @@
 package compactor
 
 import (
+	"github.com/masonwheeler/observability-platform/internal/tenant"
 	"log/slog"
 	"time"
 
@@ -45,8 +46,8 @@ func (m *MultiBlockManager) CompactOnce(plan func([]block.BlockInfo) [][]string)
 
 // ApplyRetention sums the blocks deleted across stores and returns the first
 // error after trying all of them.
-func (m *MultiBlockManager) ApplyRetention(now time.Time, retention time.Duration) (int, error) {
-	return m.each("retention", func(b BlockManager) (int, error) { return b.ApplyRetention(now, retention) })
+func (m *MultiBlockManager) ApplyRetention(now time.Time, policy tenant.RetentionPolicy) (int, error) {
+	return m.each("retention", func(b BlockManager) (int, error) { return b.ApplyRetention(now, policy) })
 }
 
 func (m *MultiBlockManager) each(op string, call func(BlockManager) (int, error)) (int, error) {
