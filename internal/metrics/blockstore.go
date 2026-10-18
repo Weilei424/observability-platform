@@ -999,8 +999,9 @@ func (bs *BlockStore) CompactOnce(plan func([]block.BlockInfo) [][]string) (int,
 }
 
 // ApplyRetention removes every block whose MaxTime is strictly older than
-// now-retention. A non-positive retention disables retention (no-op). Returns the
-// number of blocks actually reclaimed and the first deletion error, if any.
+// now minus its own tenant's retention (a block with no tenant belongs to the
+// default tenant). A tenant whose retention is non-positive keeps its blocks
+// forever. Returns the number of blocks actually reclaimed and the first deletion error, if any.
 //
 // Deletion is crash-safe and readable-on-failure: each expired block is reclaimed
 // by renaming its directory into tmpDir under the write lock (which drains
@@ -1010,11 +1011,8 @@ func (bs *BlockStore) CompactOnce(plan func([]block.BlockInfo) [][]string) (int,
 // The slower RemoveAll and reader Close run afterwards outside the lock; a crash
 // or RemoveAll failure leaves only a tmp entry, which NewBlockStore wipes on
 // startup, so the block still counts as deleted.
-func (bs *BlockStore) ApplyRetention(now time.Time, retention time.Duration) (int, error) {
-	if retention <= 0 {
-		return 0, nil
-	}
-	cutoff := now.UnixMilli() - retention.Milliseconds()
+func (bs *BlockStore) ApplyRetention(now time.Time, policy tenant.RetentionPolicy) (int, error) {
+	nowMs := now.UnixMilli()
 
 	bs.flushMu.Lock()
 	defer bs.flushMu.Unlock()
@@ -1029,7 +1027,7 @@ func (bs *BlockStore) ApplyRetention(now time.Time, retention time.Duration) (in
 	for _, r := range bs.blocks {
 		// Once a deletion fails, keep every remaining block (expired or not) so the
 		// failed block stays readable and the rest retry next pass.
-		if firstErr != nil || r.Meta().MaxTime >= cutoff {
+		if firstErr != nil || !blockExpired(r.Meta(), nowMs, policy) {
 			kept = append(kept, r)
 			continue
 		}
@@ -1068,6 +1066,20 @@ func (bs *BlockStore) ApplyRetention(now time.Time, retention time.Duration) (in
 		return len(reclaimed), firstErr
 	}
 	return len(reclaimed), cleanupErr
+}
+
+// blockExpired reports whether the block's MaxTime is strictly older than the
+// cutoff its own tenant's retention sets.
+func blockExpired(m block.Meta, nowMs int64, policy tenant.RetentionPolicy) bool {
+	id := m.Tenant
+	if id == "" {
+		id = tenant.Default
+	}
+	ret := policy.For(id)
+	if ret <= 0 {
+		return false
+	}
+	return m.MaxTime < nowMs-ret.Milliseconds()
 }
 
 // gcEmptyHeadSeries removes every empty-head in-memory series that no surviving
