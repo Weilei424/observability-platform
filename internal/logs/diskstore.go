@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/binary"
 	"sort"
+	"time"
 
 	"github.com/masonwheeler/observability-platform/internal/storage/index"
 	"github.com/masonwheeler/observability-platform/internal/storage/logchunk"
 	"github.com/masonwheeler/observability-platform/internal/storage/logwal"
+	"github.com/masonwheeler/observability-platform/internal/tenant"
 )
 
 // logWAL is the WAL surface Head needs: durable append, whole-head checkpoint, close.
@@ -215,3 +217,10 @@ func (s *Store) writeChunksAndIndexForTest() error {
 // closeWALForTest closes only the WAL, leaving chunks/index in place — used with
 // writeChunksAndIndexForTest to simulate a crash before checkpoint.
 func (s *Store) closeWALForTest() error { return s.head.wal.Close() }
+
+// ApplyRetention deletes the persisted chunks past their tenant's retention
+// (ChunkStore.ApplyRetention). Head entries are not touched: they are flushed
+// to chunks first and expire from there.
+func (s *Store) ApplyRetention(now time.Time, policy tenant.RetentionPolicy) (int, error) {
+	return s.chunks.ApplyRetention(now, policy)
+}
