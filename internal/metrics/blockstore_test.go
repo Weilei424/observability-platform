@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/masonwheeler/observability-platform/internal/tenant"
 	"os"
 	"path/filepath"
 	"sort"
@@ -522,13 +523,13 @@ func TestBlockStore_ApplyRetention_Boundary(t *testing.T) {
 	flushOneBlock(t, bs, "m", 0) // block MaxTime = 119000
 
 	// retention=0 → no-op.
-	if n, err := bs.ApplyRetention(time.UnixMilli(10_000_000), 0); err != nil || n != 0 {
+	if n, err := bs.ApplyRetention(time.UnixMilli(10_000_000), tenant.RetentionPolicy{}); err != nil || n != 0 {
 		t.Fatalf("retention=0 = %d,%v; want 0,nil", n, err)
 	}
 
 	// cutoff == MaxTime (119000): MaxTime < cutoff is false → block KEPT (strict boundary).
 	now := time.UnixMilli(119001)
-	n, err := bs.ApplyRetention(now, 1*time.Millisecond) // cutoff = 119000; 119000 < 119000 is false → kept
+	n, err := bs.ApplyRetention(now, tenant.RetentionPolicy{Default: time.Millisecond}) // cutoff = 119000; 119000 < 119000 is false → kept
 	if err != nil {
 		t.Fatalf("ApplyRetention: %v", err)
 	}
@@ -537,7 +538,7 @@ func TestBlockStore_ApplyRetention_Boundary(t *testing.T) {
 	}
 
 	// cutoff strictly greater than MaxTime → deleted.
-	n, err = bs.ApplyRetention(time.UnixMilli(119002), 1*time.Millisecond) // cutoff = 119001 > 119000 → delete
+	n, err = bs.ApplyRetention(time.UnixMilli(119002), tenant.RetentionPolicy{Default: time.Millisecond}) // cutoff = 119001 > 119000 → delete
 	if err != nil {
 		t.Fatalf("ApplyRetention: %v", err)
 	}
@@ -667,7 +668,7 @@ func TestBlockStore_Retention_GCsEmptyHeadSeries(t *testing.T) {
 	}
 
 	// Delete the only block (cutoff strictly past its MaxTime of 119000).
-	n, err := bs.ApplyRetention(time.UnixMilli(119002), 1*time.Millisecond)
+	n, err := bs.ApplyRetention(time.UnixMilli(119002), tenant.RetentionPolicy{Default: time.Millisecond})
 	if err != nil || n != 1 {
 		t.Fatalf("ApplyRetention = %d,%v; want 1,nil", n, err)
 	}
@@ -1700,7 +1701,7 @@ func TestBlockStore_ApplyRetention_DeleteFailureKeepsReadable(t *testing.T) {
 		t.Fatalf("write tmp file: %v", err)
 	}
 
-	n, err := bs.ApplyRetention(time.UnixMilli(10_000_000), time.Millisecond)
+	n, err := bs.ApplyRetention(time.UnixMilli(10_000_000), tenant.RetentionPolicy{Default: time.Millisecond})
 	if err == nil {
 		t.Fatal("ApplyRetention: want a deletion error, got nil")
 	}
@@ -1754,7 +1755,7 @@ func TestBlockStore_ApplyRetention_CleanupFailureSurfaced(t *testing.T) {
 		_ = os.Chmod(filepath.Join(dir, "metrics", "tmp", blockID, "baddir"), 0o755)
 	})
 
-	n, err := bs.ApplyRetention(time.UnixMilli(10_000_000), time.Millisecond)
+	n, err := bs.ApplyRetention(time.UnixMilli(10_000_000), tenant.RetentionPolicy{Default: time.Millisecond})
 	if err == nil {
 		t.Fatal("ApplyRetention: want a surfaced cleanup error, got nil")
 	}
@@ -1792,7 +1793,7 @@ func TestBlockStore_ApplyRetention_ConcurrentQueriesNeverError(t *testing.T) {
 		return nil
 	})
 	<-started // a query has completed; the goroutine keeps querying through retention
-	if _, err := bs.ApplyRetention(time.UnixMilli(10_000_000), time.Millisecond); err != nil {
+	if _, err := bs.ApplyRetention(time.UnixMilli(10_000_000), tenant.RetentionPolicy{Default: time.Millisecond}); err != nil {
 		t.Fatalf("ApplyRetention: %v", err)
 	}
 	stop()
@@ -1826,7 +1827,7 @@ func TestBlockStore_Deletion_LeavesNoPartialDir(t *testing.T) {
 		t.Fatalf("after compaction tmp/ has %d dirs, want 0", got)
 	}
 
-	if _, err := bs.ApplyRetention(time.UnixMilli(10_000_000), time.Millisecond); err != nil {
+	if _, err := bs.ApplyRetention(time.UnixMilli(10_000_000), tenant.RetentionPolicy{Default: time.Millisecond}); err != nil {
 		t.Fatalf("ApplyRetention: %v", err)
 	}
 	if got := countDirs(t, blocksDir); got != 0 {
