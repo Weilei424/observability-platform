@@ -38,7 +38,8 @@ const (
 	// flushes the metrics head.
 	FlushGroup InstrumentGroups = 1 << iota
 	// CompactionGroup is obs_compactions_total, obs_compaction_failures_total,
-	// obs_compaction_duration_seconds, and obs_retention_deleted_blocks_total.
+	// obs_compaction_duration_seconds, obs_retention_deleted_blocks_total, and
+	// obs_logs_retention_deleted_chunks_total.
 	CompactionGroup
 	// IngestGroup is the accepted and rejected sample and log-line counters.
 	IngestGroup
@@ -80,8 +81,10 @@ type Metrics struct {
 	CompactionFailuresTotal prometheus.Counter
 	CompactionDuration      prometheus.Histogram
 	RetentionDeletedTotal   prometheus.Counter
-	FlushesTotal            prometheus.Counter
-	FlushFailuresTotal      prometheus.Counter
+	// LogsRetentionDeletedTotal counts log chunk files deleted by retention.
+	LogsRetentionDeletedTotal prometheus.Counter
+	FlushesTotal              prometheus.Counter
+	FlushFailuresTotal        prometheus.Counter
 }
 
 // Instruments are the push-model handles the server hands to the components that
@@ -163,15 +166,16 @@ func NewRegistry(opts RegistryOptions) (*prometheus.Registry, *Instruments) {
 	}
 
 	m := &Metrics{
-		CompactionsTotal:        prometheus.NewCounter(prometheus.CounterOpts{Name: "obs_compactions_total", Help: "Total number of block groups compacted."}),
-		CompactionFailuresTotal: prometheus.NewCounter(prometheus.CounterOpts{Name: "obs_compaction_failures_total", Help: "Total number of failed compaction passes."}),
-		CompactionDuration:      prometheus.NewHistogram(prometheus.HistogramOpts{Name: "obs_compaction_duration_seconds", Help: "Duration of compaction passes in seconds.", Buckets: prometheus.DefBuckets}),
-		RetentionDeletedTotal:   prometheus.NewCounter(prometheus.CounterOpts{Name: "obs_retention_deleted_blocks_total", Help: "Total number of blocks deleted by retention."}),
-		FlushesTotal:            prometheus.NewCounter(prometheus.CounterOpts{Name: "obs_flushes_total", Help: "Total number of successful head flushes."}),
-		FlushFailuresTotal:      prometheus.NewCounter(prometheus.CounterOpts{Name: "obs_flush_failures_total", Help: "Total number of failed head flushes."}),
+		CompactionsTotal:          prometheus.NewCounter(prometheus.CounterOpts{Name: "obs_compactions_total", Help: "Total number of block groups compacted."}),
+		CompactionFailuresTotal:   prometheus.NewCounter(prometheus.CounterOpts{Name: "obs_compaction_failures_total", Help: "Total number of failed compaction passes."}),
+		CompactionDuration:        prometheus.NewHistogram(prometheus.HistogramOpts{Name: "obs_compaction_duration_seconds", Help: "Duration of compaction passes in seconds.", Buckets: prometheus.DefBuckets}),
+		RetentionDeletedTotal:     prometheus.NewCounter(prometheus.CounterOpts{Name: "obs_retention_deleted_blocks_total", Help: "Total number of blocks deleted by retention."}),
+		LogsRetentionDeletedTotal: prometheus.NewCounter(prometheus.CounterOpts{Name: "obs_logs_retention_deleted_chunks_total", Help: "Total number of log chunk files deleted by retention."}),
+		FlushesTotal:              prometheus.NewCounter(prometheus.CounterOpts{Name: "obs_flushes_total", Help: "Total number of successful head flushes."}),
+		FlushFailuresTotal:        prometheus.NewCounter(prometheus.CounterOpts{Name: "obs_flush_failures_total", Help: "Total number of failed head flushes."}),
 	}
 	if opts.Omit&CompactionGroup == 0 {
-		reg.MustRegister(m.CompactionsTotal, m.CompactionFailuresTotal, m.CompactionDuration, m.RetentionDeletedTotal)
+		reg.MustRegister(m.CompactionsTotal, m.CompactionFailuresTotal, m.CompactionDuration, m.RetentionDeletedTotal, m.LogsRetentionDeletedTotal)
 	}
 	if opts.Omit&FlushGroup == 0 {
 		reg.MustRegister(m.FlushesTotal, m.FlushFailuresTotal)
