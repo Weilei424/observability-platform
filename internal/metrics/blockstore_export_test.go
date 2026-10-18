@@ -3,6 +3,7 @@ package metrics_test
 import (
 	"context"
 	"errors"
+	"github.com/masonwheeler/observability-platform/internal/tenant"
 	"path/filepath"
 	"testing"
 	"time"
@@ -197,7 +198,7 @@ func TestExportSeriesSurvivesRetentionDuringExport(t *testing.T) {
 	exportDuringChange(t, func(t *testing.T, bs *metrics.BlockStore, infos []block.BlockInfo) {
 		// Expire only the (already exported) first block.
 		now := time.UnixMilli(1_150_000_000_000)
-		if n, err := bs.ApplyRetention(now, 100_000_000*time.Second); err != nil || n != 1 {
+		if n, err := bs.ApplyRetention(now, tenant.RetentionPolicy{Default: 100_000_000 * time.Second}); err != nil || n != 1 {
 			t.Fatalf("ApplyRetention = %d, %v", n, err)
 		}
 	})
