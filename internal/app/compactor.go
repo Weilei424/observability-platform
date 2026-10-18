@@ -18,6 +18,7 @@ import (
 func buildCompactor(cfg *config.Config, log *slog.Logger) (*App, error) {
 	labels := labelsOf(cfg.StoreURLs)
 	managers := make([]compactor.BlockManager, 0, len(cfg.StoreURLs))
+	logManagers := make([]compactor.LogManager, 0, len(cfg.StoreURLs))
 	for i, u := range cfg.StoreURLs {
 		store, err := rpc.NewClient("store "+labels[i], u)
 		if err != nil {
@@ -25,6 +26,7 @@ func buildCompactor(cfg *config.Config, log *slog.Logger) (*App, error) {
 			return nil, err
 		}
 		managers = append(managers, rpc.NewBlockManager(store))
+		logManagers = append(logManagers, rpc.NewLogsRetentionClient(store))
 	}
 	reg, inst := observability.NewRegistry(observability.RegistryOptions{
 		Omit:   observability.FlushGroup | observability.IngestGroup | observability.LogFlushGroup,
@@ -41,10 +43,11 @@ func buildCompactor(cfg *config.Config, log *slog.Logger) (*App, error) {
 		Ready:    alwaysReady,
 	})
 	clog := observability.Component(log, "compactor")
-	blocks := compactor.NewMultiBlockManager(labels, managers, rpc.OutcomeOf,
-		func(s, o string) { sm.CompactorPass.WithLabelValues(s, o).Inc() }, clog)
+	observe := func(s, o string) { sm.CompactorPass.WithLabelValues(s, o).Inc() }
+	blocks := compactor.NewMultiBlockManager(labels, managers, rpc.OutcomeOf, observe, clog)
+	logsRetention := compactor.NewMultiLogManager(labels, logManagers, rpc.OutcomeOf, observe, clog)
 	loop := compactor.New(nil, blocks, nil, time.Now, maintenanceConfig(cfg),
-		inst.Maintenance, clog)
+		inst.Maintenance, clog, compactor.WithLogs(logsRetention))
 	return &App{
 		Target:  config.TargetCompactor,
 		Handler: srv,
