@@ -2,12 +2,22 @@ package app
 
 import (
 	"log/slog"
+	"time"
 
 	"github.com/masonwheeler/observability-platform/internal/compactor"
 	"github.com/masonwheeler/observability-platform/internal/config"
+	"github.com/masonwheeler/observability-platform/internal/logs"
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/storage/wal"
+	"github.com/masonwheeler/observability-platform/internal/tenant"
 )
+
+// localLogs adapts all-in-one's log store to compactor.LogManager.
+type localLogs struct{ s *logs.Store }
+
+func (l localLogs) ApplyLogsRetention(now time.Time, policy tenant.RetentionPolicy) (int, error) {
+	return l.s.ApplyRetention(now, policy)
+}
 
 // replayMetricsWAL replays walDir after checkpoint through appendFn, warning
 // about and skipping records that no longer validate. It returns the number of
