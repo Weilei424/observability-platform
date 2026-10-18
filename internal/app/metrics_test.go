@@ -17,7 +17,7 @@ func TestEachTargetExposesOnlyWhatItOwns(t *testing.T) {
 	type want struct{ has, lacks []string }
 	cases := map[config.Target]want{
 		config.TargetAllInOne: {has: []string{"obs_active_series", "obs_blocks_total", "obs_wal_bytes", "obs_log_streams_total",
-			"obs_compactions_total", "obs_flushes_total", "obs_samples_ingested_total", "obs_log_flushes_total"}},
+			"obs_compactions_total", "obs_flushes_total", "obs_samples_ingested_total", "obs_log_flushes_total", "obs_logs_retention_deleted_chunks_total"}},
 		config.TargetIngester: {
 			has:   []string{"obs_active_series", "obs_wal_bytes", "obs_flushes_total", "obs_samples_ingested_total", "obs_log_flushes_total"},
 			lacks: []string{"obs_blocks_total", "obs_compactions_total", "obs_log_streams_total"},
@@ -27,7 +27,7 @@ func TestEachTargetExposesOnlyWhatItOwns(t *testing.T) {
 			lacks: []string{"obs_active_series", "obs_wal_bytes", "obs_flushes_total", "obs_compactions_total", "obs_samples_ingested_total"},
 		},
 		config.TargetCompactor: {
-			has:   []string{"obs_compactions_total", "obs_retention_deleted_blocks_total"},
+			has:   []string{"obs_compactions_total", "obs_retention_deleted_blocks_total", "obs_logs_retention_deleted_chunks_total"},
 			lacks: []string{"obs_flushes_total", "obs_samples_ingested_total", "obs_active_series", "obs_blocks_total"},
 		},
 		config.TargetQuerier: {
