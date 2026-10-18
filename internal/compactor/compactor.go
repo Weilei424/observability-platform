@@ -36,6 +36,19 @@ type BlockManager interface {
 	ApplyRetention(now time.Time, policy tenant.RetentionPolicy) (int, error)
 }
 
+// LogManager applies logs retention. In all-in-one it is the local log store;
+// in the compactor target it is a MultiLogManager over every store's client.
+type LogManager interface {
+	ApplyLogsRetention(now time.Time, policy tenant.RetentionPolicy) (int, error)
+}
+
+// Option configures optional Compactor collaborators.
+type Option func(*Compactor)
+
+// WithLogs has every pass apply logs retention through l, after metrics
+// retention and under the same policy.
+func WithLogs(l LogManager) Option { return func(c *Compactor) { c.logs = l } }
+
 // Config controls maintenance cadence and policy.
 type Config struct {
 	MaintenanceInterval time.Duration
@@ -54,6 +67,7 @@ type Config struct {
 type Compactor struct {
 	flusher   Flusher
 	blocks    BlockManager
+	logs      LogManager
 	wal       WALSizer
 	clock     func() time.Time
 	cfg       Config
@@ -65,11 +79,12 @@ type Compactor struct {
 // New builds a Compactor. clock defaults to time.Now when nil. Any of flusher,
 // blocks, and walSizer may be nil: the ingester passes only a flusher and a
 // WAL sizer, the compactor target only a block manager, and all-in-one all three.
-func New(flusher Flusher, blocks BlockManager, walSizer WALSizer, clock func() time.Time, cfg Config, metrics *observability.Metrics, log *slog.Logger) *Compactor {
+// Options add the optional collaborators (WithLogs).
+func New(flusher Flusher, blocks BlockManager, walSizer WALSizer, clock func() time.Time, cfg Config, metrics *observability.Metrics, log *slog.Logger, opts ...Option) *Compactor {
 	if clock == nil {
 		clock = time.Now
 	}
-	return &Compactor{
+	c := &Compactor{
 		flusher:   flusher,
 		blocks:    blocks,
 		wal:       walSizer,
@@ -79,14 +94,20 @@ func New(flusher Flusher, blocks BlockManager, walSizer WALSizer, clock func() t
 		log:       log,
 		lastFlush: clock(),
 	}
+	for _, o := range opts {
+		o(c)
+	}
+	return c
 }
 
 // RunOnce performs one maintenance pass: flush (if due) → compact to stability →
-// retention. Errors are logged and metered; a pass is best-effort.
+// metrics retention → logs retention. Errors are logged and metered; a pass is
+// best-effort.
 func (c *Compactor) RunOnce(ctx context.Context) {
 	c.maybeFlush(ctx)
 	c.compactToStable(ctx)
 	c.applyRetention()
+	c.applyLogsRetention()
 }
 
 func (c *Compactor) maybeFlush(ctx context.Context) {
@@ -162,6 +183,19 @@ func (c *Compactor) applyRetention() {
 	}
 	if deleted > 0 {
 		c.metrics.RetentionDeletedTotal.Add(float64(deleted))
+	}
+}
+
+func (c *Compactor) applyLogsRetention() {
+	if c.logs == nil {
+		return
+	}
+	deleted, err := c.logs.ApplyLogsRetention(c.clock(), c.cfg.RetentionPolicy)
+	if err != nil {
+		c.log.Warn("logs retention failed", slog.String("error", err.Error()))
+	}
+	if deleted > 0 {
+		c.metrics.LogsRetentionDeletedTotal.Add(float64(deleted))
 	}
 }
 
