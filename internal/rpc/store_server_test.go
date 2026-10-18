@@ -172,6 +172,9 @@ func TestBlockMaintenanceRoutes(t *testing.T) {
 	if resp, out := post(t, f.srv.URL+"/internal/v1/metrics/retention", `{"now_ms":10000000000000,"retention_ms":1}`); resp.StatusCode != http.StatusOK || !strings.Contains(out, `"deleted":1`) {
 		t.Fatalf("retention: %d %s", resp.StatusCode, out)
 	}
+	if resp, _ := post(t, f.srv.URL+"/internal/v1/metrics/retention", `{"now_ms":0,"retention_ms":1,"overrides_ms":{"a":-1}}`); resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("negative override = %d, want 400", resp.StatusCode)
+	}
 	if resp, _ := post(t, f.srv.URL+"/internal/v1/metrics/retention", `{"now_ms":0,"retention_ms":-1}`); resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("negative retention = %d, want 400", resp.StatusCode)
 	}
