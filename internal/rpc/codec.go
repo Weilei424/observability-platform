@@ -300,6 +300,7 @@ type compactResponse struct {
 	Error     string `json:"error,omitempty"`
 }
 
+// retentionRequest is the body of both /metrics/retention and /logs/retention.
 type retentionRequest struct {
 	NowMs       int64 `json:"now_ms"`
 	RetentionMs int64 `json:"retention_ms"`
@@ -309,7 +310,7 @@ type retentionRequest struct {
 }
 
 // retentionResponse carries the count even on failure: retention reports how
-// many blocks it reclaimed before the error.
+// many blocks (metrics) or chunk files (logs) it reclaimed before the error.
 type retentionResponse struct {
 	Deleted int    `json:"deleted"`
 	Error   string `json:"error,omitempty"`
