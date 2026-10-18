@@ -2,6 +2,7 @@ package compactor_test
 
 import (
 	"context"
+	"github.com/masonwheeler/observability-platform/internal/tenant"
 	"io"
 	"log/slog"
 	"testing"
@@ -28,7 +29,7 @@ func (b *countingBlocks) CompactOnce(func([]block.BlockInfo) [][]string) (int, e
 	return 0, nil
 }
 
-func (b *countingBlocks) ApplyRetention(time.Time, time.Duration) (int, error) {
+func (b *countingBlocks) ApplyRetention(time.Time, tenant.RetentionPolicy) (int, error) {
 	b.retentions++
 	return 0, nil
 }
