@@ -49,6 +49,27 @@ func (x *streamIndex) add(id StreamID, labels StreamLabels, ref ChunkRef) {
 	x.refs[id] = append(x.refs[id], ref)
 }
 
+// removeRef drops the chunk ref named name from stream id. A stream left with
+// no ref is removed entirely, postings included, so it no longer matches.
+func (x *streamIndex) removeRef(id StreamID, name string) {
+	refs := x.refs[id]
+	for i, r := range refs {
+		if r.Name == name {
+			refs = append(refs[:i:i], refs[i+1:]...)
+			break
+		}
+	}
+	if len(refs) > 0 {
+		x.refs[id] = refs
+		return
+	}
+	delete(x.refs, id)
+	if l, ok := x.labels[id]; ok {
+		x.postings.Delete(uint64(id), labelPairsOf(l))
+		delete(x.labels, id)
+	}
+}
+
 // matchingStreamIDs returns the stream IDs whose labels match all matchers.
 func (x *streamIndex) matchingStreamIDs(matchers []index.Pair) []StreamID {
 	ids := x.postings.Select(matchers)
