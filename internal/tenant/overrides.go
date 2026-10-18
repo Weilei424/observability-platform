@@ -68,6 +68,9 @@ func (f fileOverride) parse() (Override, error) {
 		if err != nil {
 			return o, fmt.Errorf("retention: %w", err)
 		}
+		if d < 0 {
+			return o, fmt.Errorf("retention must be >= 0")
+		}
 		o.Retention = &d
 	}
 	for name, v := range map[string]*int{"max_active_series": f.MaxActiveSeries, "max_active_streams": f.MaxActiveStreams} {
