@@ -3,6 +3,7 @@ package rpc
 import (
 	"errors"
 	"fmt"
+	"github.com/masonwheeler/observability-platform/internal/tenant"
 	"net/http"
 	"time"
 	"unicode/utf8"
@@ -199,7 +200,18 @@ func retention(w http.ResponseWriter, r *http.Request, blocks *metrics.BlockStor
 		writeError(w, http.StatusBadRequest, "retention_ms must be >= 0")
 		return
 	}
-	n, err := blocks.ApplyRetention(time.UnixMilli(req.NowMs), time.Duration(req.RetentionMs)*time.Millisecond)
+	policy := tenant.RetentionPolicy{Default: time.Duration(req.RetentionMs) * time.Millisecond}
+	if len(req.OverridesMs) > 0 {
+		policy.Overrides = make(map[string]time.Duration, len(req.OverridesMs))
+		for id, ms := range req.OverridesMs {
+			if ms < 0 {
+				writeError(w, http.StatusBadRequest, "overrides_ms must be >= 0")
+				return
+			}
+			policy.Overrides[id] = time.Duration(ms) * time.Millisecond
+		}
+	}
+	n, err := blocks.ApplyRetention(time.UnixMilli(req.NowMs), policy)
 	if err != nil {
 		observability.Component(observability.FromContext(r.Context()), "rpc").Error("retention failed", "err", err)
 		writeJSON(w, http.StatusInternalServerError, retentionResponse{Deleted: n, Error: err.Error()})
