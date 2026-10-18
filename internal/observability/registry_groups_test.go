@@ -24,7 +24,7 @@ func families(t *testing.T, opts RegistryOptions) map[string]bool {
 func TestOmittedGroupsAreNotRegistered(t *testing.T) {
 	groups := map[InstrumentGroups][]string{
 		FlushGroup:      {"obs_flushes_total", "obs_flush_failures_total"},
-		CompactionGroup: {"obs_compactions_total", "obs_compaction_failures_total", "obs_compaction_duration_seconds", "obs_retention_deleted_blocks_total"},
+		CompactionGroup: {"obs_compactions_total", "obs_compaction_failures_total", "obs_compaction_duration_seconds", "obs_retention_deleted_blocks_total", "obs_logs_retention_deleted_chunks_total"},
 		IngestGroup:     {"obs_samples_ingested_total", "obs_log_lines_ingested_total", "obs_samples_rejected_total", "obs_log_lines_rejected_total"},
 		LogFlushGroup:   {"obs_log_flushes_total", "obs_log_flush_failures_total"},
 	}
