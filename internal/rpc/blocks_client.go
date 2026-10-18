@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"context"
+	"github.com/masonwheeler/observability-platform/internal/tenant"
 	"net/http"
 	"time"
 
@@ -44,12 +45,17 @@ func (b *BlockManager) CompactOnce(plan func([]block.BlockInfo) [][]string) (int
 	return resp.Compacted, err
 }
 
-func (b *BlockManager) ApplyRetention(now time.Time, retention time.Duration) (int, error) {
+func (b *BlockManager) ApplyRetention(now time.Time, policy tenant.RetentionPolicy) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), MaintenanceTimeout)
 	defer cancel()
 	var resp retentionResponse
-	err := b.c.do(ctx, http.MethodPost, "metrics/retention", nil, retentionRequest{
-		NowMs: now.UnixMilli(), RetentionMs: retention.Milliseconds(),
-	}, &resp)
+	req := retentionRequest{NowMs: now.UnixMilli(), RetentionMs: policy.Default.Milliseconds()}
+	if len(policy.Overrides) > 0 {
+		req.OverridesMs = make(map[string]int64, len(policy.Overrides))
+		for id, d := range policy.Overrides {
+			req.OverridesMs[id] = d.Milliseconds()
+		}
+	}
+	err := b.c.do(ctx, http.MethodPost, "metrics/retention", nil, req, &resp)
 	return resp.Deleted, err
 }
