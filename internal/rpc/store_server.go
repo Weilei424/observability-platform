@@ -36,7 +36,8 @@ func MountStore(r chi.Router, blocks *metrics.BlockStore, chunks *logs.ChunkStor
 		writeJSON(w, http.StatusOK, out)
 	})
 	r.Post("/metrics/compact", func(w http.ResponseWriter, req *http.Request) { compact(w, req, blocks) })
-	r.Post("/metrics/retention", func(w http.ResponseWriter, req *http.Request) { retention(w, req, blocks) })
+	r.Post("/metrics/retention", func(w http.ResponseWriter, req *http.Request) { retention(w, req, blocks.ApplyRetention) })
+	r.Post("/logs/retention", func(w http.ResponseWriter, req *http.Request) { retention(w, req, chunks.ApplyRetention) })
 }
 
 func metricsFlush(w http.ResponseWriter, r *http.Request, blocks *metrics.BlockStore, barrier *FlushBarrier) {
@@ -186,8 +187,9 @@ func compact(w http.ResponseWriter, r *http.Request, blocks *metrics.BlockStore)
 }
 
 // retention applies the compactor's clock and window: the policy is the
-// compactor's, the deletion the store's.
-func retention(w http.ResponseWriter, r *http.Request, blocks *metrics.BlockStore) {
+// compactor's, the deletion the store's. apply is the metrics block store's
+// or the logs chunk store's ApplyRetention; both answer the deleted count.
+func retention(w http.ResponseWriter, r *http.Request, apply func(time.Time, tenant.RetentionPolicy) (int, error)) {
 	body, ok := readBody(w, r, selectBodyLimit)
 	if !ok {
 		return
@@ -211,7 +213,7 @@ func retention(w http.ResponseWriter, r *http.Request, blocks *metrics.BlockStor
 			policy.Overrides[id] = time.Duration(ms) * time.Millisecond
 		}
 	}
-	n, err := blocks.ApplyRetention(time.UnixMilli(req.NowMs), policy)
+	n, err := apply(time.UnixMilli(req.NowMs), policy)
 	if err != nil {
 		observability.Component(observability.FromContext(r.Context()), "rpc").Error("retention failed", "err", err)
 		writeJSON(w, http.StatusInternalServerError, retentionResponse{Deleted: n, Error: err.Error()})
