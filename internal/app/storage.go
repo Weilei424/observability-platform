@@ -44,6 +44,6 @@ func maintenanceConfig(cfg *config.Config) compactor.Config {
 		FlushSealedChunks:   cfg.FlushSealedChunks,
 		FlushWALBytes:       cfg.FlushWALBytes,
 		Ranges:              compactor.Ranges(cfg.CompactionBaseRange.Milliseconds(), int64(cfg.CompactionMultiplier), cfg.CompactionLevels),
-		Retention:           cfg.Retention,
+		RetentionPolicy:     cfg.TenantLimits().RetentionPolicy(),
 	}
 }
