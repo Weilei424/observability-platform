@@ -70,3 +70,43 @@ func (m *MultiBlockManager) each(op string, call func(BlockManager) (int, error)
 	}
 	return total, first
 }
+
+// MultiLogManager applies logs retention against every store in turn; one
+// store failing is reported and skipped, and the rest run. observe is called
+// once per store per call.
+type MultiLogManager struct {
+	names    []string
+	managers []LogManager
+	outcome  func(error) string
+	observe  func(store, outcome string)
+	log      *slog.Logger
+}
+
+// NewMultiLogManager pairs each manager with its store label; outcome and
+// observe are as for NewMultiBlockManager.
+func NewMultiLogManager(labels []string, managers []LogManager, outcome func(error) string, observe func(store, outcome string), log *slog.Logger) *MultiLogManager {
+	return &MultiLogManager{names: labels, managers: managers, outcome: outcome, observe: observe, log: log}
+}
+
+// ApplyLogsRetention sums the chunks deleted across stores and returns the
+// first error after trying all of them.
+func (m *MultiLogManager) ApplyLogsRetention(now time.Time, policy tenant.RetentionPolicy) (int, error) {
+	total := 0
+	var first error
+	for i, l := range m.managers {
+		n, err := l.ApplyLogsRetention(now, policy)
+		total += n
+		if m.observe != nil {
+			m.observe(m.names[i], m.outcome(err))
+		}
+		if err != nil {
+			if len(m.managers) > 1 {
+				m.log.Warn("store logs retention failed; skipping it", slog.String("store", m.names[i]), slog.String("error", err.Error()))
+			}
+			if first == nil {
+				first = err
+			}
+		}
+	}
+	return total, first
+}
