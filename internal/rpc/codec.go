@@ -303,6 +303,9 @@ type compactResponse struct {
 type retentionRequest struct {
 	NowMs       int64 `json:"now_ms"`
 	RetentionMs int64 `json:"retention_ms"`
+	// OverridesMs is each overridden tenant's retention; a request without it
+	// applies RetentionMs to every tenant.
+	OverridesMs map[string]int64 `json:"overrides_ms,omitempty"`
 }
 
 // retentionResponse carries the count even on failure: retention reports how
