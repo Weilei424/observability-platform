@@ -2,6 +2,7 @@ package compactor_test
 
 import (
 	"context"
+	"github.com/masonwheeler/observability-platform/internal/tenant"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -63,7 +64,6 @@ func testConfig() compactor.Config {
 		FlushSealedChunks:   0,
 		FlushWALBytes:       0,
 		Ranges:              compactor.Ranges(3_600_000, 4, 2), // 1h, 4h
-		Retention:           0,
 	}
 }
 
@@ -116,7 +116,7 @@ func TestCompactor_RunOnce_RetentionDeletesExpired(t *testing.T) {
 	ingestSealedBlock(t, ws, "m", 0) // block MaxTime 119000
 
 	cfg := testConfig()
-	cfg.Retention = time.Millisecond
+	cfg.RetentionPolicy = tenant.RetentionPolicy{Default: time.Millisecond}
 	// Fixed clock far in the future so the block is expired.
 	clock := func() time.Time { return time.UnixMilli(10_000_000) }
 	c := compactor.New(ws, bs, ws, clock, cfg, mx, log)
