@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/masonwheeler/observability-platform/internal/tenant"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -74,7 +75,7 @@ func TestClientsRoundTripAgainstTheRealRoutes(t *testing.T) {
 		t.Fatalf("SelectStreams = %v, %v", streams, err)
 	}
 
-	n, err := rpc.NewBlockManager(c).ApplyRetention(time.UnixMilli(10_000_000_000_000), time.Millisecond)
+	n, err := rpc.NewBlockManager(c).ApplyRetention(time.UnixMilli(10_000_000_000_000), tenant.RetentionPolicy{Default: time.Millisecond})
 	if err != nil || n != 1 {
 		t.Fatalf("ApplyRetention = %d, %v", n, err)
 	}
@@ -353,7 +354,7 @@ func TestClientRefusesAnUnexpectedSuccessStatus(t *testing.T) {
 	protocolErr("logs flush answered 204", rpc.NewChunkSink(nc).IngestStreams(ctx, nil))
 	_, err = rpc.NewBlockManager(nc).CompactOnce(func([]block.BlockInfo) [][]string { return [][]string{{"a"}} })
 	protocolErr("compact answered 204", err)
-	_, err = rpc.NewBlockManager(nc).ApplyRetention(time.Now(), time.Hour)
+	_, err = rpc.NewBlockManager(nc).ApplyRetention(time.Now(), tenant.RetentionPolicy{Default: time.Hour})
 	protocolErr("retention answered 204", err)
 
 	ok := answer(http.StatusOK)
