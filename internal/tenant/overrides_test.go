@@ -53,6 +53,7 @@ func TestLoadOverridesRefusesBadInput(t *testing.T) {
 		{"bad tenant", "overrides:\n  'a b':\n    max_active_series: 1\n", "invalid tenant ID"},
 		{"negative limit", "overrides:\n  a:\n    max_active_series: -1\n", "max_active_series"},
 		{"bad duration", "overrides:\n  a:\n    retention: soon\n", "retention"},
+		{"negative retention", "overrides:\n  a:\n    retention: -1h\n", "retention"},
 		{"zero push cap", "overrides:\n  a:\n    max_logs_push_bytes: 0\n", "max_logs_push_bytes"},
 		{"push cap too big", "overrides:\n  a:\n    max_metrics_push_bytes: 16777217\n", "max_metrics_push_bytes"},
 		{"top-level typo", "override:\n  a: {}\n", "override"},
