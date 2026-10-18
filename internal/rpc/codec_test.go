@@ -261,3 +261,24 @@ func TestBlockInfoTenantSurvivesTheWire(t *testing.T) {
 		t.Fatalf("absent tenant decoded as %q, want empty", old.Blocks[0].Tenant)
 	}
 }
+
+func TestRetentionRequestCarriesOverrides(t *testing.T) {
+	in := retentionRequest{NowMs: 5, RetentionMs: 10, OverridesMs: map[string]int64{"team-b": 20, "keep": 0}}
+	raw, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out retentionRequest
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.OverridesMs["team-b"] != 20 || len(out.OverridesMs) != 2 || out.RetentionMs != 10 {
+		t.Fatalf("round trip = %+v", out)
+	}
+	// A 6.4-shaped request has no overrides_ms and still decodes strictly.
+	rec := httptest.NewRecorder()
+	var old retentionRequest
+	if !decodeStrict(rec, []byte(`{"now_ms":1,"retention_ms":2}`), &old) || old.OverridesMs != nil || old.RetentionMs != 2 {
+		t.Fatalf("6.4 request = %+v (code %d)", old, rec.Code)
+	}
+}
