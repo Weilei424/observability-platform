@@ -121,7 +121,7 @@ func BuildAllInOne(cfg *config.Config, log *slog.Logger) (*AllInOne, error) {
 		Ingest:      inst.Ingest,
 	})
 	comp := compactor.New(store, blockStore, store, time.Now, maintenanceConfig(cfg),
-		inst.Maintenance, observability.Component(log, "compactor"))
+		inst.Maintenance, observability.Component(log, "compactor"), compactor.WithLogs(localLogs{logStore}))
 
 	return &AllInOne{
 		Server:      srv,
