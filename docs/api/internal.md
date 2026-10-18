@@ -344,3 +344,10 @@ POST /internal/v1/metrics/retention
 `{"now_ms":1758700000000,"retention_ms":86400000}` → `{"deleted":2}`. The clock
 and window are the compactor's; the deletion is the store's. A `500` still
 carries the count.
+
+```http
+POST /internal/v1/logs/retention
+```
+
+The same body as `/metrics/retention` → `{"deleted":n}`, where `n` counts the
+log chunk files deleted. A `500` still carries the count.
