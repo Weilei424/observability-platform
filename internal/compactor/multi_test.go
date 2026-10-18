@@ -3,6 +3,7 @@ package compactor
 import (
 	"context"
 	"errors"
+	"github.com/masonwheeler/observability-platform/internal/tenant"
 	"io"
 	"log/slog"
 	"testing"
@@ -31,7 +32,7 @@ func (f *fakeMgr) CompactOnce(func([]block.BlockInfo) [][]string) (int, error) {
 	return f.compact, nil
 }
 
-func (f *fakeMgr) ApplyRetention(time.Time, time.Duration) (int, error) {
+func (f *fakeMgr) ApplyRetention(time.Time, tenant.RetentionPolicy) (int, error) {
 	f.retentionCalls++
 	return f.deleted, f.err
 }
@@ -82,7 +83,7 @@ func TestMultiApplyRetentionRunsEveryStore(t *testing.T) {
 	ms := []*fakeMgr{{deleted: 1, err: boom}, {deleted: 4}}
 	var seen []string
 	m := newMulti(t, ms, &seen)
-	n, err := m.ApplyRetention(time.Now(), time.Hour)
+	n, err := m.ApplyRetention(time.Now(), tenant.RetentionPolicy{Default: time.Hour})
 	if n != 5 || !errors.Is(err, boom) || ms[1].retentionCalls != 1 {
 		t.Fatalf("n=%d err=%v calls=%d", n, err, ms[1].retentionCalls)
 	}
@@ -105,7 +106,7 @@ func (r *roundsMgr) CompactOnce(func([]block.BlockInfo) [][]string) (int, error)
 	return 0, nil
 }
 
-func (r *roundsMgr) ApplyRetention(time.Time, time.Duration) (int, error) { return 0, nil }
+func (r *roundsMgr) ApplyRetention(time.Time, tenant.RetentionPolicy) (int, error) { return 0, nil }
 
 func TestRunOnceCompactsHealthyStoreToStableWhileAnotherFails(t *testing.T) {
 	down := &fakeMgr{err: errors.New("down")}
