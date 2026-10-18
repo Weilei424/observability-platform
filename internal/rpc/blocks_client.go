@@ -49,6 +49,13 @@ func (b *BlockManager) ApplyRetention(now time.Time, policy tenant.RetentionPoli
 	ctx, cancel := context.WithTimeout(context.Background(), MaintenanceTimeout)
 	defer cancel()
 	var resp retentionResponse
+	err := b.c.do(ctx, http.MethodPost, "metrics/retention", nil, newRetentionRequest(now, policy), &resp)
+	return resp.Deleted, err
+}
+
+// newRetentionRequest is the wire form of a retention pass, shared by the
+// metrics and logs retention clients.
+func newRetentionRequest(now time.Time, policy tenant.RetentionPolicy) retentionRequest {
 	req := retentionRequest{NowMs: now.UnixMilli(), RetentionMs: policy.Default.Milliseconds()}
 	if len(policy.Overrides) > 0 {
 		req.OverridesMs = make(map[string]int64, len(policy.Overrides))
@@ -56,6 +63,5 @@ func (b *BlockManager) ApplyRetention(now time.Time, policy tenant.RetentionPoli
 			req.OverridesMs[id] = d.Milliseconds()
 		}
 	}
-	err := b.c.do(ctx, http.MethodPost, "metrics/retention", nil, req, &resp)
-	return resp.Deleted, err
+	return req
 }
