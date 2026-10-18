@@ -34,6 +34,7 @@ Variable segments are written `<like-this>`. Directory rows end in `/`.
 | `data/logs/wal/<segment>.wal` | `logwal` | Length-prefixed log entry records |
 | `data/logs/chunks/` | `logs.NewStore` | Compressed log chunks |
 | `data/logs/chunks/<stream>-<min-ts>-<rand>.chunk` | `logs.Store.Flush` | One flushed chunk for one stream |
+| `data/logs/chunks-tmp/` | `logs.NewStore` | Chunks retention is deleting; emptied at startup |
 | `data/logs/index/` | `logs.NewStore` | Stream index |
 | `data/logs/index/streams.index` | `logs.Store.Flush` | Label pair → stream IDs, and stream ID → chunk references |
 
@@ -72,6 +73,7 @@ actually wrote.
 | `store:data/logs/` | `logs.OpenChunkStore` | The store's log chunks |
 | `store:data/logs/chunks/` | `logs.OpenChunkStore` | Compressed log chunks |
 | `store:data/logs/chunks/<stream>-<min-ts>-<rand>.chunk` | `logs.ChunkStore.IngestStreams` | One flushed chunk for one stream |
+| `store:data/logs/chunks-tmp/` | `logs.OpenChunkStore` | As in all-in-one |
 | `store:data/logs/index/` | `logs.OpenChunkStore` | Stream index |
 | `store:data/logs/index/streams.index` | `logs.ChunkStore.IngestStreams` | As in all-in-one |
 
