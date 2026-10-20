@@ -192,6 +192,30 @@ it did not create. Delete it yourself, point `KIND_CLUSTER` somewhere else, or p
 cluster after a run so you can inspect it — the next run will then refuse until you
 remove it, which is the point.
 
+## Tenants
+
+The chart's defaults leave tenancy at one tenant: requests without
+`X-Scope-OrgID` are the default tenant `anonymous`, and `tenants.required=false`.
+To try a second tenant, install the backend with overrides, for example
+`--set 'tenants.overrides.team-b.max_active_series=200'` (or the
+`team-b: {retention: 24h, max_active_series: 200, max_active_streams: 20}` entry
+in a values file); the chart renders a ConfigMap, mounts it at
+`/etc/obs/tenant-overrides.yaml` and rolls the pods that mount it when it
+changes ([../../deployments/helm/README.md](../../deployments/helm/README.md)).
+The Grafana chart provisions no team-b datasources (those are a Compose demo), so
+write and read through the port-forward with the header:
+
+```bash
+curl -s -X POST localhost:8080/api/v1/ingest/metrics -H 'X-Scope-OrgID: team-b' \
+  -d "{\"metrics\":[{\"name\":\"tenant_probe\",\"timestamp_ms\":$(date +%s)000,\"value\":7}]}"
+curl -s -G -H 'X-Scope-OrgID: team-b' localhost:8080/api/v1/query --data-urlencode 'query=tenant_probe'
+curl -s -G localhost:8080/api/v1/query --data-urlencode 'query=tenant_probe'   # empty: default tenant
+```
+
+`make smoke-kind` runs these checks, plus the series limit (`429`) and an invalid
+tenant (`400`). Upgrading an existing split release from 6.4 has an order; see
+[split-demo.md](split-demo.md#upgrading-from-64-to-65).
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
