@@ -128,6 +128,14 @@ the generations actually in its chunks is demoted to failed rather than trusted,
 because trusting it would authorize deleting the source blocks it claims to
 replace. For an ordinary flushed block, a stale `max_gen` is harmless.
 
+`tenant` is added to the file only for a non-default tenant
+(`"tenant": "team-b"`); a `meta.json` without it, which is every block written
+before tenancy, is the default tenant's. A block holds one tenant's series: a
+flush whose batch spans tenants writes one block per tenant, and compaction
+merges only blocks of the same tenant. Inside the block a tenant's series carry
+the reserved label `__tenant__=<id>` in their label set (the default tenant's
+carry none), so `index` and `postings` need no new field.
+
 ### Block `index`, `postings`, `chunks`
 
 `chunks` holds encoded sample chunks concatenated into one file, addressed by
@@ -158,6 +166,11 @@ bounds and counts are **authenticated by a header-only read** — the index can
 trust a chunk's range without decompressing it. `payloadCRC` covers the
 compressed body.
 
+A non-default tenant's stream labels include `__tenant__=<id>` here like any
+other label (the default tenant's include none), which is how a chunk is
+attributed to its tenant, and how retention picks that tenant's window, without
+consulting the index; no format version changed.
+
 Note that the two versions are independent: the chunk-file wrapper is at version
 1 while the chunk format inside it is at version 2. Chunk format version 1 (which
 lacked the header CRC) is rejected with a version error rather than decoded, matching the metrics chunk format's policy of refusing
@@ -183,8 +196,12 @@ no reader will open.
    and a window where data is durable in neither place.
 4. **Compact.** Small blocks are merged into larger ones and their index is
    rebuilt. Compaction never reduces resolution; there is no downsampling.
-5. **Retain.** Blocks entirely older than `retention` are deleted whole.
-   Retention is off by default (`0s` means keep everything).
+5. **Retain.** A block entirely older than its tenant's `retention` is deleted
+   whole, and so is a log chunk file whose newest entry is older than its
+   stream's tenant window. The tenant's window is its override, else the
+   default. Retention is off by default (`0s` means keep everything), per tenant
+   too. Deleted chunk files are first renamed into `data/logs/chunks-tmp/`, which
+   startup empties, and a chunk file that disappears during a read is skipped.
 
 ## What this document does not cover
 
@@ -193,5 +210,5 @@ append, and log chunk flush. It does **not** exercise compaction or retention, s
 the files those paths produce and delete are described here from the code rather
 than verified against a produced tree. Compaction writes a new block directory of
 exactly the shape documented above and removes its sources; retention removes
-block directories. If either grows a new file type, this table will not catch it —
+block directories and log chunk files. If either grows a new file type, this table will not catch it —
 extend the test first.
