@@ -324,10 +324,11 @@ func podTemplates(t *testing.T, sets ...string) map[string]string {
 	return templates
 }
 
-// A ring stage restarts only the component whose ingester list it changes:
-// scaling the ingester StatefulSet must not roll its existing pods, and the
-// store and compactor never roll for a ring change. Restarting them would
-// open read-wide 503 windows at every stage.
+// A ring stage restarts only the components whose ingester list or RF it
+// changes. The store and compactor never roll for a ring change. The ingesters
+// carry the gateway's list and RF (Phase 6.5: each enforces its share of a
+// tenant limit, ceil(limit x RF / N)), so they roll exactly when the gateway
+// does and not for a querier-only stage.
 func TestRingStagesRollOnlyTheComponentWhoseListChanges(t *testing.T) {
 	helmAvailable(t)
 	stages := []struct {
@@ -337,12 +338,12 @@ func TestRingStagesRollOnlyTheComponentWhoseListChanges(t *testing.T) {
 	}{
 		{"3/3", nil, nil},
 		{"add stage 1: 4/3", []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=3"}, []string{"observability-querier"}},
-		{"add stage 2: 4/4", []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=4"}, []string{"observability-backend"}},
-		{"remove stage 1: 4/3", []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=3"}, []string{"observability-backend"}},
+		{"add stage 2: 4/4", []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=4"}, []string{"observability-backend", "observability-ingester"}},
+		{"remove stage 1: 4/3", []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=3"}, []string{"observability-backend", "observability-ingester"}},
 		{"remove stage 3: 3/3", []string{"split.ingester.replicas=3", "split.ingester.writeReplicas=3"}, []string{"observability-querier"}},
-		{"4/4 at the default RF 3 (baseline for the next stage)", []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=4"}, []string{"observability-backend", "observability-querier"}},
+		{"4/4 at the default RF 3 (baseline for the next stage)", []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=4"}, []string{"observability-backend", "observability-querier", "observability-ingester"}},
 		{"lower RF stage 1: the querier 3 -> 2 on 4/4", []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=4", "split.querier.replicationFactor=2"}, []string{"observability-querier"}},
-		{"lower RF stage 2: the gateway 3 -> 2 on 4/4", []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=4", "split.replicationFactor=2"}, []string{"observability-backend"}},
+		{"lower RF stage 2: the gateway 3 -> 2 on 4/4", []string{"split.ingester.replicas=4", "split.ingester.writeReplicas=4", "split.replicationFactor=2"}, []string{"observability-backend", "observability-ingester"}},
 	}
 	prev := podTemplates(t, stages[0].sets...)
 	for _, st := range stages[1:] {
