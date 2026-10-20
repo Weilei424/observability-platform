@@ -70,6 +70,33 @@
       "description": "all-in-one runs one StatefulSet; split runs the five Phase 6.1 components.",
       "enum": ["all-in-one", "split"]
     },
+    "tenants": {
+      "type": "object",
+      "description": "Phase 6.5 multi-tenancy. The chart renders each setting onto exactly the targets that accept it; the matching config.OBS_* keys are refused.",
+      "additionalProperties": false,
+      "properties": {
+        "required": { "type": "boolean", "description": "Refuse requests without X-Scope-OrgID (all-in-one, gateway, querier)." },
+        "overrides": {
+          "type": "object",
+          "description": "Per-tenant settings keyed by tenant id, rendered into a ConfigMap mounted at /etc/obs/tenant-overrides.yaml on the all-in-one backend, gateway, ingesters and compactor.",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "retention": { "type": "string" },
+              "max_active_series": { "type": "integer", "minimum": 0 },
+              "max_active_streams": { "type": "integer", "minimum": 0 },
+              "max_metrics_push_bytes": { "type": "integer", "minimum": 1, "maximum": 16777216 },
+              "max_logs_push_bytes": { "type": "integer", "minimum": 1, "maximum": 16777216 }
+            }
+          }
+        },
+        "maxActiveSeriesPerTenant": { "type": "integer", "minimum": 0 },
+        "maxActiveStreamsPerTenant": { "type": "integer", "minimum": 0 },
+        "maxMetricsPushBytes": { "type": "integer", "minimum": 1, "maximum": 16777216 },
+        "maxLogsPushBytes": { "type": "integer", "minimum": 1, "maximum": 16777216 }
+      }
+    },
     "split": {
       "type": "object",
       "additionalProperties": false,
