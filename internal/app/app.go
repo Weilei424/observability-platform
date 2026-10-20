@@ -11,8 +11,12 @@ import (
 	"sync"
 
 	"github.com/masonwheeler/observability-platform/internal/config"
+	"github.com/masonwheeler/observability-platform/internal/limits"
+	"github.com/masonwheeler/observability-platform/internal/logs"
+	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/observability"
 	"github.com/masonwheeler/observability-platform/internal/rpc"
+	"github.com/masonwheeler/observability-platform/internal/tenant"
 )
 
 // App is one assembled process.
@@ -125,4 +129,52 @@ func labelsOf(members []string) []string {
 		out[i] = rpc.MemberLabel(m)
 	}
 	return out
+}
+
+// seriesCounter adapts a metrics head to limits.Counter: what the series gate
+// reads.
+type seriesCounter struct{ c metrics.TenantCounter }
+
+func (s seriesCounter) Count(t string) int { return s.c.TenantSeries(t) }
+func (s seriesCounter) Has(id uint64) bool { return s.c.HasSeries(metrics.SeriesID(id)) }
+
+// streamCounter adapts a logs head to limits.Counter: what the stream gate
+// reads.
+type streamCounter struct{ c logs.TenantCounter }
+
+func (s streamCounter) Count(t string) int { return s.c.TenantStreams(t) }
+func (s streamCounter) Has(id uint64) bool { return s.c.HasStream(logs.StreamID(id)) }
+
+// tenantLimits is cfg.TenantLimits() with config.Load's push caps (1 MiB for
+// metrics, 4 MiB for logs) in place of a zero one. Load refuses a cap <= 0, so
+// this changes nothing for a loaded Config; it keeps a Config built by hand
+// (as tests do) from capping every push at zero bytes.
+func tenantLimits(cfg *config.Config) *tenant.Limits {
+	c := *cfg
+	if c.MaxMetricsPushBytes <= 0 {
+		c.MaxMetricsPushBytes = 1 << 20
+	}
+	if c.MaxLogsPushBytes <= 0 {
+		c.MaxLogsPushBytes = 4 << 20
+	}
+	return c.TenantLimits()
+}
+
+// tenantRejects counts a refusal by a per-tenant limit under limit ("series",
+// "streams" or "push_bytes").
+func tenantRejects(tm *observability.TenantMetrics) func(t, limit string) {
+	return func(t, limit string) { tm.LimitRejections.WithLabelValues(t, limit).Inc() }
+}
+
+// tenantGates builds the series and stream admission gates over a process's
+// own heads. share maps a tenant's limit to the part this process enforces:
+// the limit itself in all-in-one, the ingester's share in split mode.
+func tenantGates(lim *tenant.Limits, share func(int) int, series metrics.TenantCounter, streams logs.TenantCounter,
+	tm *observability.TenantMetrics) (seriesGate, streamGate *limits.Gate) {
+	reject := tenantRejects(tm)
+	seriesGate = limits.NewGate(limits.Series, func(t string) int { return share(lim.MaxActiveSeries(t)) },
+		seriesCounter{series}, func(t string) { reject(t, "series") })
+	streamGate = limits.NewGate(limits.Streams, func(t string) int { return share(lim.MaxActiveStreams(t)) },
+		streamCounter{streams}, func(t string) { reject(t, "streams") })
+	return seriesGate, streamGate
 }
