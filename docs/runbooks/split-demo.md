@@ -499,6 +499,51 @@ before the upgrade is no longer read (the old volume stays until
 `docker volume rm observability-platform-split_obs-store-data`; the old
 container is reported as an orphan until `docker compose ... up -d --remove-orphans`).
 
+### Upgrading from 6.4 to 6.5
+
+6.5 adds tenants. The wire format did not change: a tenant is a `__tenant__`
+label in the series, and `X-Scope-OrgID` travels on every internal request, so
+6.4 data is read as the default tenant's with no migration. What is new on the
+wire is the order in which components must be upgraded:
+
+1. **Queriers and gateways first.** They start sending `X-Scope-OrgID` on
+   internal calls, which an older ingester or store ignores.
+2. **Then ingesters and stores.** They begin refusing an internal read or push
+   without the header (`400 missing tenant`), and the new ingesters take the
+   gateway's replication factor and ring (`OBS_REPLICATION_FACTOR`,
+   `OBS_INGESTER_URL`) to divide a tenant's limit.
+3. **The compactor last.** The 6.5 retention request carries per-tenant
+   `overrides_ms`, which a 6.4 store refuses as an unknown field, so a 6.5
+   compactor against a 6.4 store would fail every retention pass.
+
+**Send no non-default tenant until every component runs 6.5.** Until then only
+default-tenant data exists, so an old ingester that ignores the header leaks
+nothing, and one that sees a `__tenant__` label refuses it as reserved, so a
+premature tenant write fails instead of landing in the wrong place. One `helm upgrade`
+rolls every workload and does not enforce the order, so with a client that sends
+a tenant, hold it back until the rollout finishes; to be strict, upgrade the
+querier and gateway, then the ingesters and stores, then the compactor, waiting
+for each rollout. In Compose recreate the services in that order. The overrides file is read at startup: a change rolls the pods
+that mount it (Helm) or needs a recreate (Compose).
+
+## The team-b demo, split
+
+The split stack mounts the same `deployments/docker/tenant-overrides.yaml` on the
+gateway, ingesters and compactor (the querier and stores refuse the setting),
+and gives the ingesters `OBS_REPLICATION_FACTOR` and `OBS_INGESTER_URL`, so each
+enforces its share of `team-b`'s 200 active series, ceil(200 x 3 / 3) = 200.
+The commands and datasources are the ones in
+[local-demo.md](local-demo.md#a-second-tenant-team-b), against the gateway on
+`localhost:8080`. Two split-only things to see: a `team-b` series lands on three
+ingesters, and past the limit a push is `429` from the gateway once more
+ingesters refuse it than the write quorum allows (a refusal by fewer is a
+`degraded` quorum, and that replica lacks the series); and `team-b`'s 24 h
+retention is applied by the compactor to each store's blocks and log chunks.
+On Kubernetes set `tenants.overrides` in the values
+([../../deployments/helm/README.md](../../deployments/helm/README.md)); the
+Kubernetes Grafana chart has no team-b datasources, so use `curl` with the
+header.
+
 ## Failure drill: stop one ingester
 
 ```bash
@@ -601,7 +646,8 @@ make smoke-compose-split
 ```
 
 The same Grafana-level checks as `make smoke-compose`, plus the split-only
-ones: every ingester's ingested counter above zero after seeding, a flushed
+ones: tenant isolation both ways and the series limit across the ring,
+every ingester's ingested counter above zero after seeding, a flushed
 marker read back by value after an ingester restarts, a block on at least one store,
 `target` on every component's logs, the replication check (a controlled batch
 of marker series, read back from each ingester's own head over the internal
