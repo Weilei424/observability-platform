@@ -31,6 +31,16 @@ case "$TOPOLOGY" in
 esac
 CLUSTER="${KIND_CLUSTER:-$DEFAULT_CLUSTER}"
 TOPOLOGY_SET=(--set "topology=$TOPOLOGY")
+# Phase 6.5: team-b's limits, the same as deployments/docker/tenant-overrides.yaml.
+# Every backend helm install and upgrade passes these (a helm upgrade without
+# them would drop the overrides). In split, each ingester enforces its share,
+# ceil(200 x RF 3 / 3 ingesters) = 200, so one batch of 201 new series is
+# refused in both topologies. Not passed to the prometheus chart.
+TENANT_SET=(
+    --set "tenants.overrides.team-b.retention=24h"
+    --set "tenants.overrides.team-b.max_active_series=200"
+    --set "tenants.overrides.team-b.max_active_streams=20"
+)
 NS="${K8S_NAMESPACE:-obs}"
 KEEP_UP="${OBS_KIND_KEEP_UP:-0}"
 ROLLOUT_TIMEOUT="${OBS_ROLLOUT_TIMEOUT:-300s}"
@@ -347,7 +357,7 @@ log_pass "built and loaded three images"
 echo ""
 echo "-- helm install backend --"
 if helm install backend "$REPO_ROOT/deployments/helm/backend" -n "$NS" --wait --timeout "$ROLLOUT_TIMEOUT" \
-        "${TOPOLOGY_SET[@]}"; then
+        "${TOPOLOGY_SET[@]}" "${TENANT_SET[@]}"; then
     log_pass "helm install deploys the backend"
 else
     log_fail "helm install backend failed"
@@ -405,7 +415,7 @@ if [ "$TOPOLOGY" = split ]; then
         local label="$1" want="$2" out
         shift 2
         if out=$(helm upgrade backend "$REPO_ROOT/deployments/helm/backend" -n "$NS" \
-                "${TOPOLOGY_SET[@]}" "$@" 2>&1); then
+                "${TOPOLOGY_SET[@]}" "${TENANT_SET[@]}" "$@" 2>&1); then
             log_fail "$label: the upgrade went through, want it refused"
         elif grep -qF "$want" <<<"$out"; then
             log_pass "$label"
@@ -588,6 +598,141 @@ if [ "$TOPOLOGY" = split ]; then
         log_fail "seeding the flush marker returned HTTP $STATUS, want 204"
     fi
 fi
+kill "$PF_PID" 2>/dev/null; PF_PID=""
+
+# ---- Tenants (Phase 6.5) --------------------------------------------
+echo ""
+echo "-- Tenants: team-b is isolated from the default tenant, limited, and bad ids are refused --"
+
+kubectl port-forward -n "$NS" svc/observability-backend 18080:8080 >/dev/null 2>&1 &
+PF_PID=$!
+wait_for_port "backend port-forward is ready (tenants)" 30 "http://localhost:18080/healthz"
+TBACKEND="http://localhost:18080"
+TB="X-Scope-OrgID: team-b"
+TENANT_MS=$(( $(date +%s) * 1000 ))
+TENANT_NS=$(date +%s%N)
+TCURL=(--max-time 10)
+
+# poll_until <label> <timeout-seconds> <command>...: runs the command until it
+# succeeds. Each attempt is bounded by curl's --max-time, so the deadline holds.
+poll_until() {
+    local label="$1" timeout="$2"; shift 2
+    local start=$SECONDS
+    while [ $((SECONDS - start)) -lt "$timeout" ]; do
+        if "$@"; then log_pass "$label"; return 0; fi
+        sleep 2
+    done
+    log_fail "$label — not true within ${timeout}s"
+    return 1
+}
+
+push_status() { # <header-or-empty> <path> <json>
+    local hdr="${1:-X-Tenant-Smoke: none}"
+    curl -s "${TCURL[@]}" -o /dev/null -w '%{http_code}' -X POST "$TBACKEND$2" \
+        -H "$hdr" -H "Content-Type: application/json" -d "$3"
+}
+# team-b writes label names (team_b_only) the default tenant never has; the
+# default tenant writes default_only, which team-b never has.
+S=$(push_status "$TB" /api/v1/ingest/metrics "{\"metrics\":[{\"name\":\"tenant_probe\",\"labels\":{\"job\":\"smoke\",\"team_b_only\":\"1\"},\"timestamp_ms\":$TENANT_MS,\"value\":7}]}")
+[ "$S" = "204" ] && log_pass "team-b metric push (HTTP 204)" || log_fail "team-b metric push — got HTTP $S"
+S=$(push_status "$TB" /loki/api/v1/push "{\"streams\":[{\"stream\":{\"service\":\"tenant-smoke\",\"team_b_only\":\"1\"},\"values\":[[\"$TENANT_NS\",\"hello from team-b\"]]}]}")
+[ "$S" = "204" ] && log_pass "team-b log push (HTTP 204)" || log_fail "team-b log push — got HTTP $S"
+S=$(push_status "" /api/v1/ingest/metrics "{\"metrics\":[{\"name\":\"default_probe\",\"labels\":{\"job\":\"smoke\",\"default_only\":\"1\"},\"timestamp_ms\":$TENANT_MS,\"value\":5}]}")
+[ "$S" = "204" ] && log_pass "default-tenant metric push (HTTP 204)" || log_fail "default-tenant metric push — got HTTP $S"
+S=$(push_status "" /loki/api/v1/push "{\"streams\":[{\"stream\":{\"service\":\"default-smoke\",\"default_only\":\"1\"},\"values\":[[\"$TENANT_NS\",\"hello from default\"]]}]}")
+[ "$S" = "204" ] && log_pass "default-tenant log push (HTTP 204)" || log_fail "default-tenant log push — got HTTP $S"
+
+# tq <header-or-empty> <path> <param=value>...: GET against the backend, body on
+# stdout. The query is URL-encoded by curl (-G --data-urlencode).
+tq() {
+    local hdr="$1" path="$2"; shift 2
+    local args=() kv
+    for kv in "$@"; do args+=(--data-urlencode "$kv"); done
+    if [ -n "$hdr" ]; then
+        curl -s "${TCURL[@]}" -G -H "$hdr" "$TBACKEND$path" "${args[@]}"
+    else
+        curl -s "${TCURL[@]}" -G "$TBACKEND$path" "${args[@]}"
+    fi
+}
+LOKI_WINDOW=(start=$(( TENANT_NS - 300000000000 )) end=$(( TENANT_NS + 300000000000 )))
+
+# Each helper demands a SUCCESSFUL answer first (.status == "success"): an error
+# body has no .data, and "nothing found" must never be satisfied by "request failed".
+iso_empty() { # <label> <header-or-empty> <jq emptiness test on .data> <path> <param=value>...
+    local label="$1" hdr="$2" test="$3" path="$4"; shift 4
+    local body; body=$(tq "$hdr" "$path" "$@")
+    if jq -e ".status == \"success\" and (.data | $test)" >/dev/null 2>&1 <<< "$body"; then
+        log_pass "$label"
+    else
+        log_fail "$label — want a successful, empty answer, got: $(printf '%s' "$body" | head -c 300)"
+    fi
+}
+iso_lacks() { # <label> <header-or-empty> <needle> <path> <param=value>...
+    local label="$1" hdr="$2" needle="$3" path="$4"; shift 4
+    local body; body=$(tq "$hdr" "$path" "$@")
+    if jq -e '.status == "success"' >/dev/null 2>&1 <<< "$body" && ! grep -qF -- "\"$needle\"" <<< "$body"; then
+        log_pass "$label"
+    else
+        log_fail "$label — want a successful answer without \"$needle\", got: $(printf '%s' "$body" | head -c 300)"
+    fi
+}
+iso_has() { # <label> <header-or-empty> <needle> <path> <param=value>... (positive control)
+    local label="$1" hdr="$2" needle="$3" path="$4"; shift 4
+    local body; body=$(tq "$hdr" "$path" "$@")
+    if jq -e '.status == "success"' >/dev/null 2>&1 <<< "$body" && grep -qF -- "$needle" <<< "$body"; then
+        log_pass "$label"
+    else
+        log_fail "$label — want a successful answer containing $needle, got: $(printf '%s' "$body" | head -c 300)"
+    fi
+}
+
+# Each tenant sees its own data (the write may land a moment after the 204 in
+# the split topology, hence the polls).
+tb_sees_probe() { [ "$(tq "$TB" /api/v1/query 'query=tenant_probe' | jq -r '.data.result[0].value[1]' 2>/dev/null)" = "7" ]; }
+poll_until "team-b reads tenant_probe = 7" 30 tb_sees_probe
+def_sees_probe() { [ "$(tq "" /api/v1/query 'query=default_probe' | jq -r '.data.result[0].value[1]' 2>/dev/null)" = "5" ]; }
+poll_until "default tenant reads default_probe = 5" 30 def_sees_probe
+tb_sees_line() { tq "$TB" /loki/api/v1/query_range 'query={service="tenant-smoke"}' "${LOKI_WINDOW[@]}" | jq -e '.data.result | length > 0' >/dev/null 2>&1; }
+poll_until "team-b reads its log line" 30 tb_sees_line
+def_sees_line() { tq "" /loki/api/v1/query_range 'query={service="default-smoke"}' "${LOKI_WINDOW[@]}" | jq -e '.data.result | length > 0' >/dev/null 2>&1; }
+poll_until "default tenant reads its log line" 30 def_sees_line
+iso_has "team-b log query returns the line" "$TB" "hello from team-b" /loki/api/v1/query_range 'query={service="tenant-smoke"}' "${LOKI_WINDOW[@]}"
+iso_has "team-b label names include team_b_only" "$TB" '"team_b_only"' /api/v1/labels
+iso_has "default tenant label names include default_only" "" '"default_only"' /api/v1/labels
+iso_has "team-b Loki labels include team_b_only" "$TB" '"team_b_only"' /loki/api/v1/labels
+iso_has "default tenant Loki labels include default_only" "" '"default_only"' /loki/api/v1/labels
+
+# default tenant -> sees none of team-b's data.
+iso_empty "default tenant: tenant_probe query is empty" "" '.result | length == 0' /api/v1/query 'query=tenant_probe'
+iso_empty "default tenant: tenant_probe series is empty" "" 'length == 0' /api/v1/series 'match[]=tenant_probe'
+iso_lacks "default tenant: label names lack team_b_only" "" team_b_only /api/v1/labels
+iso_lacks "default tenant: metric names lack tenant_probe" "" tenant_probe /api/v1/label/__name__/values
+iso_empty "default tenant: tenant-smoke log query is empty" "" '.result | length == 0' /loki/api/v1/query_range 'query={service="tenant-smoke"}' "${LOKI_WINDOW[@]}"
+iso_lacks "default tenant: Loki label names lack team_b_only" "" team_b_only /loki/api/v1/labels
+iso_lacks "default tenant: service label values lack tenant-smoke" "" tenant-smoke /loki/api/v1/label/service/values
+
+# team-b -> sees none of the default tenant's data.
+iso_empty "team-b: default_probe query is empty" "$TB" '.result | length == 0' /api/v1/query 'query=default_probe'
+iso_empty "team-b: default_probe series is empty" "$TB" 'length == 0' /api/v1/series 'match[]=default_probe'
+iso_lacks "team-b: label names lack default_only" "$TB" default_only /api/v1/labels
+iso_lacks "team-b: metric names lack default_probe" "$TB" default_probe /api/v1/label/__name__/values
+iso_empty "team-b: default-smoke log query is empty" "$TB" '.result | length == 0' /loki/api/v1/query_range 'query={service="default-smoke"}' "${LOKI_WINDOW[@]}"
+iso_lacks "team-b: Loki label names lack default_only" "$TB" default_only /loki/api/v1/labels
+iso_lacks "team-b: service label values lack default-smoke" "$TB" default-smoke /loki/api/v1/label/service/values
+
+# One batch of 201 new series is over team-b's limit of 200 (see TENANT_SET).
+OVER=""
+for i in $(seq 1 201); do
+    OVER="$OVER{\"name\":\"tenant_limit_probe\",\"labels\":{\"i\":\"$i\"},\"timestamp_ms\":$TENANT_MS,\"value\":1},"
+done
+OVER_STATUS=$(curl -s "${TCURL[@]}" -o /dev/null -w '%{http_code}' -X POST "$TBACKEND/api/v1/ingest/metrics" \
+    -H "$TB" -H "Content-Type: application/json" -d "{\"metrics\":[${OVER%,}]}")
+[ "$OVER_STATUS" = "429" ] && log_pass "team-b: 201 new series in one batch is refused (HTTP 429)" || log_fail "team-b over-limit batch — got HTTP $OVER_STATUS, want 429"
+
+# A malformed tenant id is a client error.
+BAD_STATUS=$(curl -s "${TCURL[@]}" -o /dev/null -w '%{http_code}' -G -H 'X-Scope-OrgID: a|b' "$TBACKEND/api/v1/query" --data-urlencode 'query=tenant_probe')
+[ "$BAD_STATUS" = "400" ] && log_pass "X-Scope-OrgID 'a|b' is rejected (HTTP 400)" || log_fail "X-Scope-OrgID 'a|b' — got HTTP $BAD_STATUS, want 400"
+
 kill "$PF_PID" 2>/dev/null; PF_PID=""
 
 # ---- Restart ---------------------------------------------------------
