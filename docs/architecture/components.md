@@ -435,7 +435,11 @@ store that fails is logged, counted in
 compaction or retention call), and skipped; the others are still maintained
 (`TestRunOnceCompactsHealthyStoreToStableWhileAnotherFails`). Compaction never
 crosses stores: each store merges the blocks it holds, including the ingester
-replicas' copies of its keys.
+replicas' copies of its keys. It never crosses tenants either: the planner
+groups blocks by tenant before it groups by time. The retention pass sends each
+store the default window and the per-tenant overrides, for blocks and then for
+log chunks (`compactor.MultiLogManager`, which skips and counts a failing store
+the way blocks do).
 
 The compactor owns the policy — planning with `compactor.Plan`, the cadence,
 the retention clock, and the maintenance metrics. The store owns the mechanism:
@@ -492,6 +496,34 @@ self-observability dashboard's error rate for something that never failed. The
 gateway applies the same rule to a client that disconnects mid-proxy: `499`,
 not `503`.
 
+## Tenants
+
+A tenant is `X-Scope-OrgID` on the wire and a reserved `__tenant__=<id>` label in
+a series' or stream's identity; the default tenant, `anonymous`, carries no
+label, so everything written before tenancy is the default tenant's and needs no
+migration. The same decisions hold in all-in-one and split; this is where each
+layer takes part (`internal/tenant` owns the ID rules, the middleware and the
+overrides).
+
+| Layer | What it does for a tenant |
+|---|---|
+| Public routes (all-in-one, gateway, querier) | The tenant middleware validates the header (`400`), applies `OBS_TENANT_REQUIRED` (`401`), and puts the tenant in the request context. Each route family answers in its own error shape |
+| Write path | After validation the API adds the label (`labels.WithTenant`; clients cannot send `__tenant__`), caps the body at the tenant's push limit (`413`), and admits the push through `limits.Gate` (`429`). Because the label is part of the label set, it is part of the fingerprint, the WAL record, the block and chunk file, ring and store placement, the retry queue and the handoff, with no format change |
+| Internal RPC | `rpc.Client` sets the header from the context on every request; the ingester's and store's read and push routes refuse a request without it (`400 missing tenant`) |
+| Reads | Every local source is wrapped where it is served (`metrics.TenantSource`, `logs.TenantSource`): the all-in-one engines, the ingester's internal read routes, the store's. A named tenant gets the matcher `__tenant__=t`; the default tenant drops every series that carries the label; the label is stripped from every answer. Label names and values are computed from the tenant's own series. The gateway proxies reads to the querier unchanged, which applies the same middleware. The query engine and the merge never see `__tenant__`, and a sample's `SeriesID` is the full hash, so equal-looking series of two tenants never merge |
+| Admission | `limits.Gate` holds a per-tenant mutex across counting and appending, so the active series and stream limits are exact under concurrent pushes; a tenant with no limit takes no lock. An ingester enforces its share, ⌈limit × RF ÷ N⌉. The count is the head's, kept by `MemoryStore.TenantSeries` and `logs.Head.TenantStreams` |
+| Split write quorum | An ingester answers `429`, `rpc.Client` maps it to `rpc.ErrLimited`, and the router ranks a failed batch's cause protocol error > limited > unavailable > canceled; a key refused by more than RF − W replicas fails the batch and the gateway answers `429` |
+| Blocks | `BlockStore` writes one block per tenant when a batch spans tenants (`meta.json` `tenant`, omitted for the default); the planner groups by tenant, so compaction never merges two tenants |
+| Retention | `tenant.RetentionPolicy` (default plus per-tenant overrides) reaches the compactor and stores: a block is deleted when its `MaxTime` is older than its tenant's window; logs gain `ChunkStore.ApplyRetention`, deleting chunk files whose newest entry is older than their stream's tenant window, driven in split mode by `POST /internal/v1/logs/retention` on each store |
+
+Reads of a tenant that exists nowhere simply return nothing: there is no tenant
+registry, so a tenant exists as soon as it writes. Limits and retention come
+from environment defaults and an optional overrides file read at startup
+(`OBS_TENANT_OVERRIDES_FILE`; the querier and the store refuse it, since neither
+admits writes nor decides retention).
+What tenancy does not provide is in
+[../api/limitations.md](../api/limitations.md#tenancy).
+
 ## Observability
 
 Each component exports only the metrics for work it does. The gateway and the
@@ -502,7 +534,12 @@ member's host:port; `outcome` is `ok`, `unavailable`, or `error`), `obs_gateway_
 (see [Replication](#replication-63)), and, since
 validation now runs there, the ingest rejection counters. Each ingester counts
 the samples and lines it ingested, which shows how evenly the ring spreads
-writes. The querier exports `obs_querier_ingester_reads_total{ingester,outcome}`
+writes. The ingesters (and all-in-one) export
+`obs_tenant_active_series{tenant}` and `obs_tenant_active_streams{tenant}`, from
+the heads' per-tenant counts, and the component that decides a refusal exports
+`obs_tenant_limit_rejections_total{tenant,limit}` (`series`, `streams`,
+`push_bytes`); the access log line carries `tenant`. The compactor counts
+`obs_logs_retention_deleted_chunks_total`. The querier exports `obs_querier_ingester_reads_total{ingester,outcome}`
 and `obs_querier_store_reads_total{store,outcome}`. Each ingester exports
 `obs_ingester_store_flush_total{outcome}`, `obs_ingester_store_retries_total{outcome}`
 (`ok`, `failed`, `dropped`), and `obs_ingester_store_retry_pending_bytes`; the
