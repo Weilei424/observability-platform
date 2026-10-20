@@ -75,14 +75,13 @@ filter.
 
 These are properties of the whole system, not of the query languages.
 
-- **One compactor, no multi-tenancy.** The backend runs all-in-one or
+- **One compactor.** The backend runs all-in-one or
   split into five components
   ([../architecture/components.md](../architecture/components.md)). Writes are
   sharded over a ring of ingesters and replicated across `OBS_REPLICATION_FACTOR`
   of them; flushed data is sharded over a ring of stores and replicated across
-  `OBS_STORE_REPLICATION_FACTOR` of them. There is one compactor and no
-  multi-tenancy (Phase 6.5 in
-  [`../planning/IMPLEMENTATION_PLAN.md`](../planning/IMPLEMENTATION_PLAN.md)).
+  `OBS_STORE_REPLICATION_FACTOR` of them. There is one compactor.
+  Tenancy is covered under [Tenancy](#tenancy) below.
 - **Ring membership is static.** The gateway and querier read the ingester list
   from `OBS_INGESTER_URL` at startup; adding or removing an ingester takes a
   restart of both. There are no heartbeats, join or leave states, or hot reload.
@@ -231,8 +230,8 @@ These are properties of the whole system, not of the query languages.
   changes keeps its older blocks on its previous stores; reads cover every
   store, so answers are complete, but nothing moves those blocks and
   compaction never merges across stores, so the extra copies stay until
-  retention deletes them (never, at the default `retention` of `0s`, and
-  never for log chunks, which have no retention). A store
+  retention deletes them (never, at the default `retention` of `0s`).
+  A store
   change is staged like an ingester change: the querier and compactor gain a
   store before the ingesters flush to it
   ([../runbooks/split-demo.md](../runbooks/split-demo.md#add-or-remove-a-store)).
@@ -256,7 +255,7 @@ These are properties of the whole system, not of the query languages.
 - **Upgrading to 6.4 leaves the old blocks on one store.** A 6.3 release ran one
   store, so everything flushed before the upgrade is on that store only (in
   Helm, `store-0`; nothing re-replicates it). Until retention deletes those
-  blocks (log chunks it never deletes), an outage of that one store gives reads that answer `200` and omit
+  blocks (and log chunks), an outage of that one store gives reads that answer `200` and omit
   the older data, because a read now skips one store at R_s 3. While the
   StatefulSet grows from one store to four, expect flush and read failures
   until every store pod is ready, and `421`s from ingester and querier pods
@@ -411,10 +410,10 @@ These are properties of the whole system, not of the query languages.
   deletes whole blocks.
 - **Retention is off by default.** `retention` defaults to `0s`, which means keep
   everything forever. Set `OBS_RETENTION` to enable deletion.
-- **Logs have no compaction or retention.** Compaction and retention act on
-  metrics blocks only, in every topology. Log chunks are never merged or
-  deleted, so their disk use only grows; in split mode that is on every store
-  holding a copy.
+- **Logs have retention but no compaction.** Log chunks are never merged, so
+  small chunk files accumulate until retention deletes them; in split mode that
+  is on every store holding a copy. With the default `retention` of `0s` they
+  are never deleted either.
 - **Grafana credentials differ by runtime, and the Compose demo ships a
   throwaway password.** The Kubernetes path commits none: the Helm chart fails to
   render unless you supply `admin.password` or `admin.existingSecret`. The Compose
@@ -432,6 +431,66 @@ These are properties of the whole system, not of the query languages.
   deliberate act and set a real Grafana password first.
 - **Log structured metadata is rejected, not dropped.** A Loki push carrying a
   third element per entry fails rather than silently discarding it.
+
+## Tenancy
+
+A tenant is the `X-Scope-OrgID` header, a reserved `__tenant__` label in the
+series and stream identity, and a filter where storage is served
+([../architecture/components.md](../architecture/components.md#tenants)).
+What that does not give you:
+
+- **No authentication.** `X-Scope-OrgID` is trusted as sent, as in Mimir and
+  Loki; any client that can reach the backend can name any tenant, including
+  one it does not own. An authenticating proxy in front that sets the header is
+  the operator's job. `OBS_TENANT_REQUIRED=true` only insists the header is
+  present.
+- **No federation.** `X-Scope-OrgID: a|b` is `400 multi-tenant queries are not
+  supported`.
+- **Label names and values cost a walk over the tenant's series.** They are
+  computed from the tenant's own series, never from the index-wide lists, so
+  that no other tenant's name or value appears. For the **default tenant** that
+  walk covers **every tenant's series** (it must find and drop the labelled
+  ones), so its cost grows with total cardinality, not its own.
+- **A selector naming `__tenant__` matches nothing**, the way a label no series
+  has does, and the label is never returned.
+- **The active series and stream limits are approximate across ingesters.** In
+  split mode each ingester enforces its share, ⌈limit × RF ÷ N⌉ (never more than
+  the limit), of the tenant's limit: RF is `OBS_REPLICATION_FACTOR` and N the
+  length of `OBS_INGESTER_URL`. An uneven ring, or a tenant whose series hash
+  to few ingesters, can reach the limit on one ingester before the whole is
+  full, or hold more than the limit in total. All-in-one enforces the limit
+  exactly.
+- **A refused split batch may be partly written, and retrying will not help.**
+  As with `503`, replicas that accepted their part keep it. A retry is refused
+  again until series leave the head (a flush, then the post-flush cleanup), not
+  merely until time passes.
+- **A minority-refused key leaves that replica without the series.** A key
+  refused by at most RF − W replicas still succeeds on the quorum; the refusing
+  replica lacks the series. Reads merge replicas, so it stays readable, but that
+  replica's own head and its copies on the stores do not hold it.
+- **Active means the head.** `obs_tenant_active_series` and
+  `obs_tenant_active_streams` count series and streams in the ingester's head
+  (the same population the limits count), not flushed blocks or chunks. In
+  all-in-one `obs_active_series` counts the head **plus** blocks, so it can
+  exceed the sum of `obs_tenant_active_series`.
+- **The overrides file is read at startup only.** A change takes a restart;
+  Compose needs a recreate and Helm rolls exactly the pods that mount the file
+  (a checksum annotation). An unreadable file, an unknown key, an invalid tenant
+  ID or value, and a **negative retention** are startup errors.
+- **Logs retention granularity is a chunk file.** A file is deleted when its
+  newest entry is older than the tenant's window, so entries up to one chunk
+  older than the window stay readable. Entries in the head are not subject to
+  retention until a flush writes them to a chunk.
+- **A chunk file that vanishes during a read is skipped, not an error.** It is
+  treated as expired by retention, so a read racing a deletion answers without
+  it and says nothing.
+- **Per-tenant rate limits, query limits and shuffle sharding do not exist.**
+  The limits are body size, active series and active streams.
+- **The `tenant` metric label is bounded by the tenant count**, which the
+  operator controls only if an authenticating proxy does. Without one, a client
+  naming fresh tenants grows the label's cardinality.
+- **Mixed versions during an upgrade are unsupported** beyond the order in
+  [../runbooks/split-demo.md](../runbooks/split-demo.md#upgrading-from-64-to-65).
 
 ## Durability
 
