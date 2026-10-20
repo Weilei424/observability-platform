@@ -36,6 +36,14 @@ out.
 Grafana's Loki health check runs `vector(1)+vector(1)` as an instant query; the backend
 answers it from a constant-expression evaluator that reads no stored data.
 
+## The team-b datasource
+
+Compose also provisions **observability-platform-logs (team-b)** (uid
+`obs-loki-team-b`), the same Loki URL with `X-Scope-OrgID: team-b`. In Explore it
+shows only the streams pushed as `team-b`, none of the sample app's, and the
+sample app's streams are invisible to it, label names and values included
+([local-demo.md](local-demo.md#a-second-tenant-team-b)).
+
 ## Explore workflow
 
 **Explore → observability-platform-logs**, then work down this ladder:
