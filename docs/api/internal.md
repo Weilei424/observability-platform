@@ -25,6 +25,23 @@ keys that store owns. The querier reads every store, and the compactor drives
 each store's block maintenance in turn
 ([../architecture/components.md](../architecture/components.md)).
 
+## Tenants
+
+Every request a peer makes for a tenant carries `X-Scope-OrgID`; `rpc.Client`
+sets it from the request's context on **every** call. The six read routes and
+the two push routes **refuse a request without it**: `400` with
+`missing tenant`, so a peer that forgot the tenant fails loudly instead of
+reading, or writing, the default tenant. The default tenant is sent as
+`anonymous`. The flush-in, flush, blocks, compact, retention, drain and handoff
+routes take whole label sets or no data at all, and need no tenant.
+
+A tenant's series and streams carry the reserved label `__tenant__=<id>` in
+their label set (the default tenant carries none), so the label travels inside
+the push, flush-in and handoff bodies and is part of every hash that places a
+key. A read answer never contains it: the serving side filters by the request's
+tenant and strips the label before answering
+([../architecture/components.md](../architecture/components.md#tenants)).
+
 ## Encoding
 
 Request and response bodies are JSON. Timestamps and write generations are
@@ -218,10 +235,17 @@ so the cap never stops a valid push. A body over it is `413`.
 | Status | Meaning |
 |---|---|
 | `204` | accepted |
-| `400` | a malformed body, or labels the ingester refuses on its second validation |
+| `400` | a malformed body, labels the ingester refuses on its second validation, or no `X-Scope-OrgID` (`missing tenant`) |
+| `429` | the push would take a tenant past its share of the active series (metrics) or streams (logs) limit; nothing was written to the WAL. The share is ⌈limit × RF ÷ N⌉ |
 | `500` | the append failed |
 | `503` | the ingester is draining and takes no new writes |
 
+
+A `429` is the tenant's limit, not an outage: the gateway counts a replica that
+answered it as refusing the key, and answers `429` itself when more replicas
+refuse a key than the write quorum tolerates
+([limitations.md](limitations.md)). The ingester counts the refusal in
+`obs_tenant_limit_rejections_total`.
 
 The ingester counts what it ingests, and counts only an append failure as a
 rejection (reason `append`); the gateway already counted any validation
@@ -326,8 +350,11 @@ that fails is logged and skipped, and the others are still maintained.
 GET /internal/v1/metrics/blocks
 ```
 
-`{"blocks":[{"id":"8f0c2a91d4e6b357","level":1,"min_time":1758600000000,"max_time":1758607199000,"size_bytes":48213}]}` —
-what the compactor plans from.
+`{"blocks":[{"id":"8f0c2a91d4e6b357","level":1,"min_time":1758600000000,"max_time":1758607199000,"size_bytes":48213,"tenant":"team-b"}]}` —
+what the compactor plans from. `tenant` is the block's tenant and is omitted
+for the default tenant (every block from before tenancy): a block holds one
+tenant's series, and the compactor plans each tenant's blocks separately, so
+compaction never merges two tenants.
 
 ```http
 POST /internal/v1/metrics/compact
@@ -341,13 +368,23 @@ the count compacted before the error.
 POST /internal/v1/metrics/retention
 ```
 
-`{"now_ms":1758700000000,"retention_ms":86400000}` → `{"deleted":2}`. The clock
-and window are the compactor's; the deletion is the store's. A `500` still
-carries the count.
+`{"now_ms":1758700000000,"retention_ms":86400000,"overrides_ms":{"team-b":3600000}}` →
+`{"deleted":2}`. The clock and windows are the compactor's; the deletion is the
+store's. `retention_ms` is the default window and `overrides_ms` the per-tenant
+ones, in milliseconds; a window of `0` keeps that tenant's data forever, and a
+negative one is refused. A block is deleted when it is older than its own
+tenant's window. `overrides_ms` is optional, but a 6.4 store refuses it as an
+unknown field, which fixes the upgrade order
+([../runbooks/split-demo.md](../runbooks/split-demo.md#upgrading-from-64-to-65)).
+A `500` still carries the count.
 
 ```http
 POST /internal/v1/logs/retention
 ```
 
 The same body as `/metrics/retention` → `{"deleted":n}`, where `n` counts the
-log chunk files deleted. A `500` still carries the count.
+log chunk files deleted. A chunk file is deleted when its newest entry is older
+than its stream's tenant window, so the granularity is a whole file; an entry
+still in the head is not subject to retention until a flush writes it to a
+chunk. A read that races a deletion skips the missing file. A `500` still
+carries the count.
