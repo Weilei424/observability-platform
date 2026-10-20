@@ -85,11 +85,14 @@ services:
       OBS_LOG_LEVEL: info
       <<: *ring-env
       OBS_QUERIER_URL: http://querier:8080
+      OBS_TENANT_OVERRIDES_FILE: /etc/obs/tenant-overrides.yaml
     # Loopback only, as in docker-compose.yml. The gateway is the only component
     # published at all: the internal API on every other one stays on the
     # Compose network.
     ports:
       - "127.0.0.1:8080:8080"
+    volumes:
+      - ./tenant-overrides.yaml:/etc/obs/tenant-overrides.yaml:ro
     networks:
       default:
         aliases: [backend]
@@ -114,8 +117,16 @@ services:
       # request meant for another member, which a connection held across a
       # restart that reshuffled container addresses could otherwise deliver.
       OBS_INGESTER_SELF_URL: http://ingester-1:8080
+      # Phase 6.5: an ingester enforces its share of each tenant's limit,
+      # ceil(limit x RF / N), so it must know the gateway's RF and member list;
+      # without them it would enforce the full limit. Pinned equal to the
+      # gateway's by tests/e2e/compose_tenant_test.go.
+      OBS_INGESTER_URL: http://ingester-1:8080,http://ingester-2:8080,http://ingester-3:8080
+      OBS_REPLICATION_FACTOR: "3"
+      OBS_TENANT_OVERRIDES_FILE: /etc/obs/tenant-overrides.yaml
     volumes:
       - obs-ingester-1-data:/data
+      - ./tenant-overrides.yaml:/etc/obs/tenant-overrides.yaml:ro
 
   ingester-2:
     <<: *ingester
@@ -124,6 +135,7 @@ services:
       OBS_INGESTER_SELF_URL: http://ingester-2:8080
     volumes:
       - obs-ingester-2-data:/data
+      - ./tenant-overrides.yaml:/etc/obs/tenant-overrides.yaml:ro
 
   ingester-3:
     <<: *ingester
@@ -132,6 +144,7 @@ services:
       OBS_INGESTER_SELF_URL: http://ingester-3:8080
     volumes:
       - obs-ingester-3-data:/data
+      - ./tenant-overrides.yaml:/etc/obs/tenant-overrides.yaml:ro
 
   querier:
     restart: unless-stopped
@@ -197,6 +210,9 @@ services:
       OBS_TARGET: compactor
       OBS_LOG_LEVEL: info
       OBS_STORE_URL: http://store-1:8080,http://store-2:8080,http://store-3:8080,http://store-4:8080
+      OBS_TENANT_OVERRIDES_FILE: /etc/obs/tenant-overrides.yaml
+    volumes:
+      - ./tenant-overrides.yaml:/etc/obs/tenant-overrides.yaml:ro
     healthcheck:
       test: ["CMD", "/server", "-healthcheck"]
       interval: 5s
