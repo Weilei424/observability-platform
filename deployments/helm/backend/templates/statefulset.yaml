@@ -22,6 +22,9 @@ spec:
         # Roll the pod when configuration changes; without this a ConfigMap edit
         # leaves the old env vars in the running container indefinitely.
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with include "backend.tenantChecksum" (list . "all-in-one") }}
+        {{- . | nindent 8 }}
+        {{- end }}
     spec:
       securityContext:
         runAsNonRoot: true
@@ -77,6 +80,12 @@ spec:
           volumeMounts:
             - name: data
               mountPath: {{ .Values.config.OBS_DATA_DIR }}
+            {{- with include "backend.tenantVolumeMounts" (list . "all-in-one") }}
+            {{- . | nindent 12 }}
+            {{- end }}
+      {{- with include "backend.tenantVolumes" (list . "all-in-one") }}
+      {{- . | nindent 6 }}
+      {{- end }}
   volumeClaimTemplates:
     - metadata:
         name: data
