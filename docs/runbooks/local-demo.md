@@ -199,6 +199,50 @@ whether or not a single pre-restart sample survived — it asserted persistence 
 proved nothing. Comparing a value written *before* the restart is what makes this
 a proof rather than a gesture.
 
+## A second tenant: team-b
+
+Everything above is the default tenant, `anonymous`: no client sends a tenant
+header. The stack also defines a second tenant, `team-b`, in
+`deployments/docker/tenant-overrides.yaml` (mounted into the backend as
+`OBS_TENANT_OVERRIDES_FILE`): 200 active series, 20 active streams, and 24 h of
+retention. Nothing writes as `team-b` until you do. Write a series and a log
+line as `team-b`, then read them as each tenant:
+
+```bash
+NOW_MS=$(date +%s)000
+curl -s -X POST localhost:8080/api/v1/ingest/metrics -H 'X-Scope-OrgID: team-b' \
+  -d "{\"metrics\":[{\"name\":\"tenant_probe\",\"labels\":{\"team_b_only\":\"1\"},\"timestamp_ms\":$NOW_MS,\"value\":7}]}"
+curl -s -X POST localhost:8080/loki/api/v1/push -H 'X-Scope-OrgID: team-b' \
+  -d "{\"streams\":[{\"stream\":{\"service\":\"tenant-demo\"},\"values\":[[\"$(date +%s)000000000\",\"hello from team-b\"]]}]}"
+
+curl -s -G -H 'X-Scope-OrgID: team-b' localhost:8080/api/v1/query --data-urlencode 'query=tenant_probe'   # the sample
+curl -s -G localhost:8080/api/v1/query --data-urlencode 'query=tenant_probe'                              # empty: default tenant
+curl -s localhost:8080/api/v1/labels | grep -c team_b_only                                                    # 0: not even the label name
+```
+
+The default tenant sees none of it, not through a query, `/api/v1/series`, the
+label names, or the label values, and `team-b` sees none of the default
+tenant's. Grafana has two more provisioned datasources that send
+`X-Scope-OrgID: team-b`: **observability-platform (team-b)** (Prometheus, uid
+`obs-prometheus-team-b`) and **observability-platform-logs (team-b)** (Loki, uid
+`obs-loki-team-b`). In Explore, pick one of them and run `tenant_probe` or
+`{service="tenant-demo"}`; on the usual datasources the same query is empty.
+Grafana is not a tenant boundary, though: anyone who can edit a datasource can
+change the header.
+
+Try the limits. `team-b` may hold 200 active series, so a batch of 201 new ones
+is refused with `429` and nothing from it is written; a request with
+`X-Scope-OrgID: a|b` is `400`. The self-observability dashboard's "Active series
+by tenant", "Active streams by tenant" and "Tenant limit rejections" panels
+([self-observability.md](self-observability.md)) show the same counts. There is
+no authentication: the header is trusted as sent
+([../api/limitations.md](../api/limitations.md#tenancy)). The overrides file is
+read at startup, so after editing it run `make local-up` again to recreate the
+backend.
+
+`make smoke-compose` runs these checks end to end, both directions, including
+through the team-b Grafana datasources.
+
 ## Run the smoke test
 
 ```bash
