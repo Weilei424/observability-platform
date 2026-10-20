@@ -310,6 +310,13 @@ func setStores(p *process, urls []string) {
 // series and stream going to rs of them.
 func startClusterStores(t *testing.T, n, rf, stores, rs int) *cluster {
 	t.Helper()
+	return startClusterWith(t, n, rf, stores, rs, nil)
+}
+
+// startClusterWith is startClusterStores with set, when non-nil, applied to
+// every process's config before anything starts (tenant limits, for one).
+func startClusterWith(t *testing.T, n, rf, stores, rs int, set func(*config.Config)) *cluster {
+	t.Helper()
 	addr := map[config.Target]string{}
 	for _, target := range []config.Target{config.TargetGateway, config.TargetQuerier, config.TargetCompactor} {
 		addr[target] = freeAddr(t)
@@ -339,6 +346,12 @@ func startClusterStores(t *testing.T, n, rf, stores, rs int) *cluster {
 		c.ingesterURLs = append(c.ingesterURLs, u)
 	}
 	c.ingester, c.ingesterURL = c.ingesters[0], c.ingesterURLs[0]
+	// Each ingester knows the ring's size and RF: they set its share of each
+	// tenant's active series and stream limits.
+	for _, p := range c.ingesters {
+		p.cfg.ReplicationFactor = rf
+		p.cfg.IngesterURLs = slices.Clone(c.ingesterURLs)
+	}
 	mk := func(target config.Target, set func(*config.Config)) *process {
 		conf := cfg(target)
 		set(conf)
@@ -371,6 +384,11 @@ func startClusterStores(t *testing.T, n, rf, stores, rs int) *cluster {
 	order := []*process{c.gateway, c.querier, c.compactor}
 	order = append(order, c.ingesters...)
 	order = append(order, c.stores...)
+	if set != nil {
+		for _, p := range order {
+			set(p.cfg)
+		}
+	}
 	for _, p := range order {
 		p.start()
 		t.Cleanup(p.stop)
