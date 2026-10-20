@@ -13,6 +13,7 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/compactor"
 	"github.com/masonwheeler/observability-platform/internal/config"
 	"github.com/masonwheeler/observability-platform/internal/drain"
+	"github.com/masonwheeler/observability-platform/internal/limits"
 	"github.com/masonwheeler/observability-platform/internal/logs"
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/observability"
@@ -118,6 +119,14 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 		Logger: log,
 	})
 	sm.RegisterIngester(reg, labelsOf(storeRing.Members()))
+	// Each ingester enforces its share of a tenant's limit: with RF replicas
+	// over n ingesters it holds about RF/n of the tenant's series and streams.
+	lim := tenantLimits(cfg)
+	tm := observability.NewTenantMetrics()
+	tm.Register(reg, head.TenantSeriesCounts, logHead.TenantStreamCounts)
+	rf := max(cfg.ReplicationFactor, 1)
+	share := func(limit int) int { return limits.Share(limit, rf, len(cfg.IngesterURLs)) }
+	seriesGate, streamGate := tenantGates(lim, share, head, logHead, tm)
 
 	// The ingester's logs head tolerates flush errors so a push never fails just
 	// because the store is unreachable -- the entry is already durable in the
@@ -165,6 +174,12 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 		Registry:    reg,
 		HTTP:        inst.HTTP,
 		Ingest:      inst.Ingest,
+		Tenants:     lim,
+		// The ingester's public write routes act for the request's tenant too.
+		TenantRequired: cfg.TenantRequired,
+		OnTenantReject: tenantRejects(tm),
+		SeriesGate:     seriesGate,
+		StreamGate:     streamGate,
 		Internal: func(r chi.Router) {
 			// Refuse a request meant for another member, so a connection that
 			// reached this ingester under another's name never counts as that
@@ -174,7 +189,7 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 			}
 			rpc.MountDrain(r, drainHeads, ingesterDrainTimeout)
 			rpc.MountReads(r, head, logHead)
-			rpc.MountWrites(r, gate.Metrics(writes), gate.Logs(logHead), inst.Ingest, nil, nil)
+			rpc.MountWrites(r, gate.Metrics(writes), gate.Logs(logHead), inst.Ingest, seriesGate, streamGate)
 		},
 	})
 	mcfg := maintenanceConfig(cfg)
