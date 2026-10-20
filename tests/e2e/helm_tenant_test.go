@@ -378,3 +378,64 @@ func TestTenantKeysAreRefusedUnderRawConfig(t *testing.T) {
 		}
 	}
 }
+
+// The overrides file is mounted with subPath, which the kubelet never refreshes,
+// so the pod template carries a checksum that rolls the pod when it changes.
+func TestTenantOverridesChecksumRollsMountingPodsOnly(t *testing.T) {
+	helmAvailable(t)
+	annotated := func(sets ...string) map[string]string {
+		args := []string{"template", "obs", backendChart, "--set", "topology=split"}
+		for _, set := range sets {
+			args = append(args, "--set", set)
+		}
+		out, err := exec.Command("helm", args...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("%v\n%s", err, out)
+		}
+		got := map[string]string{}
+		dec := yaml.NewDecoder(strings.NewReader(string(out)))
+		for {
+			var o struct {
+				Kind     string `yaml:"kind"`
+				Metadata struct {
+					Name string `yaml:"name"`
+				} `yaml:"metadata"`
+				Spec struct {
+					Template struct {
+						Metadata struct {
+							Annotations map[string]string `yaml:"annotations"`
+						} `yaml:"metadata"`
+					} `yaml:"template"`
+				} `yaml:"spec"`
+			}
+			if err := dec.Decode(&o); err != nil {
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				t.Fatal(err)
+			}
+			if o.Kind == "Deployment" || o.Kind == "StatefulSet" {
+				got[splitNames[o.Metadata.Name]] = o.Spec.Template.Metadata.Annotations["checksum/tenant-overrides"]
+			}
+		}
+		return got
+	}
+	if none := annotated(); none["gateway"] != "" || none["ingester"] != "" {
+		t.Errorf("checksum present without overrides: %v", none)
+	}
+	a := annotated("tenants.overrides.team-b.max_active_series=5")
+	b := annotated("tenants.overrides.team-b.max_active_series=6")
+	for _, c := range []string{"gateway", "ingester", "compactor"} {
+		if a[c] == "" {
+			t.Errorf("%s: no checksum/tenant-overrides although it mounts the file", c)
+		}
+		if a[c] == b[c] {
+			t.Errorf("%s: checksum did not change when an override value changed", c)
+		}
+	}
+	for _, c := range []string{"querier", "store"} {
+		if a[c] != "" {
+			t.Errorf("%s: has checksum/tenant-overrides but does not mount the file", c)
+		}
+	}
+}
