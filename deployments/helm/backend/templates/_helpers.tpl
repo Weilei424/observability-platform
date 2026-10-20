@@ -162,7 +162,7 @@ backend.splitConfigMap: one split component's ConfigMap, called as (list $root
 component). split-configmaps.yaml renders all five from it, and each
 workload's checksum/config hashes only its own, so a change to one
 component's settings -- a ring stage changing the gateway's or the querier's
-ingester list -- rolls that component alone, never the ingesters or the store.
+ingester list -- rolls that component, and the ingesters when it is the gateway's (they carry its list and RF), never the store.
 */}}
 {{- define "backend.splitConfigMap" -}}
 {{- $root := index . 0 -}}
