@@ -253,6 +253,13 @@ All `obs_*` metrics exposed by the backend (scraped by the internals Prometheus)
 - `obs_gateway_write_quorum_total{outcome}` — routed write batches by quorum outcome: `full` (every replica acknowledged), `degraded` (quorum met, at least one replica failed), `failed` (quorum not met); gateway only. The "Write quorum" panel plots its rate
 - `obs_querier_ingester_reads_total{ingester,outcome}` — reads the querier sent to each ingester, by the ingester's `host:port` and outcome; querier only. `ok` is an answer; `unavailable` is an outage — a refused connection, a `5xx`, or no answer within `OBS_INGESTER_TIMEOUT` — and is the only outcome a read may skip, up to quorum − 1 ingesters, so a tolerated outage shows as `unavailable` while queries still answer `200`; `error` is a protocol error (a `4xx`, say), which is never skipped and fails the read with `500`. A read the caller cancels (Grafana abandoning a refresh) is not counted at all, and an ingester after the one that failed a read is not read, so not counted either. The "Ingester reads" panel plots its rate
 
+**Tenants:**
+- `obs_tenant_active_series{tenant}` and `obs_tenant_active_streams{tenant}` — series and streams in the ingester's (or all-in-one's) head per tenant, from the same counts the limits use; a tenant with none is not exported. These count the head only: in all-in-one `obs_active_series` also counts series in blocks, so it can exceed the sum of `obs_tenant_active_series`. The panels "Active series by tenant" and "Active streams by tenant" plot them
+- `obs_tenant_limit_rejections_total{tenant,limit}` — pushes refused where the decision is made (the ingester, all-in-one, or the gateway for body size); `limit` is `series`, `streams` or `push_bytes`. The "Tenant limit rejections" panel plots its rate
+- `obs_logs_retention_deleted_chunks_total` — log chunk files deleted by retention
+
+The `tenant` label is bounded by the number of tenants, which is the operator's to bound only behind an authenticating proxy.
+
 **Errors:**
 - `obs_collector_errors_total{collector}` — scrape-time collector failures (values: "wal", "logs")
 
