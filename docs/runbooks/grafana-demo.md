@@ -40,6 +40,16 @@ These series come from `examples/sample-app`, which emits them independently of 
 lines it pushes. The two signals describe the same fictional service without agreeing on
 any particular event, so do not read a metric spike as the cause of a log line.
 
+## The team-b datasource
+
+Compose also provisions **observability-platform (team-b)** (uid
+`obs-prometheus-team-b`), the same backend URL with an `X-Scope-OrgID: team-b`
+header. The datasource marked default is the default tenant's; the team-b one
+shows only what was written as `team-b`, so the dashboards above are empty on it
+until you do that
+([local-demo.md](local-demo.md#a-second-tenant-team-b)). Grafana is a convenience
+here, not a boundary: whoever can edit a datasource can change the header.
+
 ## Reset the demo
 
 ```bash
