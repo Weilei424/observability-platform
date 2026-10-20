@@ -12,7 +12,8 @@ import (
 // guards against for the listen port.
 func TestBackendRejectsTemplateOwnedTopologyKeys(t *testing.T) {
 	helmAvailable(t)
-	for _, key := range []string{"OBS_TARGET", "OBS_INGESTER_URL", "OBS_STORE_URL", "OBS_QUERIER_URL", "OBS_INGESTER_SELF_URL", "OBS_STORE_REPLICATION_FACTOR", "OBS_STORE_SELF_URL"} {
+	for _, key := range []string{"OBS_TARGET", "OBS_INGESTER_URL", "OBS_STORE_URL", "OBS_QUERIER_URL", "OBS_INGESTER_SELF_URL", "OBS_STORE_REPLICATION_FACTOR", "OBS_STORE_SELF_URL",
+		"OBS_TENANT_REQUIRED", "OBS_TENANT_OVERRIDES_FILE", "OBS_MAX_ACTIVE_SERIES_PER_TENANT", "OBS_MAX_ACTIVE_STREAMS_PER_TENANT", "OBS_MAX_METRICS_PUSH_BYTES", "OBS_MAX_LOGS_PUSH_BYTES"} {
 		out, err := exec.Command("helm", "template", "backend", backendChart,
 			"--set-string", "config."+key+"=x").CombinedOutput()
 		if err == nil {
