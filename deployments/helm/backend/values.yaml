@@ -111,3 +111,26 @@ split:
     resources:
       requests: { cpu: 100m, memory: 128Mi }
       limits: { memory: 512Mi }
+
+# Phase 6.5 multi-tenancy. Each setting is rendered onto exactly the targets
+# that accept it (any other target refuses it at startup), so the matching
+# config.OBS_* keys are refused. Tenants are named by the X-Scope-OrgID header.
+tenants:
+  # Refuse requests without a tenant header (all-in-one, gateway, querier).
+  required: false
+  # Per-tenant overrides, keyed by tenant id; a non-empty map renders a
+  # ConfigMap mounted at /etc/obs/tenant-overrides.yaml on the all-in-one
+  # backend, gateway, ingesters and compactor. Keys per tenant: retention,
+  # max_active_series, max_active_streams, max_metrics_push_bytes,
+  # max_logs_push_bytes. Example:
+  #   overrides:
+  #     team-b: {retention: 24h, max_active_series: 200, max_active_streams: 20}
+  # In split mode each ingester enforces its share, ceil(limit x RF / N).
+  overrides: {}
+  # Cluster-wide defaults a tenant without an override gets; 0 is unlimited
+  # (all-in-one and ingesters).
+  maxActiveSeriesPerTenant: 0
+  maxActiveStreamsPerTenant: 0
+  # Largest accepted push body, 1 to 16777216 bytes (all-in-one and gateway).
+  maxMetricsPushBytes: 1048576
+  maxLogsPushBytes: 4194304
