@@ -1,0 +1,7 @@
+# Per-tenant overrides for the demo (Phase 6.5). team-b is the second tenant
+# the Grafana "(team-b)" datasources and the smoke tests write and read as.
+overrides:
+  team-b:
+    retention: 24h
+    max_active_series: 200
+    max_active_streams: 20
