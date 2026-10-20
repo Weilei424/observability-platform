@@ -135,12 +135,21 @@ func TestComposeSplitComponentEnvironmentsLoad(t *testing.T) {
 				// Viper treats an empty variable as unset, so "" restores a default —
 				// except OBS_DATA_DIR, which config reads with LookupEnv and refuses
 				// when empty. The stateless components do not set it; give it the default.
-				for _, k := range []string{"OBS_TARGET", "OBS_INGESTER_URL", "OBS_STORE_URL", "OBS_QUERIER_URL", "OBS_INGESTER_SELF_URL", "OBS_STORE_REPLICATION_FACTOR", "OBS_STORE_SELF_URL", "OBS_STORE_RETRY_MAX_BYTES", "OBS_STORE_RETRY_MAX_AGE", "OBS_LOG_LEVEL", "OBS_LOGS_FLUSH_THRESHOLD_BYTES", "OBS_TENANT_REQUIRED", "OBS_TENANT_OVERRIDES_FILE", "OBS_MAX_ACTIVE_SERIES_PER_TENANT", "OBS_MAX_ACTIVE_STREAMS_PER_TENANT", "OBS_MAX_METRICS_PUSH_BYTES", "OBS_MAX_LOGS_PUSH_BYTES"} {
+				for _, k := range []string{"OBS_TARGET", "OBS_INGESTER_URL", "OBS_STORE_URL", "OBS_QUERIER_URL", "OBS_INGESTER_SELF_URL", "OBS_STORE_REPLICATION_FACTOR", "OBS_STORE_SELF_URL", "OBS_STORE_RETRY_MAX_BYTES", "OBS_STORE_RETRY_MAX_AGE", "OBS_LOG_LEVEL", "OBS_LOGS_FLUSH_THRESHOLD_BYTES", "OBS_TENANT_REQUIRED", "OBS_TENANT_OVERRIDES_FILE", "OBS_REPLICATION_FACTOR", "OBS_MAX_ACTIVE_SERIES_PER_TENANT", "OBS_MAX_ACTIVE_STREAMS_PER_TENANT", "OBS_MAX_METRICS_PUSH_BYTES", "OBS_MAX_LOGS_PUSH_BYTES"} {
 					t.Setenv(k, "")
 				}
 				t.Setenv("OBS_DATA_DIR", "data")
 				for k, v := range env {
 					t.Setenv(k, v)
+				}
+				// The container path is not on this host: load the same file from the
+				// repo, so the demo's overrides are parsed and validated too.
+				if env["OBS_TENANT_OVERRIDES_FILE"] != "" {
+					abs, err := filepath.Abs(filepath.FromSlash(tenantOverridesPath))
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Setenv("OBS_TENANT_OVERRIDES_FILE", abs)
 				}
 				if _, err := config.Load(); err != nil {
 					t.Fatalf("config.Load with %s's environment: %v", svc, err)
