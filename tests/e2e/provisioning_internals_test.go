@@ -274,6 +274,13 @@ func registeredMetricNames(t *testing.T) map[string]bool {
 	passes := observability.NewStoreMetrics()
 	passes.CompactorPass.WithLabelValues("http://seed-store:8080", "ok").Inc()
 	reg.MustRegister(passes.CompactorPass)
+	// The tenant metrics: the limit-rejection counter, and the per-tenant gauges
+	// for active series and streams. A gauge emits only non-zero tenants, so each
+	// source reports one tenant at a count of 1 to give the gauge a sample.
+	tenants := observability.NewTenantMetrics()
+	one := func() map[string]int { return map[string]int{"seed": 1} }
+	tenants.Register(reg, one, one)
+	tenants.LimitRejections.WithLabelValues("seed", "series").Inc()
 
 	// Gather once and discard the result before the real read below.
 	//
