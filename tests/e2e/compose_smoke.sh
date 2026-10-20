@@ -1206,18 +1206,25 @@ TB="X-Scope-OrgID: team-b"
 TENANT_MS=$(( $(date +%s) * 1000 ))
 TENANT_NS=$(date +%s%N)
 
-TB_METRIC_STATUS=$(curl -s "${CURL_TIMEOUTS[@]}" -o /dev/null -w '%{http_code}' -X POST "$BACKEND/api/v1/ingest/metrics" \
-    -H "$TB" -H "Content-Type: application/json" \
-    -d "{\"metrics\":[{\"name\":\"tenant_probe\",\"labels\":{\"job\":\"smoke\"},\"timestamp_ms\":$TENANT_MS,\"value\":7}]}")
-[ "$TB_METRIC_STATUS" = "204" ] && log_pass "team-b metric push (HTTP 204)" || log_fail "team-b metric push — got HTTP $TB_METRIC_STATUS"
-TB_LOG_STATUS=$(curl -s "${CURL_TIMEOUTS[@]}" -o /dev/null -w '%{http_code}' -X POST "$BACKEND/loki/api/v1/push" \
-    -H "$TB" -H "Content-Type: application/json" \
-    -d "{\"streams\":[{\"stream\":{\"service\":\"tenant-smoke\"},\"values\":[[\"$TENANT_NS\",\"hello from team-b\"]]}]}")
-[ "$TB_LOG_STATUS" = "204" ] && log_pass "team-b log push (HTTP 204)" || log_fail "team-b log push — got HTTP $TB_LOG_STATUS"
+push_status() { # <header-or-empty> <path> <json>
+    local hdr="${1:-X-Tenant-Smoke: none}"
+    curl -s "${CURL_TIMEOUTS[@]}" -o /dev/null -w '%{http_code}' -X POST "$BACKEND$2" \
+        -H "$hdr" -H "Content-Type: application/json" -d "$3"
+}
+# team-b writes label names (team_b_only) the default tenant never has; the
+# default tenant writes default_only, which team-b never has.
+S=$(push_status "$TB" /api/v1/ingest/metrics "{\"metrics\":[{\"name\":\"tenant_probe\",\"labels\":{\"job\":\"smoke\",\"team_b_only\":\"1\"},\"timestamp_ms\":$TENANT_MS,\"value\":7}]}")
+[ "$S" = "204" ] && log_pass "team-b metric push (HTTP 204)" || log_fail "team-b metric push — got HTTP $S"
+S=$(push_status "$TB" /loki/api/v1/push "{\"streams\":[{\"stream\":{\"service\":\"tenant-smoke\",\"team_b_only\":\"1\"},\"values\":[[\"$TENANT_NS\",\"hello from team-b\"]]}]}")
+[ "$S" = "204" ] && log_pass "team-b log push (HTTP 204)" || log_fail "team-b log push — got HTTP $S"
+S=$(push_status "" /api/v1/ingest/metrics "{\"metrics\":[{\"name\":\"default_probe\",\"labels\":{\"job\":\"smoke\",\"default_only\":\"1\"},\"timestamp_ms\":$TENANT_MS,\"value\":5}]}")
+[ "$S" = "204" ] && log_pass "default-tenant metric push (HTTP 204)" || log_fail "default-tenant metric push — got HTTP $S"
+S=$(push_status "" /loki/api/v1/push "{\"streams\":[{\"stream\":{\"service\":\"default-smoke\",\"default_only\":\"1\"},\"values\":[[\"$TENANT_NS\",\"hello from default\"]]}]}")
+[ "$S" = "204" ] && log_pass "default-tenant log push (HTTP 204)" || log_fail "default-tenant log push — got HTTP $S"
 
-# tq <header-or-empty> <path> <param=value>...: GET against the backend, body on stdout.
-# Headers go through -H; the query is URL-encoded by curl (-G --data-urlencode).
-tq() { # <header-or-empty> <path> <param=value>...
+# tq <header-or-empty> <path> <param=value>...: GET against the backend, body on
+# stdout. The query is URL-encoded by curl (-G --data-urlencode).
+tq() {
     local hdr="$1" path="$2"; shift 2
     local args=() kv
     for kv in "$@"; do args+=(--data-urlencode "$kv"); done
@@ -1229,26 +1236,69 @@ tq() { # <header-or-empty> <path> <param=value>...
 }
 LOKI_WINDOW=(start=$(( TENANT_NS - 300000000000 )) end=$(( TENANT_NS + 300000000000 )))
 
-# As team-b the probe is there (the write may land a moment after the 204 in the
-# split stack, hence the poll).
+# Both helpers demand a SUCCESSFUL answer first (.status == "success"): an error
+# body has no .data, and "nothing found" must never be satisfied by "request failed".
+iso_empty() { # <label> <header-or-empty> <jq emptiness test on .data> <path> <param=value>...
+    local label="$1" hdr="$2" test="$3" path="$4"; shift 4
+    local body; body=$(tq "$hdr" "$path" "$@")
+    if jq -e ".status == \"success\" and (.data | $test)" >/dev/null 2>&1 <<< "$body"; then
+        log_pass "$label"
+    else
+        log_fail "$label — want a successful, empty answer, got: $(printf '%s' "$body" | head -c 300)"
+    fi
+}
+iso_lacks() { # <label> <header-or-empty> <needle> <path> <param=value>...
+    local label="$1" hdr="$2" needle="$3" path="$4"; shift 4
+    local body; body=$(tq "$hdr" "$path" "$@")
+    if jq -e '.status == "success"' >/dev/null 2>&1 <<< "$body" && ! grep -qF -- "\"$needle\"" <<< "$body"; then
+        log_pass "$label"
+    else
+        log_fail "$label — want a successful answer without \"$needle\", got: $(printf '%s' "$body" | head -c 300)"
+    fi
+}
+iso_has() { # <label> <header-or-empty> <needle> <path> <param=value>... (positive control)
+    local label="$1" hdr="$2" needle="$3" path="$4"; shift 4
+    local body; body=$(tq "$hdr" "$path" "$@")
+    if jq -e '.status == "success"' >/dev/null 2>&1 <<< "$body" && grep -qF -- "$needle" <<< "$body"; then
+        log_pass "$label"
+    else
+        log_fail "$label — want a successful answer containing $needle, got: $(printf '%s' "$body" | head -c 300)"
+    fi
+}
+
+# Each tenant sees its own data (the write may land a moment after the 204 in
+# the split stack, hence the polls).
 tb_sees_probe() { [ "$(tq "$TB" /api/v1/query 'query=tenant_probe' | jq -r '.data.result[0].value[1]' 2>/dev/null)" = "7" ]; }
 wait_for "team-b reads tenant_probe = 7" 30 tb_sees_probe
+def_sees_probe() { [ "$(tq "" /api/v1/query 'query=default_probe' | jq -r '.data.result[0].value[1]' 2>/dev/null)" = "5" ]; }
+wait_for "default tenant reads default_probe = 5" 30 def_sees_probe
 tb_sees_line() { tq "$TB" /loki/api/v1/query_range 'query={service="tenant-smoke"}' "${LOKI_WINDOW[@]}" | jq -e '.data.result | length > 0' >/dev/null 2>&1; }
 wait_for "team-b reads its log line" 30 tb_sees_line
-BODY=$(tq "$TB" /loki/api/v1/query_range 'query={service="tenant-smoke"}' "${LOKI_WINDOW[@]}")
-check_contains "team-b log query returns the line" "$BODY" "hello from team-b"
+def_sees_line() { tq "" /loki/api/v1/query_range 'query={service="default-smoke"}' "${LOKI_WINDOW[@]}" | jq -e '.data.result | length > 0' >/dev/null 2>&1; }
+wait_for "default tenant reads its log line" 30 def_sees_line
+iso_has "team-b log query returns the line" "$TB" "hello from team-b" /loki/api/v1/query_range 'query={service="tenant-smoke"}' "${LOKI_WINDOW[@]}"
+iso_has "team-b label names include team_b_only" "$TB" '"team_b_only"' /api/v1/labels
+iso_has "default tenant label names include default_only" "" '"default_only"' /api/v1/labels
+iso_has "team-b Loki labels include team_b_only" "$TB" '"team_b_only"' /loki/api/v1/labels
+iso_has "default tenant Loki labels include default_only" "" '"default_only"' /loki/api/v1/labels
 
-# The default tenant sees none of it.
-BODY=$(tq "" /api/v1/query 'query=tenant_probe')
-if jq -e '.data.result | length == 0' >/dev/null 2>&1 <<< "$BODY"; then log_pass "default tenant: tenant_probe query is empty"; else log_fail "default tenant sees tenant_probe: $BODY"; fi
-BODY=$(tq "" /api/v1/series 'match[]=tenant_probe')
-if jq -e '.data | length == 0' >/dev/null 2>&1 <<< "$BODY"; then log_pass "default tenant: tenant_probe series is empty"; else log_fail "default tenant sees tenant_probe series: $BODY"; fi
-BODY=$(tq "" /api/v1/label/__name__/values)
-check_absent "default tenant: metric names lack tenant_probe" "$BODY" '"tenant_probe"'
-BODY=$(tq "" /loki/api/v1/query_range 'query={service="tenant-smoke"}' "${LOKI_WINDOW[@]}")
-if jq -e '.data.result | length == 0' >/dev/null 2>&1 <<< "$BODY"; then log_pass "default tenant: tenant-smoke log query is empty"; else log_fail "default tenant sees team-b's log line: $BODY"; fi
-BODY=$(tq "" /loki/api/v1/label/service/values)
-check_absent "default tenant: service label values lack tenant-smoke" "$BODY" '"tenant-smoke"'
+# default tenant -> sees none of team-b's data.
+iso_empty "default tenant: tenant_probe query is empty" "" '.result | length == 0' /api/v1/query 'query=tenant_probe'
+iso_empty "default tenant: tenant_probe series is empty" "" 'length == 0' /api/v1/series 'match[]=tenant_probe'
+iso_lacks "default tenant: label names lack team_b_only" "" team_b_only /api/v1/labels
+iso_lacks "default tenant: metric names lack tenant_probe" "" tenant_probe /api/v1/label/__name__/values
+iso_empty "default tenant: tenant-smoke log query is empty" "" '.result | length == 0' /loki/api/v1/query_range 'query={service="tenant-smoke"}' "${LOKI_WINDOW[@]}"
+iso_lacks "default tenant: Loki label names lack team_b_only" "" team_b_only /loki/api/v1/labels
+iso_lacks "default tenant: service label values lack tenant-smoke" "" tenant-smoke /loki/api/v1/label/service/values
+
+# team-b -> sees none of the default tenant's data.
+iso_empty "team-b: default_probe query is empty" "$TB" '.result | length == 0' /api/v1/query 'query=default_probe'
+iso_empty "team-b: default_probe series is empty" "$TB" 'length == 0' /api/v1/series 'match[]=default_probe'
+iso_lacks "team-b: label names lack default_only" "$TB" default_only /api/v1/labels
+iso_lacks "team-b: metric names lack default_probe" "$TB" default_probe /api/v1/label/__name__/values
+iso_empty "team-b: default-smoke log query is empty" "$TB" '.result | length == 0' /loki/api/v1/query_range 'query={service="default-smoke"}' "${LOKI_WINDOW[@]}"
+iso_lacks "team-b: Loki label names lack default_only" "$TB" default_only /loki/api/v1/labels
+iso_lacks "team-b: service label values lack default-smoke" "$TB" default-smoke /loki/api/v1/label/service/values
 
 # One batch of 201 new series is over team-b's limit of 200 (see above).
 OVER=""
@@ -1270,9 +1320,17 @@ tbpromquery() {
         -d '{"queries":[{"refId":"A","datasource":{"type":"prometheus","uid":"obs-prometheus-team-b"},"expr":"tenant_probe","range":true,"intervalMs":5000,"maxDataPoints":100}],"from":"now-5m","to":"now"}'
 }
 grafana_tb_sees_probe() {
-    tbpromquery | jq -e '[.. | arrays | select(length > 0) | select(all(.[]; type == "number")) | .[]] | index(7)' >/dev/null 2>&1
+    # Match the sample value in the frame's values column, not any number.
+    tbpromquery | jq -e '[.results.A.frames[]?.data.values[1][]?] | index(7)' >/dev/null 2>&1
 }
+tblokiquery() {
+    curl -s "${CURL_TIMEOUTS[@]}" -u "$GRAFANA_AUTH" -H 'Content-Type: application/json' \
+        -X POST "$GRAFANA/api/ds/query" \
+        -d '{"queries":[{"refId":"A","datasource":{"type":"loki","uid":"obs-loki-team-b"},"expr":"{service=\"tenant-smoke\"}","queryType":"range","maxLines":100,"intervalMs":1000,"maxDataPoints":100}],"from":"now-15m","to":"now"}'
+}
+grafana_tb_sees_line() { tblokiquery | grep -qF 'hello from team-b'; }
 wait_for "Grafana's team-b datasource reads tenant_probe = 7" 45 grafana_tb_sees_probe
+wait_for "Grafana's team-b Loki datasource reads the team-b line" 45 grafana_tb_sees_line
 
 # ---- The demo is still live -----------------------------------------
 echo ""
