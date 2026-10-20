@@ -804,7 +804,7 @@ func TestSplitRefusesUnstagedRingChanges(t *testing.T) {
 // many copies, and an ingester divides a tenant's series limit by it. The
 // store and compactor never read it, so it must not appear in their ConfigMaps
 // (which would also roll them).
-func TestSplitReplicationFactorReachesGatewayAndQuerierOnly(t *testing.T) {
+func TestSplitReplicationFactorReachesGatewayQuerierAndIngesterOnly(t *testing.T) {
 	helmAvailable(t)
 	seen := map[string]bool{}
 	for _, o := range renderSplit(t) {
