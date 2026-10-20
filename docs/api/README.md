@@ -33,17 +33,59 @@ Error:
 ```
 
 `warnings` is **always present on success** (as `[]` when empty) and **always
-omitted on error**. Four `errorType` values are in use:
+omitted on error**. Five `errorType` values are in use:
 
 | `errorType` | Status | Meaning |
 |---|---|---|
 | `bad_data` | 400 | The request is malformed, or asks for something outside the supported subset |
+| `unauthorized` | 401 | `OBS_TENANT_REQUIRED` is on and the request has no `X-Scope-OrgID` header |
 | `canceled` | 499 | The client abandoned the request before it finished |
 | `execution` | 500 | The query parsed but failed while running |
 | `unavailable` | 503 | A component the query needs could not be reached (split topology only) |
 
 The ingest endpoint and the Loki-compatible endpoints do **not** use this
 envelope; each surface documents its own.
+
+## Tenants
+
+Every public route reads the tenant from the `X-Scope-OrgID` header, as Mimir
+and Loki do. Two tenants writing to one deployment never see each other's
+metrics, logs, label names, label values, or series.
+
+| Header | Result |
+|---|---|
+| absent or empty | The **default tenant**, `anonymous` (`OBS_TENANT_REQUIRED=false`, the default). With `OBS_TENANT_REQUIRED=true`: `401` |
+| `X-Scope-OrgID: anonymous` | The default tenant, explicitly |
+| `X-Scope-OrgID: team-b` | Tenant `team-b` |
+| invalid ID | `400 invalid tenant ID ...` |
+| `a\|b` | `400 multi-tenant queries are not supported` |
+
+A valid ID is 1 to 150 bytes of `[A-Za-z0-9!_.*'()-]`, and not `.` or `..`.
+Every existing client (Grafana, the sample app, the load generator) sends no
+header and is the default tenant, and data written before tenancy existed is
+the default tenant's, with no migration.
+
+The tenant errors take each route family's own shape: the Prometheus envelope
+on the query routes (`errorType` `bad_data` for `400`, `unauthorized` for
+`401`), plain text on the Loki query routes, and `{"error":"..."}` on both
+write routes. `/healthz`, `/readyz`, `/metrics` and `/internal/v1` take no
+tenant on the public side.
+
+The write routes add three tenant-specific answers, each limit per tenant and
+set by environment defaults plus an optional overrides file
+(`OBS_TENANT_OVERRIDES_FILE`):
+
+| Status | Body | When |
+|---|---|---|
+| 413 | `{"error":"push body exceeds <n> bytes for tenant <t>"}` | The body is over the tenant's `max_metrics_push_bytes` (default 1 MiB) or `max_logs_push_bytes` (default 4 MiB) |
+| 429 | `{"error":"tenant <t> would exceed its active series limit (<n>)"}` | The push would take the tenant past its `max_active_series` (logs: `max_active_streams`, and the message says "streams"). Nothing of that push is written on the refusing node; samples for series already in the head are not refused |
+
+The label `__tenant__` is reserved: a client cannot send it (it is refused like
+any `__`-prefixed name except `__name__`), no response ever contains it, and a
+selector naming it matches nothing. Mind that Grafana is not a tenant boundary:
+it sends the one header its datasource is provisioned with, and the demo
+provisions a second datasource pair for `team-b`
+([../runbooks/local-demo.md](../runbooks/local-demo.md)).
 
 ## Time parameters
 
