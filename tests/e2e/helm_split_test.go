@@ -799,10 +799,11 @@ func TestSplitRefusesUnstagedRingChanges(t *testing.T) {
 	}
 }
 
-// The replication factor is a gateway and querier setting: the gateway fans
-// each write out to that many ingesters and the querier dedups that many
-// copies. The ingesters, store and compactor never read it, so it must not
-// appear in their ConfigMaps (which would also roll them).
+// The replication factor is a gateway, querier and ingester setting: the
+// gateway fans each write out to that many ingesters, the querier dedups that
+// many copies, and an ingester divides a tenant's series limit by it. The
+// store and compactor never read it, so it must not appear in their ConfigMaps
+// (which would also roll them).
 func TestSplitReplicationFactorReachesGatewayAndQuerierOnly(t *testing.T) {
 	helmAvailable(t)
 	seen := map[string]bool{}
@@ -813,7 +814,7 @@ func TestSplitReplicationFactorReachesGatewayAndQuerierOnly(t *testing.T) {
 		target := o.Data["OBS_TARGET"]
 		seen[target] = true
 		got, has := o.Data["OBS_REPLICATION_FACTOR"]
-		if target == "gateway" || target == "querier" {
+		if target == "gateway" || target == "querier" || target == "ingester" {
 			if got != "3" {
 				t.Errorf("%s OBS_REPLICATION_FACTOR = %q, want \"3\"", target, got)
 			}
