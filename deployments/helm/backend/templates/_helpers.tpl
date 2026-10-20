@@ -167,7 +167,7 @@ ingester list -- rolls that component alone, never the ingesters or the store.
 {{- define "backend.splitConfigMap" -}}
 {{- $root := index . 0 -}}
 {{- $component := index . 1 -}}
-{{- $peers := dict "gateway" (list "ingester" "querier") "ingester" (list "store") "querier" (list "ingester" "store") "store" (list) "compactor" (list "store") -}}
+{{- $peers := dict "gateway" (list "ingester" "querier") "ingester" (list "ingester" "store") "querier" (list "ingester" "store") "store" (list) "compactor" (list "store") -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -180,7 +180,7 @@ data:
   OBS_TARGET: {{ $component | quote }}
   OBS_HTTP_ADDR: {{ printf ":%d" ($root.Values.service.port | int) | quote }}
   {{- range $peer := index $peers $component }}
-  {{- if and (eq $peer "ingester") (eq $component "gateway") }}
+  {{- if and (eq $peer "ingester") (or (eq $component "gateway") (eq $component "ingester")) }}
   OBS_INGESTER_URL: {{ include "backend.ingesterURLs" (list $root (include "backend.ingesterWriteCount" $root)) | quote }}
   {{- else if eq $peer "ingester" }}
   OBS_INGESTER_URL: {{ include "backend.ingesterURLs" (list $root $root.Values.split.ingester.replicas) | quote }}
@@ -192,13 +192,17 @@ data:
   OBS_{{ upper $peer }}_URL: {{ include "backend.peerURL" (list $root $peer) | quote }}
   {{- end }}
   {{- end }}
-  {{- if eq $component "gateway" }}
+  {{- if or (eq $component "gateway") (eq $component "ingester") }}
+  {{- /* The ingester carries the gateway's ring: it enforces its share of a tenant limit, ceil(limit x RF / N), and without the RF and the list it would enforce all of it. */}}
   OBS_REPLICATION_FACTOR: {{ $root.Values.split.replicationFactor | int | toString | quote }}
   {{- else if eq $component "querier" }}
   OBS_REPLICATION_FACTOR: {{ include "backend.querierReplicationFactor" $root | quote }}
   {{- end }}
   {{- if or (eq $component "ingester") (eq $component "querier") }}
   OBS_STORE_REPLICATION_FACTOR: {{ $root.Values.split.storeReplicationFactor | int | toString | quote }}
+  {{- end }}
+  {{- with include "backend.tenantData" (list $root $component) }}
+  {{- . | nindent 2 }}
   {{- end }}
   {{- range $key, $value := $root.Values.config }}
   {{ $key }}: {{ $value | quote }}
@@ -517,9 +521,104 @@ securityContext:
   capabilities:
     drop:
       - ALL
-{{- if $stateful }}
+{{- $tenantMounts := include "backend.tenantVolumeMounts" (list $root $component) }}
+{{- if or $stateful $tenantMounts }}
 volumeMounts:
+{{- if $stateful }}
   - name: data
     mountPath: {{ $root.Values.config.OBS_DATA_DIR }}
 {{- end }}
+{{- if $tenantMounts }}
+  {{- $tenantMounts | nindent 2 }}
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{/*
+backend.tenantOverridesTargets: the targets that accept OBS_TENANT_OVERRIDES_FILE
+(internal/config/config.go refuses it on the querier and the store). Any other
+setting below is delivered the same way: only to the targets that accept it,
+because a target given a setting it does not accept fails at startup.
+*/}}
+{{- define "backend.tenantOverridesTargets" -}}
+all-in-one gateway ingester compactor
+{{- end -}}
+
+{{/*
+backend.tenantOverridesOn: "true" when the overrides file is mounted on this
+target, called as (list $root target): tenants.overrides is non-empty and the
+target accepts the file.
+*/}}
+{{- define "backend.tenantOverridesOn" -}}
+{{- $root := index . 0 -}}
+{{- $target := index . 1 -}}
+{{- if and $root.Values.tenants.overrides (has $target (splitList " " (include "backend.tenantOverridesTargets" $root))) -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+backend.tenantData: the tenant settings one target's ConfigMap carries, as
+`KEY: "value"` lines (empty when there are none), called as (list $root target).
+required: all-in-one, gateway, querier. Active-series and active-stream limits:
+all-in-one, ingester. Push-size caps: all-in-one, gateway. The overrides file:
+see backend.tenantOverridesTargets. A limit or cap at its config default is
+left out, so a default install's ConfigMap (and the all-in-one pod's
+checksum/config) is what it was before tenants.* existed.
+*/}}
+{{- define "backend.tenantData" -}}
+{{- $root := index . 0 -}}
+{{- $target := index . 1 -}}
+{{- $t := $root.Values.tenants -}}
+{{- if and $t.required (has $target (list "all-in-one" "gateway" "querier")) }}
+OBS_TENANT_REQUIRED: "true"
+{{- end }}
+{{- if has $target (list "all-in-one" "ingester") }}
+{{- if int64 $t.maxActiveSeriesPerTenant }}
+OBS_MAX_ACTIVE_SERIES_PER_TENANT: {{ $t.maxActiveSeriesPerTenant | int64 | toString | quote }}
+{{- end }}
+{{- if int64 $t.maxActiveStreamsPerTenant }}
+OBS_MAX_ACTIVE_STREAMS_PER_TENANT: {{ $t.maxActiveStreamsPerTenant | int64 | toString | quote }}
+{{- end }}
+{{- end }}
+{{- if has $target (list "all-in-one" "gateway") }}
+{{- if ne (int64 $t.maxMetricsPushBytes) 1048576 }}
+OBS_MAX_METRICS_PUSH_BYTES: {{ $t.maxMetricsPushBytes | int64 | toString | quote }}
+{{- end }}
+{{- if ne (int64 $t.maxLogsPushBytes) 4194304 }}
+OBS_MAX_LOGS_PUSH_BYTES: {{ $t.maxLogsPushBytes | int64 | toString | quote }}
+{{- end }}
+{{- end }}
+{{- if include "backend.tenantOverridesOn" (list $root $target) }}
+OBS_TENANT_OVERRIDES_FILE: "/etc/obs/tenant-overrides.yaml"
+{{- end }}
+{{- end -}}
+
+{{/* backend.tenantVolumeMounts: the overrides file's mount, or nothing. */}}
+{{- define "backend.tenantVolumeMounts" -}}
+{{- if include "backend.tenantOverridesOn" . -}}
+- name: tenant-overrides
+  mountPath: /etc/obs/tenant-overrides.yaml
+  subPath: tenant-overrides.yaml
+  readOnly: true
+{{- end -}}
+{{- end -}}
+
+{{/* backend.tenantVolumes: the pod's `volumes:` entry for the overrides, or nothing. */}}
+{{- define "backend.tenantVolumes" -}}
+{{- if include "backend.tenantOverridesOn" . -}}
+volumes:
+  - name: tenant-overrides
+    configMap:
+      name: {{ include "backend.name" (index . 0) }}-tenant-overrides
+{{- end -}}
+{{- end -}}
+
+{{/*
+backend.tenantChecksum: a pod-template annotation that rolls the pod when the
+overrides change; the file is mounted with subPath, which the kubelet never
+refreshes in a running container.
+*/}}
+{{- define "backend.tenantChecksum" -}}
+{{- if include "backend.tenantOverridesOn" . -}}
+checksum/tenant-overrides: {{ toYaml (index . 0).Values.tenants.overrides | sha256sum }}
+{{- end -}}
 {{- end -}}
