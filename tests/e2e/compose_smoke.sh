@@ -795,7 +795,9 @@ if [ "$TOPOLOGY" = split ]; then
         -H "Content-Type: application/json" --data "{\"metrics\":[${REPL_METRICS%,}]}" 2>/dev/null || echo 000)
     [ "$CODE" = 204 ] || log_fail "the replication marker batch answered $CODE, want 204"
     ingester_holds() { # <service> -> how many of this run's markers its head holds
-        dc exec -T prometheus wget -qO- --header 'Content-Type: application/json' \
+        # The internal API answers one tenant's data and requires X-Scope-OrgID
+        # (Phase 6.5); the replication markers belong to the default tenant.
+        dc exec -T prometheus wget -qO- --header 'Content-Type: application/json' --header 'X-Scope-OrgID: anonymous' \
             --post-data "{\"matchers\":[{\"name\":\"__name__\",\"value\":\"repl_marker\"},{\"name\":\"run_id\",\"value\":\"$RUN_ID\"}],\"min_ms\":$((REPL_MS - 1)),\"max_ms\":$((REPL_MS + 1))}" \
             "http://$1:8080/internal/v1/metrics/select" 2>/dev/null | jq '.series | length' 2>/dev/null
     }
@@ -1191,6 +1193,86 @@ if [ "$TOPOLOGY" = split ]; then
     wait_for "reads through the gateway recover once the ingesters are back" "$READY_TIMEOUT" ring_read_recovered
     rm -f "$RING_BODY"
     fi
+
+# ---- Tenants (Phase 6.5) --------------------------------------------
+echo ""
+echo "-- Tenants: team-b is isolated from the default tenant, limited, and visible in Grafana --"
+
+# team-b's limits come from deployments/docker/tenant-overrides.yaml: 200 active
+# series, 20 active streams. In the split stack each ingester enforces its share,
+# ceil(200 x RF 3 / 3 ingesters) = 200, so one batch of 201 new series is refused
+# in both topologies.
+TB="X-Scope-OrgID: team-b"
+TENANT_MS=$(( $(date +%s) * 1000 ))
+TENANT_NS=$(date +%s%N)
+
+TB_METRIC_STATUS=$(curl -s "${CURL_TIMEOUTS[@]}" -o /dev/null -w '%{http_code}' -X POST "$BACKEND/api/v1/ingest/metrics" \
+    -H "$TB" -H "Content-Type: application/json" \
+    -d "{\"metrics\":[{\"name\":\"tenant_probe\",\"labels\":{\"job\":\"smoke\"},\"timestamp_ms\":$TENANT_MS,\"value\":7}]}")
+[ "$TB_METRIC_STATUS" = "204" ] && log_pass "team-b metric push (HTTP 204)" || log_fail "team-b metric push — got HTTP $TB_METRIC_STATUS"
+TB_LOG_STATUS=$(curl -s "${CURL_TIMEOUTS[@]}" -o /dev/null -w '%{http_code}' -X POST "$BACKEND/loki/api/v1/push" \
+    -H "$TB" -H "Content-Type: application/json" \
+    -d "{\"streams\":[{\"stream\":{\"service\":\"tenant-smoke\"},\"values\":[[\"$TENANT_NS\",\"hello from team-b\"]]}]}")
+[ "$TB_LOG_STATUS" = "204" ] && log_pass "team-b log push (HTTP 204)" || log_fail "team-b log push — got HTTP $TB_LOG_STATUS"
+
+# tq <header-or-empty> <path> <param=value>...: GET against the backend, body on stdout.
+# Headers go through -H; the query is URL-encoded by curl (-G --data-urlencode).
+tq() { # <header-or-empty> <path> <param=value>...
+    local hdr="$1" path="$2"; shift 2
+    local args=() kv
+    for kv in "$@"; do args+=(--data-urlencode "$kv"); done
+    if [ -n "$hdr" ]; then
+        curl -s "${CURL_TIMEOUTS[@]}" -G -H "$hdr" "$BACKEND$path" "${args[@]}"
+    else
+        curl -s "${CURL_TIMEOUTS[@]}" -G "$BACKEND$path" "${args[@]}"
+    fi
+}
+LOKI_WINDOW=(start=$(( TENANT_NS - 300000000000 )) end=$(( TENANT_NS + 300000000000 )))
+
+# As team-b the probe is there (the write may land a moment after the 204 in the
+# split stack, hence the poll).
+tb_sees_probe() { [ "$(tq "$TB" /api/v1/query 'query=tenant_probe' | jq -r '.data.result[0].value[1]' 2>/dev/null)" = "7" ]; }
+wait_for "team-b reads tenant_probe = 7" 30 tb_sees_probe
+tb_sees_line() { tq "$TB" /loki/api/v1/query_range 'query={service="tenant-smoke"}' "${LOKI_WINDOW[@]}" | jq -e '.data.result | length > 0' >/dev/null 2>&1; }
+wait_for "team-b reads its log line" 30 tb_sees_line
+BODY=$(tq "$TB" /loki/api/v1/query_range 'query={service="tenant-smoke"}' "${LOKI_WINDOW[@]}")
+check_contains "team-b log query returns the line" "$BODY" "hello from team-b"
+
+# The default tenant sees none of it.
+BODY=$(tq "" /api/v1/query 'query=tenant_probe')
+if jq -e '.data.result | length == 0' >/dev/null 2>&1 <<< "$BODY"; then log_pass "default tenant: tenant_probe query is empty"; else log_fail "default tenant sees tenant_probe: $BODY"; fi
+BODY=$(tq "" /api/v1/series 'match[]=tenant_probe')
+if jq -e '.data | length == 0' >/dev/null 2>&1 <<< "$BODY"; then log_pass "default tenant: tenant_probe series is empty"; else log_fail "default tenant sees tenant_probe series: $BODY"; fi
+BODY=$(tq "" /api/v1/label/__name__/values)
+check_absent "default tenant: metric names lack tenant_probe" "$BODY" '"tenant_probe"'
+BODY=$(tq "" /loki/api/v1/query_range 'query={service="tenant-smoke"}' "${LOKI_WINDOW[@]}")
+if jq -e '.data.result | length == 0' >/dev/null 2>&1 <<< "$BODY"; then log_pass "default tenant: tenant-smoke log query is empty"; else log_fail "default tenant sees team-b's log line: $BODY"; fi
+BODY=$(tq "" /loki/api/v1/label/service/values)
+check_absent "default tenant: service label values lack tenant-smoke" "$BODY" '"tenant-smoke"'
+
+# One batch of 201 new series is over team-b's limit of 200 (see above).
+OVER=""
+for i in $(seq 1 201); do
+    OVER="$OVER{\"name\":\"tenant_limit_probe\",\"labels\":{\"i\":\"$i\"},\"timestamp_ms\":$TENANT_MS,\"value\":1},"
+done
+OVER_STATUS=$(curl -s "${CURL_TIMEOUTS[@]}" -o /dev/null -w '%{http_code}' -X POST "$BACKEND/api/v1/ingest/metrics" \
+    -H "$TB" -H "Content-Type: application/json" -d "{\"metrics\":[${OVER%,}]}")
+[ "$OVER_STATUS" = "429" ] && log_pass "team-b: 201 new series in one batch is refused (HTTP 429)" || log_fail "team-b over-limit batch — got HTTP $OVER_STATUS, want 429"
+
+# A malformed tenant id is a client error.
+BAD_STATUS=$(curl -s "${CURL_TIMEOUTS[@]}" -o /dev/null -w '%{http_code}' -G -H 'X-Scope-OrgID: a|b' "$BACKEND/api/v1/query" --data-urlencode 'query=tenant_probe')
+[ "$BAD_STATUS" = "400" ] && log_pass "X-Scope-OrgID 'a|b' is rejected (HTTP 400)" || log_fail "X-Scope-OrgID 'a|b' — got HTTP $BAD_STATUS, want 400"
+
+# Grafana's team-b datasource sends the header itself.
+tbpromquery() {
+    curl -s "${CURL_TIMEOUTS[@]}" -u "$GRAFANA_AUTH" -H 'Content-Type: application/json' \
+        -X POST "$GRAFANA/api/ds/query" \
+        -d '{"queries":[{"refId":"A","datasource":{"type":"prometheus","uid":"obs-prometheus-team-b"},"expr":"tenant_probe","range":true,"intervalMs":5000,"maxDataPoints":100}],"from":"now-5m","to":"now"}'
+}
+grafana_tb_sees_probe() {
+    tbpromquery | jq -e '[.. | arrays | select(length > 0) | select(all(.[]; type == "number")) | .[]] | index(7)' >/dev/null 2>&1
+}
+wait_for "Grafana's team-b datasource reads tenant_probe = 7" 45 grafana_tb_sees_probe
 
 # ---- The demo is still live -----------------------------------------
 echo ""
