@@ -25,6 +25,9 @@ spec:
         {{- include "backend.componentLabels" (list $root $component) | nindent 8 }}
       annotations:
         checksum/config: {{ include "backend.splitConfigMap" (list $root $component) | sha256sum }}
+        {{- with include "backend.tenantChecksum" (list $root $component) }}
+        {{- . | nindent 8 }}
+        {{- end }}
         {{- if eq $component "ingester" }}
         {{ include "backend.storeCountAnnotation" $root }}: {{ include "backend.storeWriteCount" $root | quote }}
         {{- end }}
@@ -38,6 +41,9 @@ spec:
       containers:
         - name: {{ $component }}
           {{- include "backend.splitContainer" (list $root $component true $v.resources) | nindent 10 }}
+      {{- with include "backend.tenantVolumes" (list $root $component) }}
+      {{- . | nindent 6 }}
+      {{- end }}
   volumeClaimTemplates:
     - metadata:
         name: data
