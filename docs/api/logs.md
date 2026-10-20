@@ -32,6 +32,11 @@ Body:
 
 Each entry is `["<unix_nano>", "<line>"]`, with the timestamp as a **string**.
 
+Streams are written for the tenant in `X-Scope-OrgID` (the default tenant
+without it), and every query and label endpoint below returns only that
+tenant's streams; see [README.md](README.md#tenants). The body is capped at
+4 MiB by default (per tenant: `max_logs_push_bytes`).
+
 `Content-Type`, if present, must parse to exactly `application/json`; look-alikes
 such as `application/jsonp` and protobuf bodies are rejected rather than guessed
 at.
@@ -60,6 +65,10 @@ curl -sf -X POST 'http://localhost:8080/loki/api/v1/push' \
 | 204 | empty | Every entry accepted and written to the WAL |
 | 400 | `{"errors":[{"index":0,"field":"...","message":"..."}]}` | One or more entries failed validation |
 | 400 | `{"error":"..."}` | Malformed JSON, unsupported `Content-Type`, or an empty body |
+| 401 | `{"error":"no tenant: ..."}` | `OBS_TENANT_REQUIRED` is on and the header is missing |
+| 400 | `{"error":"invalid tenant ID ..."}` | The tenant ID is invalid, or names several tenants (`a\|b`) |
+| 413 | `{"error":"push body exceeds <n> bytes for tenant <t>"}` | The body is over the tenant's cap |
+| 429 | `{"error":"tenant <t> would exceed its active streams limit (<n>)"}` | The push would take the tenant over its active streams limit; nothing was written |
 | 500 | `{"error":"internal error"}` | An entry passed validation but the append failed. Earlier entries in the batch may already have landed; the handler stops at the first failure and does not attempt the rest |
 
 ---
