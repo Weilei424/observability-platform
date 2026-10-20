@@ -1,0 +1,13 @@
+{{- if .Values.tenants.overrides }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "backend.name" . }}-tenant-overrides
+  labels:
+    {{- include "backend.labels" . | nindent 4 }}
+data:
+  # The file config.Load reads (OBS_TENANT_OVERRIDES_FILE) on every target that
+  # accepts one. Tenant ids are the keys.
+  tenant-overrides.yaml: |
+    {{- dict "overrides" .Values.tenants.overrides | toYaml | nindent 4 }}
+{{- end }}
