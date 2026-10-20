@@ -215,10 +215,10 @@ headless Service (`<ingester>-<i>.<ingester>-headless`).
 `replicas`) is how many of them, from ordinal 0, the gateway writes to, so the
 gateway's list is always a prefix of the querier's. Each workload carries a
 `checksum/config` annotation over its own ConfigMap only, so a stage rolls just
-the Deployment whose list it changes — the querier when `replicas` changes, the
+the Deployment whose list it changes (and the ingesters, one pod at a time, when it is the gateway's: they carry its list and RF) — the querier when `replicas` changes, the
 gateway when `writeReplicas` does — with its old and new pods running side by
-side for a while. Existing ingester pods, the stores, and the compactor do not
-restart. On an upgrade the chart
+side for a while. The stores and the compactor do not restart; the ingesters roll (one pod at a
+time) only when the gateway's list changes. On an upgrade the chart
 reads the ingester counts the running gateway and querier pods loaded (an
 annotation on each Deployment's pod template) and refuses a change that is not
 staged — a new gateway writing to an ingester the old querier does not read,
@@ -232,7 +232,7 @@ A real upgrade refuses them.)
 
 `split.replicationFactor` (default 3, at least 1) is how many ingesters hold each
 series and stream; the chart renders it as `OBS_REPLICATION_FACTOR` on the
-gateway and querier only, so changing it rolls just those two
+gateway, querier and ingesters (the ingesters divide a tenant's limit by it), so changing the gateway's rolls the gateway and the ingesters
 (`config.OBS_REPLICATION_FACTOR` is chart-owned and refused). The chart refuses
 a factor above `writeReplicas`, the ingesters the gateway writes to. Because
 of that refusal, removing an ingester from a three-ingester ring at factor 3
