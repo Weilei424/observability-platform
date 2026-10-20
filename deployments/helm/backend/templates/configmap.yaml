@@ -6,6 +6,11 @@
 {{- fail (printf "config.%s is not settable: the chart decides each component's target and peer URLs." $key) }}
 {{- end }}
 {{- end }}
+{{- range $key := list "OBS_TENANT_REQUIRED" "OBS_TENANT_OVERRIDES_FILE" "OBS_MAX_ACTIVE_SERIES_PER_TENANT" "OBS_MAX_ACTIVE_STREAMS_PER_TENANT" "OBS_MAX_METRICS_PUSH_BYTES" "OBS_MAX_LOGS_PUSH_BYTES" }}
+{{- if hasKey $.Values.config $key }}
+{{- fail (printf "config.%s is not settable: the chart renders the tenant settings from tenants.* onto exactly the targets that accept each one." $key) }}
+{{- end }}
+{{- end }}
 {{- if eq .Values.topology "all-in-one" -}}
 apiVersion: v1
 kind: ConfigMap
@@ -25,6 +30,9 @@ data:
   # on a port the Services and probes do not use. The guard above rejects it at
   # render time with a message naming the key that does work.
   OBS_HTTP_ADDR: {{ printf ":%d" (.Values.service.port | int) | quote }}
+  {{- with include "backend.tenantData" (list . "all-in-one") }}
+  {{- . | nindent 2 }}
+  {{- end }}
   {{- range $key, $value := .Values.config }}
   {{ $key }}: {{ $value | quote }}
   {{- end }}
