@@ -123,6 +123,9 @@ func buildQuerier(cfg *config.Config, log *slog.Logger) (*App, error) {
 		Registry:   reg,
 		HTTP:       inst.HTTP,
 		Ready:      alwaysReady,
+		// Reads go out over RPC carrying the request's tenant; each ingester
+		// and store answers only that tenant's data.
+		TenantRequired: cfg.TenantRequired,
 	})
 	return &App{Target: config.TargetQuerier, Handler: srv, log: log}, nil
 }
