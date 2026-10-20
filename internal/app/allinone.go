@@ -109,16 +109,27 @@ func BuildAllInOne(cfg *config.Config, log *slog.Logger) (*AllInOne, error) {
 	// Count all-in-one's own log-store flushes too, for the same dashboard
 	// panels the split ingester's flushes feed.
 	logStore.SetFlushHook(inst.LogFlush.Observe)
+	// One process holds every series and stream, so each tenant's limit is
+	// enforced as-is.
+	lim := tenantLimits(cfg)
+	tm := observability.NewTenantMetrics()
+	tm.Register(reg, blockStore.TenantSeriesCounts, logStore.TenantStreamCounts)
+	seriesGate, streamGate := tenantGates(lim, func(n int) int { return n }, blockStore, logStore, tm)
 	srv := api.New(api.Deps{
-		Config:      cfg,
-		Logger:      log,
-		Ingester:    store,
-		Engine:      metrics.NewQueryEngine(blockStore),
-		Registry:    reg,
-		LogIngester: logStore,
-		LogQuery:    logs.NewQueryEngine(logStore),
-		HTTP:        inst.HTTP,
-		Ingest:      inst.Ingest,
+		Config:         cfg,
+		Logger:         log,
+		Ingester:       store,
+		Engine:         metrics.NewQueryEngineFromSource(metrics.TenantSource(blockStore)),
+		Registry:       reg,
+		LogIngester:    logStore,
+		LogQuery:       logs.NewQueryEngineFromSource(logs.TenantSource(logStore)),
+		HTTP:           inst.HTTP,
+		Ingest:         inst.Ingest,
+		Tenants:        lim,
+		TenantRequired: cfg.TenantRequired,
+		OnTenantReject: tenantRejects(tm),
+		SeriesGate:     seriesGate,
+		StreamGate:     streamGate,
 	})
 	comp := compactor.New(store, blockStore, store, time.Now, maintenanceConfig(cfg),
 		inst.Maintenance, observability.Component(log, "compactor"), compactor.WithLogs(localLogs{logStore}))
