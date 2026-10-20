@@ -33,8 +33,14 @@ in the OS page cache — safe from a killed process, lost to a host crash. See
 | `timestamp_ms` | yes | Unix milliseconds |
 | `value` | yes | Float |
 
-The request body is capped at 1 MiB and must be exactly one JSON object —
-anything after it is rejected rather than ignored.
+The request body is capped at 1 MiB (per tenant: `max_metrics_push_bytes`) and
+must be exactly one JSON object — anything after it is rejected rather than
+ignored.
+
+The samples are written for the tenant in `X-Scope-OrgID` (the default tenant
+without it), and the query endpoints below return only that tenant's series;
+see [README.md](README.md#tenants). A client cannot set the reserved
+`__tenant__` label.
 
 **Example**
 
@@ -54,6 +60,10 @@ curl -sf -X POST 'http://localhost:8080/api/v1/ingest/metrics' \
 | 204 | empty | Every sample accepted |
 | 400 | `{"error":"..."}` | Invalid JSON, trailing data after the object, or an empty/missing `metrics` array |
 | 400 | `{"errors":[{"index":0,"field":"name","message":"..."}]}` | One or more entries failed validation; `index` is the position in the array |
+| 401 | `{"error":"no tenant: ..."}` | `OBS_TENANT_REQUIRED` is on and the header is missing |
+| 400 | `{"error":"invalid tenant ID ..."}` | The tenant ID is invalid, or names several tenants (`a\|b`) |
+| 413 | `{"error":"push body exceeds <n> bytes for tenant <t>"}` | The body is over the tenant's cap |
+| 429 | `{"error":"tenant <t> would exceed its active series limit (<n>)"}` | The push would take the tenant over its active series limit; nothing was written. In split mode this is the gateway's answer when more replicas refuse a series than the write quorum tolerates |
 | 500 | `{"error":"internal error"}` | The append failed |
 
 These are **not** the Prometheus envelope. This endpoint is not
