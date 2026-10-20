@@ -34,6 +34,10 @@ func buildGateway(cfg *config.Config, log *slog.Logger) (*App, error) {
 		labels = append(labels, rpc.MemberLabel(m))
 	}
 	rm.Register(reg, labels, true)
+	// The gateway holds no head: it counts push-size refusals only; each
+	// ingester counts its own series and stream refusals.
+	tm := observability.NewTenantMetrics()
+	tm.Register(reg, nil, nil)
 	rf := max(cfg.ReplicationFactor, 1)
 	// Background replica pushes run detached from the request context, so the
 	// per-request timeout is what ends a push to a hung ingester.
@@ -76,6 +80,10 @@ func buildGateway(cfg *config.Config, log *slog.Logger) (*App, error) {
 		Ready:     alwaysReady,
 		Upstreams: &api.Upstreams{Querier: querier},
 		Writes:    router,
+
+		Tenants:        tenantLimits(cfg),
+		TenantRequired: cfg.TenantRequired,
+		OnTenantReject: tenantRejects(tm),
 	})
 	return &App{
 		Target: config.TargetGateway, Handler: srv, log: log,
