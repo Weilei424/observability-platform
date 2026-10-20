@@ -965,6 +965,102 @@ Decisions from the design:
   Flushed data survives every store restarting, still on exactly its replica set
   (`TestStoreClusterRestartKeepsStores`).
 
+### Multi-tenant boundaries (introduced in 6.5)
+
+Two tenants share one deployment and never see each other's data. The design is
+`docs/superpowers/specs/2026-10-13-phase-6.5-multi-tenant-design.md`; this section
+records its decisions.
+
+Decisions from the design:
+
+| Question | Decision |
+|---|---|
+| A request without `X-Scope-OrgID` | Configurable: `OBS_TENANT_REQUIRED` (default `false`). Off: the default tenant `anonymous`. On: `401` on the public routes. |
+| Where per-tenant values come from | Environment defaults plus an optional overrides file (`OBS_TENANT_OVERRIDES_FILE`), read at startup only. |
+| How active series/stream limits count in split mode | Global, shared out: each ingester enforces ⌈limit × RF ÷ N⌉; all-in-one enforces the limit exactly. |
+| How a tenant is represented | A reserved `__tenant__` label in the identity, the tenant in the request context, filtered where storage is served. The default tenant carries no label. |
+| Retention for logs | Metrics and logs: logs gain retention in this phase. |
+
+- **Label plus context.** A tenant's series and streams carry `__tenant__=<id>`, so it
+  is part of the fingerprint, the WAL record, the block and chunk file, the ring and
+  store placement, the retry queue and the handoff, with no format change
+  (`TestWithTenantAndTenantOf`). The **default tenant has no label**, so pre-6.5 data
+  and series IDs are the default tenant's and nothing is migrated. Public validation
+  already refuses every `__` name but `__name__`, so a client cannot forge the label
+  (`TestPublicNewRefusesTheTenantLabel`); stored-data decoders use a second
+  constructor that also accepts a valid non-default `__tenant__` (`labels.NewStored`,
+  `metrics.NewStoredLabels`, `logs.NewStoredStreamLabels`; `TestNewStored`). The tenant
+  rides in the context (`tenant.Inject`/`From`) and on `rpc.Client`'s every request.
+- **Wrappers where the data is served.** `metrics.TenantSource` and
+  `logs.TenantSource` wrap every local source at the point it is served: the
+  all-in-one engines, and the ingester's and store's internal read routes. A named
+  tenant adds the matcher `__tenant__=t`; the default tenant drops every series that
+  carries the label; the label is stripped from every answer. Label names and values
+  come from the tenant's own series, never the index-wide lists, at the price of a
+  walk over the tenant's series, which for the default tenant covers every tenant's
+  series. A selector naming `__tenant__` matches nothing
+  (`TestTenantSourceSeesOnlyItsOwnSeries`,
+  `TestTenantSourceLabelNamesAndValuesArePerTenant`,
+  `TestTenantSourceSelectorNamingTheTenantLabelMatchesNothing`). Wrapping where it is
+  served keeps the query engine, the merge and the API free of tenant logic, and
+  cross-tenant series with equal visible labels cannot merge because `SeriesID` is the
+  full hash. Internal read and push routes refuse a request with no tenant (`400
+  missing tenant`) so a peer that forgets it fails loudly instead of reading the
+  default tenant (`TestInternalReadsRefuseAMissingTenant`).
+- **Gate admission.** `limits.Gate` admits a push per tenant: it takes that
+  tenant's mutex, counts the batch's series not already in the head (deduplicated),
+  refuses the whole push over the limit, and otherwise appends while still holding the
+  mutex, so admission is exact under concurrent pushes and a tenant without a limit
+  takes no lock (`TestAdmitIsExactUnderConcurrentPushes`,
+  `TestUnlimitedTenantRunsWithoutCounting`). "Active" is the head, the population
+  `obs_active_series` already counted; the heads keep per-tenant counts under their
+  own locks. The refusal is `429` before anything reaches the WAL; in split mode the
+  ingester's `429` becomes `rpc.ErrLimited`, ranked protocol error > limited >
+  unavailable > cancellation in the write router and the store sink alike, and a key
+  refused by more than RF − W replicas fails the batch (`TestRouterQuorumErrorIsLimited`,
+  `TestGatewayAnswers429ForLimitedQuorum`). The share ⌈limit × RF ÷ N⌉ is
+  approximate (`TestShare`), and a refused split batch may be partly written, like a
+  `503`.
+- **Per-tenant blocks.** `block.Meta.Tenant` (`json:"tenant,omitempty"`; empty is the
+  default tenant). `BlockStore` writes one block per tenant when a batch spans tenants,
+  on both the local flush and the store's flush-in, so handoff keeps tenants; the
+  planner groups by tenant, so compaction never merges two (`TestBlockStore_IngestSeriesChunks_OneBlockPerTenant`).
+  `ApplyRetention(now, policy)` deletes a block older than its own tenant's window
+  (`TestBlockStore_ApplyRetention_PerTenant`); the retention request gained
+  `overrides_ms`.
+- **Logs retention.** `ChunkStore.ApplyRetention(now, policy)` renames every chunk
+  file whose newest entry is older than its stream's tenant cutoff into `chunks-tmp`
+  under the store's lock, drops the refs, drops streams left without chunks, rewrites
+  the manifest, and removes the files outside the lock; `OpenChunkStore` sweeps the
+  tmp directory. Reads decode chunk files outside the lock, so a chunk file missing at
+  read time is treated as expired and skipped, never an error
+  (`TestChunkStoreRetentionDeletesOnlyExpiredTenantChunks`,
+  `TestChunkStoreReadRacingRetentionSkipsDeletedChunk`,
+  `TestChunkStoreRestartAfterPartialDeletion`). The granularity is a chunk file, and
+  head entries are not subject to retention until flushed. Split: the compactor calls
+  the new `POST /internal/v1/logs/retention` on every store through
+  `compactor.MultiLogManager`; all-in-one's maintenance loop calls the local store.
+- **Upgrade order.** Queriers and gateways, then ingesters and stores, then the
+  compactor, because the 6.5 retention request carries `overrides_ms`, which a 6.4
+  store refuses as an unknown field; no non-default tenant is sent until every
+  component runs 6.5.
+- **Deployment.** Compose (both stacks) mounts `deployments/docker/tenant-overrides.yaml`
+  (`team-b`) on exactly the targets that accept the setting, and the split ingesters get
+  the RF and ring (`TestComposeTenantOverridesOnExactlyTheAcceptingTargets`,
+  `TestComposeSplitIngestersKnowTheRFAndTheRing`); two Grafana datasources send
+  `X-Scope-OrgID: team-b` (`TestTeamBDatasourcesProvisioning`). Helm: `tenants.*`, a
+  checksummed overrides ConfigMap on exactly the pods that take it
+  (`TestTenantOverridesConfigMapIsMountedOnExactlyTheAcceptingTargets`,
+  `TestTenantOverridesChecksumRollsMountingPodsOnly`).
+- **Observability.** `obs_tenant_active_series{tenant}`,
+  `obs_tenant_active_streams{tenant}`, `obs_tenant_limit_rejections_total{tenant,limit}`,
+  `obs_logs_retention_deleted_chunks_total`; `tenant` on the access log. In
+  all-in-one `obs_active_series` counts head plus blocks, so it can exceed the sum of
+  the per-tenant gauge, which counts the head only.
+- **Not provided.** Authentication (the header is trusted as sent), federation (`a|b`
+  is `400`), runtime reload of the overrides file, per-tenant rate and query limits.
+  See `docs/api/limitations.md`.
+
 ---
 
 ## API Boundaries
@@ -1093,6 +1189,11 @@ The backend exposes the following metrics at `/metrics`, scraped by a separate P
 - `obs_querier_ingester_reads_total{ingester, outcome}` — querier reads per ingester and outcome (`ok`, `unavailable`, `error`)
 
 In split, `obs_active_series` counts the ingester's head series and `obs_log_streams_total` the store's persisted streams.
+
+**Tenants (6.5):**
+- `obs_tenant_active_series{tenant}`, `obs_tenant_active_streams{tenant}` — head series and streams per tenant (a tenant with none is not exported)
+- `obs_tenant_limit_rejections_total{tenant,limit}` — refused pushes, `limit` ∈ `series`, `streams`, `push_bytes`
+- `obs_logs_retention_deleted_chunks_total` — log chunk files deleted by retention
 
 **Errors:**
 - `obs_collector_errors_total{collector}` — scrape-time collector failures
