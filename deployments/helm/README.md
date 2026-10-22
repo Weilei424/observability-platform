@@ -108,6 +108,15 @@ the new count are never read. It cannot see a handoff either. And a release
 from before 6.4 has no annotation, so nothing is checked on the upgrade to
 6.4.
 
+**Upgrading from 6.4: log retention now deletes.** `OBS_RETENTION` used to
+delete metrics blocks only; from 6.5 it also deletes log chunk files older than
+the window, and the first maintenance pass after the upgrade does it. A release
+that runs with `OBS_RETENTION=7d` loses every log older than 7 days then, and the
+deletion is irreversible. `OBS_RETENTION` is one value for metrics and logs, so
+to keep logs longer set it larger before upgrading (or leave it at `0s`, which
+disables retention), or give a tenant `retention: 0s` in the overrides file to
+exempt that tenant.
+
 **Upgrading a 6.3 split release.** 6.3 ran one store, so every block and log
 chunk flushed before the upgrade is on `store-0` alone, and nothing copies it
 to the new stores. Until retention deletes those blocks (log chunks are never
