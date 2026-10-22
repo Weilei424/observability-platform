@@ -3,12 +3,14 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 
 	"github.com/masonwheeler/observability-platform/internal/limits"
 	"github.com/masonwheeler/observability-platform/internal/observability"
 	"github.com/masonwheeler/observability-platform/internal/rpc"
+	"github.com/masonwheeler/observability-platform/internal/tenant"
 )
 
 // statusClientClosedConnection is Prometheus's own convention (see upstream's
@@ -86,6 +88,29 @@ func writeLokiEvalError(w http.ResponseWriter, r *http.Request, logMsg string, e
 	}
 }
 
+// limitKind maps a write route's component to the limit it can hit.
+func limitKind(component string) string {
+	if component == "logs_push" {
+		return "streams"
+	}
+	return "series"
+}
+
+// limitMessage is the public 429 body for a refused routed write (spec section
+// 7.2): the tenant and its configured limit, never the ingester's share of it
+// or the peer that refused.
+func (s *Server) limitMessage(r *http.Request, kind string) string {
+	id := tenant.From(r.Context())
+	if s.tenants == nil {
+		return fmt.Sprintf("tenant %s would exceed its active %s limit", id, kind)
+	}
+	n := s.tenants.MaxActiveSeries(id)
+	if kind == "streams" {
+		n = s.tenants.MaxActiveStreams(id)
+	}
+	return fmt.Sprintf("tenant %s would exceed its active %s limit (%d)", id, kind, n)
+}
+
 // writeRouteError answers a write the gateway could not route (spec section
 // 5.3): an ingester outage is 503 in the write routes' {"error": ...} shape, a
 // client that went away is 499 with no body, and anything else -- an ingester
@@ -107,11 +132,11 @@ func (s *Server) writeRouteError(w http.ResponseWriter, r *http.Request, compone
 		switch {
 		case isLimited(err):
 			log.Warn("write refused by tenant limit", attrs...)
-			msg := qe.Error()
-			if qe.Cause != nil {
-				msg = qe.Cause.Error()
+			kind := qe.Kind
+			if kind == "" {
+				kind = limitKind(component)
 			}
-			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": msg})
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": s.limitMessage(r, kind)})
 		case isUnavailable(err):
 			log.Warn("write quorum not met", attrs...)
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": qe.Error()})
@@ -127,7 +152,7 @@ func (s *Server) writeRouteError(w http.ResponseWriter, r *http.Request, compone
 	case isLimited(err):
 		observability.Component(observability.FromContext(r.Context()), component).Warn(
 			"write refused by tenant limit", slog.String("error", err.Error()))
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": s.limitMessage(r, limitKind(component))})
 	case isUnavailable(err):
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "ingester unavailable"})
 	case isCanceled(err):
