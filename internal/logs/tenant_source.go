@@ -30,7 +30,7 @@ func (t tenantSource) SelectStreams(ctx context.Context, matchers []index.Pair, 
 	if err != nil {
 		return nil, err
 	}
-	out := got[:0]
+	out := make([]StreamData, 0, len(got))
 	for _, sd := range got {
 		if labels.TenantOf(sd.Labels) != id {
 			continue
