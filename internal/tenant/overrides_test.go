@@ -69,3 +69,12 @@ func TestLoadOverridesRefusesBadInput(t *testing.T) {
 		t.Fatal("a missing file must refuse to start")
 	}
 }
+
+func TestLoadOverridesEmptyFileMeansNone(t *testing.T) {
+	for _, body := range []string{"", "  \n\n", "# nothing yet\n"} {
+		m, err := LoadOverrides(writeFile(t, body))
+		if err != nil || len(m) != 0 {
+			t.Fatalf("%q: %v %v", body, m, err)
+		}
+	}
+}
