@@ -199,6 +199,17 @@ whether or not a single pre-restart sample survived — it asserted persistence 
 proved nothing. Comparing a value written *before* the restart is what makes this
 a proof rather than a gesture.
 
+## Upgrading from 6.4
+
+**Upgrading from 6.4: log retention now deletes.** `OBS_RETENTION` used to
+delete metrics blocks only; from 6.5 it also deletes log chunk files older than
+the window, and the first maintenance pass after the upgrade does it. A release
+that runs with `OBS_RETENTION=7d` loses every log older than 7 days then, and the
+deletion is irreversible. `OBS_RETENTION` is one value for metrics and logs, so
+to keep logs longer set it larger before upgrading (or leave it at `0s`, which
+disables retention), or give a tenant `retention: 0s` in the overrides file to
+exempt that tenant.
+
 ## A second tenant: team-b
 
 Everything above is the default tenant, `anonymous`: no client sends a tenant
