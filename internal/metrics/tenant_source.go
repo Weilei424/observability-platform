@@ -31,7 +31,7 @@ func (t tenantSource) Select(ctx context.Context, p SelectParams) ([]SeriesData,
 	if err != nil {
 		return nil, err
 	}
-	out := got[:0]
+	out := make([]SeriesData, 0, len(got))
 	for _, sd := range got {
 		if labels.TenantOf(sd.Labels) != id {
 			continue
