@@ -489,6 +489,17 @@ What that does not give you:
 - **The `tenant` metric label is bounded by the tenant count**, which the
   operator controls only if an authenticating proxy does. Without one, a client
   naming fresh tenants grows the label's cardinality.
+- **Upgrading from 6.4: log retention now deletes.** `OBS_RETENTION` used to
+  delete metrics blocks only; from 6.5 it also deletes log chunk files, on the
+  first maintenance pass after the upgrade, irreversibly. `OBS_RETENTION=7d`
+  loses every log older than 7 days. It is one value for metrics and logs: set
+  it larger before upgrading, leave it at `0s`, or exempt a tenant with
+  `retention: 0s` in the overrides file.
+- **`obs_tenant_limit_rejections_total{limit="series"|"streams"}` counts once per
+  refusing replica**, so one refused split push adds up to RF.
+- **The ingester's own public write routes do not apply `OBS_TENANT_REQUIRED` or
+  the per-tenant push caps**; those settings are gateway and all-in-one only.
+  Write through the gateway.
 - **Mixed versions during an upgrade are unsupported** beyond the order in
   [../runbooks/split-demo.md](../runbooks/split-demo.md#upgrading-from-64-to-65).
 
