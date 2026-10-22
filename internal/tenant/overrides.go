@@ -2,7 +2,9 @@ package tenant
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -44,7 +46,7 @@ func LoadOverrides(path string) (map[string]Override, error) {
 	}
 	dec := yaml.NewDecoder(bytes.NewReader(raw))
 	dec.KnownFields(true)
-	if err := dec.Decode(&doc); err != nil {
+	if err := dec.Decode(&doc); err != nil && !errors.Is(err, io.EOF) { // io.EOF: empty or comment-only file means no overrides
 		return nil, fmt.Errorf("tenant overrides %s: %w", path, err)
 	}
 	out := make(map[string]Override, len(doc.Overrides))
