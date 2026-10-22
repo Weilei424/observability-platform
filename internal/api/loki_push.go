@@ -125,6 +125,10 @@ func (s *Server) handleLokiPush(w http.ResponseWriter, r *http.Request) {
 		if nullLabel {
 			continue
 		}
+		if len(streamLabels) > maxNamedTenantLabels && tenant.From(r.Context()) != tenant.Default {
+			recordValidationError(i, "labels", "too many labels: maximum is 254 for a named tenant (one label is reserved for the tenant)", len(st.Values))
+			continue
+		}
 		sl, err := logs.NewStreamLabels(streamLabels)
 		if err != nil {
 			var ve *logs.ValidationError
