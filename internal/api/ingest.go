@@ -21,6 +21,10 @@ const (
 
 // pushCap is the push-body cap for the request's tenant: its configured limit,
 // or def when no limits are configured.
+// maxNamedTenantLabels is the label cap before the tenant label is added: the
+// stored form allows 255, and a named tenant's series carries one more.
+const maxNamedTenantLabels = 254
+
 func (s *Server) pushCap(r *http.Request, def int64, limit func(*tenant.Limits, string) int64) int64 {
 	if s.tenants == nil {
 		return def
@@ -122,6 +126,10 @@ func (s *Server) handleIngestMetrics(w http.ResponseWriter, r *http.Request) {
 		}
 		labelMap["__name__"] = entry.Name
 
+		if len(labelMap) > maxNamedTenantLabels && tenant.From(r.Context()) != tenant.Default {
+			recordValidationError(i, "labels", "too many labels: maximum is 254 for a named tenant (one label is reserved for the tenant)")
+			continue
+		}
 		labels, err := metrics.NewLabels(labelMap)
 		if err != nil {
 			var ve *metrics.ValidationError
