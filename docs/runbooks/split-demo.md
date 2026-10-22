@@ -516,15 +516,35 @@ wire is the order in which components must be upgraded:
    `overrides_ms`, which a 6.4 store refuses as an unknown field, so a 6.5
    compactor against a 6.4 store would fail every retention pass.
 
+**The staged order is required, not just advised.** A 6.4 gateway or querier
+sends no `X-Scope-OrgID`, and a 6.5 ingester or store answers `400 missing
+tenant` on its internal read and push routes, which the 6.4 side turns into a
+`500`. While old gateway or querier pods talk to new ingesters or stores,
+default-tenant writes and reads fail. Upgrading queriers and gateways first,
+then ingesters and stores, then the compactor avoids that window. One `helm
+upgrade` rolls every workload at once and does not enforce the order, so expect
+a short window of `500`s until the gateway and querier have rolled; to avoid it,
+upgrade the querier and gateway, then the ingesters and stores, then the
+compactor, waiting for each rollout. In Compose recreate the services in that
+order.
+
 **Send no non-default tenant until every component runs 6.5.** Until then only
 default-tenant data exists, so an old ingester that ignores the header leaks
 nothing, and one that sees a `__tenant__` label refuses it as reserved, so a
-premature tenant write fails instead of landing in the wrong place. One `helm upgrade`
-rolls every workload and does not enforce the order, so with a client that sends
-a tenant, hold it back until the rollout finishes; to be strict, upgrade the
-querier and gateway, then the ingesters and stores, then the compactor, waiting
-for each rollout. In Compose recreate the services in that order. The overrides file is read at startup: a change rolls the pods
-that mount it (Helm) or needs a recreate (Compose).
+premature tenant write fails instead of landing in the wrong place. With a
+client that sends a tenant, hold it back until the rollout finishes.
+
+The overrides file is read at startup: a change rolls the pods that mount it
+(Helm) or needs a recreate (Compose).
+
+**Upgrading from 6.4: log retention now deletes.** `OBS_RETENTION` used to
+delete metrics blocks only; from 6.5 it also deletes log chunk files older than
+the window, and the first maintenance pass after the upgrade does it. A release
+that runs with `OBS_RETENTION=7d` loses every log older than 7 days then, and the
+deletion is irreversible. `OBS_RETENTION` is one value for metrics and logs, so
+to keep logs longer set it larger before upgrading (or leave it at `0s`, which
+disables retention), or give a tenant `retention: 0s` in the overrides file to
+exempt that tenant.
 
 ## The team-b demo, split
 
