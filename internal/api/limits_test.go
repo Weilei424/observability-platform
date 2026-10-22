@@ -92,7 +92,7 @@ func TestSeriesLimitAppliesToAnonymous(t *testing.T) {
 type limitedWrites struct{}
 
 func (limitedWrites) PushSamples(context.Context, []metrics.PendingSample) error {
-	return &rpc.QuorumError{Kind: "series", Cause: fmt.Errorf("%w: peer: tenant b would exceed", rpc.ErrLimited)}
+	return &rpc.QuorumError{Kind: "series", Ingesters: []string{"http://10.0.0.7:8080"}, Cause: fmt.Errorf("%w: http://10.0.0.7:8080/internal/v1/push: tenant team-b would exceed its active series limit (2)", rpc.ErrLimited)}
 }
 func (limitedWrites) PushEntries(context.Context, []logs.PendingEntry) error { return nil }
 
@@ -103,9 +103,47 @@ func TestGatewayAnswers429ForLimitedQuorum(t *testing.T) {
 		Logger:    slog.New(slog.NewTextHandler(os.Stderr, nil)),
 		Upstreams: &api.Upstreams{Querier: q},
 		Writes:    limitedWrites{},
+		Tenants:   seriesLimits(map[string]int{"team-b": 7}),
 	})
-	rr := pushJobs(srv, "", "a")
-	if rr.Code != http.StatusTooManyRequests || !strings.Contains(rr.Body.String(), "would exceed") {
+	rr := pushJobs(srv, "team-b", "a")
+	want := `{"error":"tenant team-b would exceed its active series limit (7)"}`
+	if rr.Code != http.StatusTooManyRequests || strings.TrimSpace(rr.Body.String()) != want {
 		t.Fatalf("gateway: %d %s", rr.Code, rr.Body)
+	}
+	if strings.Contains(rr.Body.String(), "/internal/") || strings.Contains(rr.Body.String(), "10.0.0.7") {
+		t.Fatalf("body leaks peer: %s", rr.Body)
+	}
+}
+
+func TestNamedTenantRefuses255UserLabels(t *testing.T) {
+	srv, _ := gatedServer(t, seriesLimits(nil))
+	lbls := map[string]string{}
+	for i := 0; i < 254; i++ { // plus __name__ = 255 labels
+		lbls[fmt.Sprintf("l%03d", i)] = "v"
+	}
+	body := func() []byte {
+		b, _ := json.Marshal(map[string]any{"metrics": []map[string]any{{"name": "up", "labels": lbls, "timestamp_ms": 1000, "value": 1}}})
+		return b
+	}
+	if rr := tenantReq(srv, http.MethodPost, "/api/v1/ingest/metrics", "team-b", body()); rr.Code != http.StatusBadRequest {
+		t.Fatalf("named tenant at 255 labels: %d %s", rr.Code, rr.Body)
+	}
+	if rr := tenantReq(srv, http.MethodPost, "/api/v1/ingest/metrics", "", body()); rr.Code != http.StatusNoContent {
+		t.Fatalf("default tenant at 255 labels: %d %s", rr.Code, rr.Body)
+	}
+}
+
+func TestNamedTenantRefuses255LogLabels(t *testing.T) {
+	srv, _ := newTenantServer(t, tenantOpts{})
+	lbls := map[string]string{}
+	for i := 0; i < 255; i++ {
+		lbls[fmt.Sprintf("l%03d", i)] = "v"
+	}
+	b, _ := json.Marshal(map[string]any{"streams": []map[string]any{{"stream": lbls, "values": [][]string{{"1700000000000000000", "x"}}}}})
+	if rr := tenantReq(srv, http.MethodPost, "/loki/api/v1/push", "team-b", b); rr.Code != http.StatusBadRequest {
+		t.Fatalf("named tenant: %d %s", rr.Code, rr.Body)
+	}
+	if rr := tenantReq(srv, http.MethodPost, "/loki/api/v1/push", "", b); rr.Code != http.StatusNoContent {
+		t.Fatalf("default tenant: %d %s", rr.Code, rr.Body)
 	}
 }
