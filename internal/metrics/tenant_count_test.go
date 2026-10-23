@@ -109,3 +109,37 @@ func TestTenantCount_BlockStoreReportsHeadOnly(t *testing.T) {
 		t.Fatal("BlockStore pass-through wrong")
 	}
 }
+
+// All-in-one flushes into its own blocks and keeps a flushed series in the head
+// index (blocks still cover it), but a series with no head samples is no longer
+// active: the count drops, and new samples count it again.
+func TestTenantCount_BlockStoreFlushDropsTheCount(t *testing.T) {
+	bs := newSinkTarget(t)
+	l := tenantSeries(t, "team-b", "flushed")
+	for i := range 120 { // exactly one sealed chunk: nothing stays open
+		if err := bs.Append(l, int64(i)*1000, float64(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := bs.TenantSeries("team-b"); got != 1 {
+		t.Fatalf("before flush = %d, want 1", got)
+	}
+	if _, err := bs.FlushBlock(); err != nil {
+		t.Fatal(err)
+	}
+	if got := bs.TenantSeries("team-b"); got != 0 {
+		t.Fatalf("after flush = %d, want 0", got)
+	}
+	if c := bs.TenantSeriesCounts(); len(c) != 0 {
+		t.Fatalf("counts after flush = %v, want empty", c)
+	}
+	if bs.HasSeries(metrics.SeriesID(l.Hash())) {
+		t.Fatal("HasSeries true for a series with no head samples")
+	}
+	if err := bs.Append(l, 200_000, 1); err != nil {
+		t.Fatal(err)
+	}
+	if got := bs.TenantSeries("team-b"); got != 1 || !bs.HasSeries(metrics.SeriesID(l.Hash())) {
+		t.Fatalf("after a new sample = %d (has %v), want 1 and true", got, bs.HasSeries(metrics.SeriesID(l.Hash())))
+	}
+}
