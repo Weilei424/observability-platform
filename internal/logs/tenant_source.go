@@ -25,6 +25,13 @@ func (t tenantSource) matchers(ctx context.Context, m []index.Pair) []index.Pair
 }
 
 func (t tenantSource) SelectStreams(ctx context.Context, matchers []index.Pair, minTs, maxTs int64) ([]StreamData, error) {
+	// The tenant label is internal: a selector naming it matches nothing, even
+	// for the tenant whose ID it names.
+	for _, m := range matchers {
+		if m.Name == tenant.Label {
+			return []StreamData{}, nil
+		}
+	}
 	id := tenant.From(ctx)
 	got, err := t.inner.SelectStreams(ctx, t.matchers(ctx, matchers), minTs, maxTs)
 	if err != nil {
