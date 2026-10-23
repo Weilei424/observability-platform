@@ -58,8 +58,11 @@ type memorySeries struct {
 type MemoryStore struct {
 	mu     sync.RWMutex
 	series map[SeriesID]*memorySeries
-	// tenantSeries counts head series per tenant: the population obs_active_series
-	// reports. Zero entries are deleted. Guarded by mu.
+	// tenantSeries counts, per tenant, the series that hold samples in the head:
+	// a tenant's active series (Phase 6.5). A series flushed out of the head is
+	// not active even while the index keeps it because a block still covers it
+	// (all-in-one), and counts again with its next sample. Zero entries are
+	// deleted. Guarded by mu.
 	tenantSeries map[string]int
 	idx          *index.MemPostings
 	nextGen      int64        // the smallest generation the next append may take
@@ -164,8 +167,10 @@ func (s *MemoryStore) appendInternal(lbls Labels, timestampMs int64, value float
 	if !ok {
 		ms = &memorySeries{labels: lbls}
 		s.series[id] = ms
-		s.tenantSeries[labels.TenantOf(lbls)]++
 		s.idx.Add(uint64(id), labelsToIndexPairs(lbls))
+	}
+	if len(ms.chunks) == 0 {
+		s.tenantSeries[labels.TenantOf(lbls)]++
 	}
 	if len(ms.chunks) == 0 || ms.chunks[len(ms.chunks)-1].Sealed() {
 		ms.chunks = append(ms.chunks, chunk.NewChunk())
@@ -315,17 +320,23 @@ func (s *MemoryStore) RemoveEmptySeries(id SeriesID) bool {
 	if !ok || len(ms.chunks) > 0 {
 		return false
 	}
+	// An empty series was already uncounted when its last chunk left the head.
 	delete(s.series, id)
-	t := labels.TenantOf(ms.labels)
-	if s.tenantSeries[t]--; s.tenantSeries[t] <= 0 {
-		delete(s.tenantSeries, t)
-	}
 	s.idx.Delete(uint64(id), labelsToIndexPairs(ms.labels))
 	return true
 }
 
-// TenantCounter reports how many series a tenant holds in the head, and whether
-// a series is there at all: what the per-tenant admission gate reads.
+// uncountLocked drops one active series from its tenant's count. The caller
+// holds s.mu and has just emptied the series' head.
+func (s *MemoryStore) uncountLocked(l Labels) {
+	t := labels.TenantOf(l)
+	if s.tenantSeries[t]--; s.tenantSeries[t] <= 0 {
+		delete(s.tenantSeries, t)
+	}
+}
+
+// TenantCounter reports how many series a tenant holds samples for in the
+// head, and whether a series does: what the per-tenant admission gate reads.
 type TenantCounter interface {
 	TenantSeries(id string) int
 	HasSeries(id SeriesID) bool
@@ -333,19 +344,21 @@ type TenantCounter interface {
 
 var _ TenantCounter = (*MemoryStore)(nil)
 
-// TenantSeries returns the number of head series tenant id holds.
+// TenantSeries returns the number of series tenant id holds samples for in the head.
 func (s *MemoryStore) TenantSeries(id string) int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.tenantSeries[id]
 }
 
-// HasSeries reports whether the head holds series id.
+// HasSeries reports whether the head holds samples for series id. A series the
+// index keeps only because a block covers it is not active: admitting a new
+// sample for it counts against the limit again.
 func (s *MemoryStore) HasSeries(id SeriesID) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	_, ok := s.series[id]
-	return ok
+	ms, ok := s.series[id]
+	return ok && len(ms.chunks) > 0
 }
 
 // TenantSeriesCounts returns a copy of the per-tenant head series counts;
@@ -531,6 +544,9 @@ func (s *MemoryStore) DiscardSealedChunks(toDiscard []SeriesChunks) {
 				keep = append(keep, c)
 				keepSegs = append(keepSegs, ms.chunkSegs[i])
 			}
+		}
+		if len(ms.chunks) > 0 && len(keep) == 0 {
+			s.uncountLocked(ms.labels)
 		}
 		ms.chunks = keep
 		ms.chunkSegs = keepSegs
