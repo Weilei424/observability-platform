@@ -1009,8 +1009,11 @@ if [ "$TOPOLOGY" = split ]; then
         if wait_for_port "$pod port-forward is ready" 30 "http://localhost:18081/healthz"; then
             # The 204 comes at quorum (2 of 3); the third replica may land a moment later.
             for _ in $(seq 1 10); do
+                # Internal reads require a tenant (Phase 6.5); the markers are
+                # the default tenant's.
                 HELD=$(curl -s --max-time 10 -X POST "http://localhost:18081/internal/v1/metrics/select" \
-                    -H "Content-Type: application/json" -d "$REPL_SELECT" | jq '.series | length' 2>/dev/null)
+                    -H "Content-Type: application/json" -H "X-Scope-OrgID: anonymous" \
+                    -d "$REPL_SELECT" | jq '.series | length' 2>/dev/null)
                 [ "${HELD:-0}" = "$REPL_N" ] && break
                 sleep 1
             done
