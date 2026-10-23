@@ -469,8 +469,10 @@ What that does not give you:
   replica lacks the series. Reads merge replicas, so it stays readable, but that
   replica's own head and its copies on the stores do not hold it.
 - **Active means the head.** `obs_tenant_active_series` and
-  `obs_tenant_active_streams` count series and streams in the ingester's head
-  (the same population the limits count), not flushed blocks or chunks. In
+  `obs_tenant_active_streams` count series and streams holding samples or
+  entries in the ingester's head (the same population the limits count), not
+  flushed blocks or chunks: a flush frees a tenant's limit, and a flushed series
+  counts again with its next sample. In
   all-in-one `obs_active_series` counts the head **plus** blocks, so it can
   exceed the sum of `obs_tenant_active_series`.
 - **The overrides file is read at startup only.** A change takes a restart;
