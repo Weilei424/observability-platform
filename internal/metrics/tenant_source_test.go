@@ -156,7 +156,9 @@ func TestTenantSourceSelectorNamingTheTenantLabelMatchesNothing(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			src := metrics.TenantSource(base)
 			p := metrics.SelectParams{Selector: metrics.Selector{Matchers: []metrics.Matcher{{Name: tenant.Label, Value: "team-b"}}}, MinT: 0, MaxT: 2000}
-			for _, id := range []string{tenant.Default, "other"} {
+			// team-b too: its own label is internal, so naming it matches nothing
+			// even when the value is its own tenant.
+			for _, id := range []string{tenant.Default, "other", "team-b"} {
 				got, err := src.Select(tenant.Inject(context.Background(), id), p)
 				if err != nil || len(got) != 0 {
 					t.Fatalf("%s reading {__tenant__=\"team-b\"}: %v, %v", id, got, err)
