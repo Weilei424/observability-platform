@@ -160,7 +160,9 @@ func TestTenantSourceSelectorNamingTheTenantLabelMatchesNothing(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			src := TenantSource(r)
 			m := []index.Pair{{Name: tenant.Label, Value: "team-b"}}
-			for _, id := range []string{tenant.Default, "other"} {
+			// team-b too: its own label is internal, so naming it matches nothing
+			// even when the value is its own tenant.
+			for _, id := range []string{tenant.Default, "other", "team-b"} {
 				got, err := src.SelectStreams(tenant.Inject(context.Background(), id), m, 0, 3000)
 				if err != nil || len(got) != 0 {
 					t.Fatalf("%s reading {__tenant__=\"team-b\"}: %v, %v", id, got, err)
