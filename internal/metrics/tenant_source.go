@@ -16,13 +16,22 @@ import (
 //
 // A named tenant's read adds the matcher __tenant__=<id>, which the index
 // answers from postings; the default tenant's read drops every series that
-// carries the label. A selector that names __tenant__ itself therefore
-// matches nothing.
+// carries the label. A selector that names __tenant__ itself matches nothing,
+// for every tenant including the one it names: the label is internal, and no
+// series a caller can see carries it.
 func TenantSource(src Source) Source { return tenantSource{src: src} }
 
 type tenantSource struct{ src Source }
 
 func (t tenantSource) Select(ctx context.Context, p SelectParams) ([]SeriesData, error) {
+	for _, m := range p.Selector.Matchers {
+		if m.Name == tenant.Label {
+			if err := p.Validate(); err != nil {
+				return nil, err
+			}
+			return []SeriesData{}, nil
+		}
+	}
 	id := tenant.From(ctx)
 	if id != tenant.Default {
 		p.Selector.Matchers = append(append([]Matcher(nil), p.Selector.Matchers...), Matcher{Name: tenant.Label, Value: id})
