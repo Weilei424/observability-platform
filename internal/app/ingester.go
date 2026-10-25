@@ -241,8 +241,10 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 			// The drain above made the one bounded attempt to flush the logs
 			// head; closing without another flush keeps a store outage from
 			// being retried (and reported) a second time past the deadline.
-			// Whatever it could not flush stays in the logs WAL.
-			{component: "logs", msg: "logs WAL close error", close: logHead.CloseWithoutFlush},
+			// Whatever it could not flush stays in the logs WAL. The close is
+			// bounded too: behind a drain request's flush that holds the head
+			// past the budget, it syncs the WAL and leaves it open.
+			{component: "logs", msg: "logs WAL close error", closeCtx: logHead.CloseWithoutFlushContext},
 		},
 		log: log,
 	}, nil
