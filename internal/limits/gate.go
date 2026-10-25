@@ -32,7 +32,15 @@ func Share(limit, rf, n int) int {
 	if n <= 0 {
 		n = 1
 	}
-	share := (limit*rf + n - 1) / n
+	if rf >= n {
+		return limit // limit*rf/n >= limit, and the share never exceeds the limit
+	}
+	rf = max(rf, 1)
+	// ceil(limit*rf/n) without forming limit*rf, which overflows for a large
+	// limit: with q, r = limit/n, limit%n it is q*rf + ceil(r*rf/n). rf < n
+	// keeps q*rf below the limit, and r*rf below n*n.
+	q, r := limit/n, limit%n
+	share := q*rf + (r*rf+n-1)/n
 	return min(max(share, 1), limit)
 }
 
