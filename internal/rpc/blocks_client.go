@@ -3,6 +3,7 @@ package rpc
 import (
 	"context"
 	"github.com/masonwheeler/observability-platform/internal/tenant"
+	"math"
 	"net/http"
 	"time"
 
@@ -77,5 +78,12 @@ func retentionMs(d time.Duration) int64 {
 	if d%time.Millisecond != 0 {
 		ms++
 	}
-	return ms
+	// Rounding up the longest Duration passes what converts back to one;
+	// sending the largest that does keeps it the same positive retention.
+	return min(ms, maxRetentionMs)
 }
+
+// maxRetentionMs is the longest retention, in milliseconds, that converts back
+// to a time.Duration without overflowing. The store refuses anything longer: an
+// overflow would turn negative, which reads as "keep forever".
+const maxRetentionMs = math.MaxInt64 / int64(time.Millisecond)
