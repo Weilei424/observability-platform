@@ -11,7 +11,9 @@ import (
 
 // The shutdown drain reports what the logs flush hook cannot: a metrics
 // failure, a logs flush that never got the head lock, or lines left behind.
-// A logs flush failure the hook already logged is not reported twice.
+// A logs flush failure the hook already logged is not reported twice, and
+// after any failed flush the head is not asked whether it is empty: that takes
+// the lock without a deadline.
 func TestIngesterDrainErr(t *testing.T) {
 	lockWait := fmt.Errorf("%w: %w", logs.ErrLockWait, errors.New("context deadline exceeded"))
 	hooked := errors.New("store unavailable") // a sink failure the hook logged
@@ -29,7 +31,13 @@ func TestIngesterDrainErr(t *testing.T) {
 		{"lines left behind", nil, nil, false, "head not empty"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ingesterDrainErr(tc.metricsErr, tc.logErr, tc.logsEmpty)
+			empty := func() bool {
+				if tc.logErr != nil {
+					t.Fatal("asked whether the head is empty after a failed flush; that waits on the lock again")
+				}
+				return tc.logsEmpty
+			}
+			err := ingesterDrainErr(tc.metricsErr, tc.logErr, empty)
 			switch {
 			case tc.want == "" && err != nil:
 				t.Fatalf("err = %v, want nil", err)
