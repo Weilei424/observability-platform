@@ -91,8 +91,10 @@ type Deps struct {
 	// otherwise it acts for the default tenant.
 	TenantRequired bool
 
-	// OnTenantReject, when set, is told of each request refused by a tenant
-	// limit (limit is "push_bytes"). It may be nil.
+	// OnTenantReject, when set, is told of each request refused by a tenant's
+	// push cap from Tenants (limit is "push_bytes"). A refusal by the fixed
+	// caps (no Tenants) is not a tenant limit and is not reported. It may be
+	// nil.
 	OnTenantReject func(tenant, limit string)
 
 	// SeriesGate and StreamGate, when set, admit local metrics and log writes
