@@ -32,7 +32,9 @@ sets it from the request's context on **every** call. The six read routes and
 the two push routes **refuse a request without it**: `400` with
 `missing tenant`, so a peer that forgot the tenant fails loudly instead of
 reading, or writing, the default tenant. The default tenant is sent as
-`anonymous`. The flush-in, flush, blocks, compact, retention, drain and handoff
+`anonymous`. A push must also carry only that tenant's label sets: a series or
+stream whose `__tenant__` names another tenant (or none, under a named header),
+or a mix, is `400` before anything is admitted or appended. The flush-in, flush, blocks, compact, retention, drain and handoff
 routes take whole label sets or no data at all, and need no tenant.
 
 A tenant's series and streams carry the reserved label `__tenant__=<id>` in
@@ -235,7 +237,7 @@ so the cap never stops a valid push. A body over it is `413`.
 | Status | Meaning |
 |---|---|
 | `204` | accepted |
-| `400` | a malformed body, labels the ingester refuses on its second validation, or no `X-Scope-OrgID` (`missing tenant`) |
+| `400` | a malformed body, labels the ingester refuses on its second validation, no `X-Scope-OrgID` (`missing tenant`), or a label set of another tenant than the header's |
 | `429` | the push would take a tenant past its share of the active series (metrics) or streams (logs) limit; nothing was written to the WAL. The share is ⌈limit × RF ÷ N⌉ |
 | `500` | the append failed |
 | `503` | the ingester is draining and takes no new writes |
