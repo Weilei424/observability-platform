@@ -962,4 +962,4 @@ Spec: `docs/superpowers/specs/2026-10-13-phase-6.5-multi-tenant-design.md` · Pl
 
 **Verification**
 - [x] `go test -race ./...`, `go vet ./...`, `golangci-lint run ./...` and `helm lint deployments/helm/backend` all pass (2026-10-19); `make smoke-compose` 102 passed / 0 failed and `make smoke-compose-split` 154 passed / 0 failed, both on 2026-10-19
-- [ ] Verify: kind split in CI with the tenant checks — pending CI
+- [x] Verify: kind split in CI with the tenant checks — job "Helm + Kubernetes E2E (kind, split)" passed in CI on 2026-10-25 at `302d0bc`, with all five jobs green (https://github.com/Weilei424/observability-platform/actions/runs/40174029799)
