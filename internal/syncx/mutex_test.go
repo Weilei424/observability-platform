@@ -70,3 +70,18 @@ func TestMutexUnlockOfUnlockedPanics(t *testing.T) {
 	var m Mutex
 	m.Unlock()
 }
+
+func TestMutexTryLock(t *testing.T) {
+	var m Mutex
+	if !m.TryLock() {
+		t.Fatal("TryLock of an unlocked Mutex failed")
+	}
+	if m.TryLock() {
+		t.Fatal("TryLock of a locked Mutex succeeded")
+	}
+	m.Unlock()
+	if !m.TryLock() {
+		t.Fatal("TryLock after Unlock failed")
+	}
+	m.Unlock()
+}
