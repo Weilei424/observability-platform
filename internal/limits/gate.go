@@ -4,6 +4,7 @@ package limits
 
 import (
 	"fmt"
+	"math/bits"
 	"sort"
 	"sync"
 )
@@ -36,11 +37,15 @@ func Share(limit, rf, n int) int {
 		return limit // limit*rf/n >= limit, and the share never exceeds the limit
 	}
 	rf = max(rf, 1)
-	// ceil(limit*rf/n) without forming limit*rf, which overflows for a large
-	// limit: with q, r = limit/n, limit%n it is q*rf + ceil(r*rf/n). rf < n
-	// keeps q*rf below the limit, and r*rf below n*n.
+	// ceil(limit*rf/n) without overflowing: with q, r = limit/n, limit%n it is
+	// q*rf + ceil(r*rf/n). rf < n keeps q*rf below the limit; r*rf+n-1 can
+	// still exceed an int when n is large, so that term is formed in 128 bits.
+	// It is below n*n, so its quotient by n fits (bits.Div64 needs hi < n).
 	q, r := limit/n, limit%n
-	share := q*rf + (r*rf+n-1)/n
+	hi, lo := bits.Mul64(uint64(r), uint64(rf))
+	lo, carry := bits.Add64(lo, uint64(n-1), 0)
+	extra, _ := bits.Div64(hi+carry, lo, uint64(n))
+	share := q*rf + int(extra)
 	return min(max(share, 1), limit)
 }
 
