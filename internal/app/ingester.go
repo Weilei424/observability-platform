@@ -174,8 +174,10 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 		Registry:    reg,
 		HTTP:        inst.HTTP,
 		Ingest:      inst.Ingest,
-		Tenants:     lim,
-		// The ingester's public write routes act for the request's tenant too.
+		// No Tenants: per-tenant push caps belong to the gateway and
+		// all-in-one, so the ingester's own public write routes keep the fixed
+		// caps. Its limit gates below still read lim. The routes still act
+		// for the request's tenant.
 		TenantRequired: cfg.TenantRequired,
 		OnTenantReject: tenantRejects(tm),
 		SeriesGate:     seriesGate,
@@ -222,8 +224,9 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 			// ingesterDrainTimeout. Both heads are attempted. A failed logs
 			// flush is already logged once by the flush hook above, so this
 			// reports only what the hook cannot: the gate or a metrics failure,
-			// or lines left in the head. On failure the data is still in the
-			// WAL and replays on the next start.
+			// a logs flush that never got the head lock, or lines left in the
+			// head (ingesterDrainErr). On failure the data is still in the WAL
+			// and replays on the next start.
 			{component: "flush", msg: "drain failed: unflushed data stays in this ingester's WAL until it restarts", closeCtx: func(ctx context.Context) error {
 				ctx, cancel := context.WithTimeout(ctx, ingesterDrainTimeout)
 				defer cancel()
@@ -232,13 +235,7 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 				}
 				metricsErr := writes.Drain(ctx)
 				logsErr := logHead.FlushContext(ctx)
-				if metricsErr != nil {
-					return fmt.Errorf("metrics: %w", metricsErr)
-				}
-				if logsErr == nil && !logHead.Empty() {
-					return errors.New("logs: head not empty after the drain")
-				}
-				return nil
+				return ingesterDrainErr(metricsErr, logsErr, logHead.Empty())
 			}},
 			{component: "wal", msg: "wal close error", close: w.Close},
 			// The drain above made the one bounded attempt to flush the logs
@@ -249,4 +246,24 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 		},
 		log: log,
 	}, nil
+}
+
+// ingesterDrainErr is the shutdown drain's verdict: what the logs flush hook
+// cannot report. That is a metrics failure, a logs flush that gave up waiting
+// for the head lock (it never reached the hook), or lines left in the head
+// after a flush that returned nil. A logs flush failure the hook already logged
+// is not reported twice. Every failure is kept, so a metrics error does not
+// hide a logs one.
+func ingesterDrainErr(metricsErr, logsErr error, logsEmpty bool) error {
+	var errs []error
+	if metricsErr != nil {
+		errs = append(errs, fmt.Errorf("metrics: %w", metricsErr))
+	}
+	switch {
+	case errors.Is(logsErr, logs.ErrLockWait):
+		errs = append(errs, fmt.Errorf("logs: %w", logsErr))
+	case logsErr == nil && !logsEmpty:
+		errs = append(errs, errors.New("logs: head not empty after the drain"))
+	}
+	return errors.Join(errs...)
 }
