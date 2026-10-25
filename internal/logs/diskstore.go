@@ -12,10 +12,12 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/tenant"
 )
 
-// logWAL is the WAL surface Head needs: durable append, whole-head checkpoint, close.
+// logWAL is the WAL surface Head needs: durable append, whole-head checkpoint,
+// sync, close.
 type logWAL interface {
 	WriteRecord(labels []logwal.LabelPair, tsNs int64, line string) error
 	Checkpoint() error
+	Sync() error
 	Close() error
 }
 
