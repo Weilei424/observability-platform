@@ -195,3 +195,22 @@ func TestTenantAIsolatedFromTenantBOnEveryReadRoute(t *testing.T) {
 	check("", "jobdefault", "jobteamb")
 	check("team-b", "jobteamb", "jobdefault")
 }
+
+// Without a tenant resolver the push caps are the fixed safety caps, not a
+// tenant's limit: a refusal is still a 413, but it is not counted as a
+// per-tenant limit rejection.
+func TestFixedPushCapIsNotATenantRejection(t *testing.T) {
+	var rejected []string
+	srv, _ := newTenantServer(t, tenantOpts{onReject: func(tn, l string) { rejected = append(rejected, tn+"/"+l) }})
+	huge := []byte(`{"metrics":[]` + strings.Repeat(" ", 5<<20) + `}`)
+	if rr := tenantReq(srv, http.MethodPost, "/api/v1/ingest/metrics", "team-b", huge); rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("metrics over the fixed cap: %d %s", rr.Code, rr.Body)
+	}
+	hugeLogs := []byte(`{"streams":[]` + strings.Repeat(" ", 5<<20) + `}`)
+	if rr := tenantReq(srv, http.MethodPost, "/loki/api/v1/push", "team-b", hugeLogs); rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("logs over the fixed cap: %d %s", rr.Code, rr.Body)
+	}
+	if len(rejected) != 0 {
+		t.Fatalf("fixed-cap refusals counted as tenant rejections: %v", rejected)
+	}
+}
