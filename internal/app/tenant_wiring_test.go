@@ -190,4 +190,12 @@ func TestIngesterPublicWritesIgnoreTenantPushCaps(t *testing.T) {
 	if rec := doAs(h, "team-b", http.MethodPost, "/loki/api/v1/push", logBody); rec.Code != http.StatusNoContent {
 		t.Errorf("team-b log write to the ingester = %d, want 204 under the fixed cap", rec.Code)
 	}
+	// A write over the fixed cap is refused, but it is not a tenant's limit.
+	huge := `{"metrics":[]` + strings.Repeat(" ", 2<<20) + `}`
+	if rec := doAs(h, "team-b", http.MethodPost, "/api/v1/ingest/metrics", huge); rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("team-b write over the fixed cap = %d, want 413", rec.Code)
+	}
+	if m := doAs(h, "", http.MethodGet, "/metrics", "").Body.String(); strings.Contains(m, `limit="push_bytes"`) {
+		t.Errorf("a fixed-cap refusal is counted as a tenant push_bytes rejection")
+	}
 }
