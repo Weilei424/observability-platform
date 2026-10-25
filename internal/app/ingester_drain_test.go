@@ -1,11 +1,14 @@
 package app_test
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -80,4 +83,82 @@ func TestIngesterShutdownDrainHonorsTheShutdownBudget(t *testing.T) {
 	if d := time.Since(start); d > 5*time.Second {
 		t.Fatalf("CloseContext took %v with a 300ms budget", d)
 	}
+}
+
+// syncBuffer is a bytes.Buffer safe for a logger and a test to share.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// A shutdown drain that cannot get the logs head lock within its budget gives
+// up then: it does not wait on that lock a second time without a deadline.
+func TestIngesterShutdownDrainGivesUpOnAHeldLogsLock(t *testing.T) {
+	reached := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	store := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(reached) })
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(store.Close)
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock) // runs before store.Close
+
+	cfg := testConfig(t, config.TargetIngester)
+	cfg.StoreURL = store.URL
+	cfg.StoreURLs = []string{store.URL}
+	var logBuf syncBuffer
+	a, err := app.Build(cfg, slog.New(slog.NewTextHandler(&logBuf, nil)))
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if rec := do(a.Handler, http.MethodPost, "/loki/api/v1/push", oneLine); rec.Code != http.StatusNoContent {
+		t.Fatalf("logs push = %d, want 204", rec.Code)
+	}
+	// A drain request (an ingester leaving the ring) flushes the logs head
+	// under its lock and hangs on the store when the shutdown starts.
+	go do(a.Handler, http.MethodPost, "/internal/v1/drain", "")
+	select {
+	case <-reached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the drain never reached the store")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	closed := make(chan struct{})
+	go func() { a.CloseContext(ctx); close(closed) }()
+	deadline := time.After(3 * time.Second)
+	for !strings.Contains(logBuf.String(), "drain failed") {
+		select {
+		case <-deadline:
+			unblock()
+			<-closed
+			t.Fatalf("the drain did not give up within 3s of a 200ms budget; log:\n%s", logBuf.String())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if !strings.Contains(logBuf.String(), "waiting for the head lock") {
+		t.Errorf("the drain failure does not name the lock wait; log:\n%s", logBuf.String())
+	}
+	unblock()
+	<-closed
 }
