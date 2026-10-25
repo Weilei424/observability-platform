@@ -1285,17 +1285,40 @@ func deleteWALSegmentsUpTo(walDir string, maxIdx int) error {
 // is a metrics-layer concern; the block package must not depend on it. Catching
 // the mismatch at load means the per-series decode in SelectSeries cannot
 // silently drop a corrupt or malformed series at query time.
+//
+// It also checks that every series belongs to the tenant meta.json names (empty
+// for the default tenant). Retention expires a block by that tenant's window
+// and compaction groups by it, so a corrupt tenant field must stop the block
+// from loading rather than let another tenant's retention delete it. A block
+// mixing tenants fails the same way.
 func validateBlockSeries(r *block.Reader) error {
+	want := r.Meta().Tenant
 	for _, se := range r.Series() {
-		labels, err := blockPairsToLabels(se.Labels)
+		l, err := blockPairsToLabels(se.Labels)
 		if err != nil {
 			return fmt.Errorf("series %d: %w", se.ID, err)
 		}
-		if labels.Hash() != se.ID {
-			return fmt.Errorf("series %d label set fingerprints to %d", se.ID, labels.Hash())
+		if l.Hash() != se.ID {
+			return fmt.Errorf("series %d label set fingerprints to %d", se.ID, l.Hash())
+		}
+		owner := labels.TenantOf(l)
+		if owner == tenant.Default {
+			owner = ""
+		}
+		if owner != want {
+			return fmt.Errorf("series %d belongs to tenant %q but the block's meta names tenant %q", se.ID, displayTenant(owner), displayTenant(want))
 		}
 	}
 	return nil
+}
+
+// displayTenant names a block tenant for an error message: meta.json stores the
+// default tenant as "".
+func displayTenant(t string) string {
+	if t == "" {
+		return tenant.Default
+	}
+	return t
 }
 
 // blockChunkStats holds the ground-truth figures reconstructed by decoding every
