@@ -46,8 +46,17 @@ func LoadOverrides(path string) (map[string]Override, error) {
 	}
 	dec := yaml.NewDecoder(bytes.NewReader(raw))
 	dec.KnownFields(true)
-	if err := dec.Decode(&doc); err != nil && !errors.Is(err, io.EOF) { // io.EOF: empty or comment-only file means no overrides
-		return nil, fmt.Errorf("tenant overrides %s: %w", path, err)
+	if err := dec.Decode(&doc); err != nil {
+		if !errors.Is(err, io.EOF) { // io.EOF: an empty or comment-only file means no overrides
+			return nil, fmt.Errorf("tenant overrides %s: %w", path, err)
+		}
+	} else {
+		// A second document would otherwise be ignored -- its limits and even
+		// its unknown keys -- while startup succeeded.
+		var extra any
+		if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("tenant overrides %s: the file must hold one YAML document", path)
+		}
 	}
 	out := make(map[string]Override, len(doc.Overrides))
 	for id, f := range doc.Overrides {
