@@ -3,6 +3,7 @@ package rpc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -12,6 +13,7 @@ import (
 	"github.com/masonwheeler/observability-platform/internal/logs"
 	"github.com/masonwheeler/observability-platform/internal/metrics"
 	"github.com/masonwheeler/observability-platform/internal/observability"
+	"github.com/masonwheeler/observability-platform/internal/tenant"
 )
 
 // MountReads registers the read routes over the given sources. The ingester
@@ -202,6 +204,9 @@ func metricsPush(w http.ResponseWriter, r *http.Request, ing metrics.Ingester, i
 			writeError(w, http.StatusBadRequest, "invalid series labels: "+err.Error())
 			return
 		}
+		if !ownTenant(w, r, labels, "series") {
+			return
+		}
 		for _, smp := range s.Samples {
 			batch = append(batch, metrics.PendingSample{Labels: labels, TimestampMs: smp.T, Value: smp.V, Gen: smp.G})
 		}
@@ -265,6 +270,9 @@ func logsPush(w http.ResponseWriter, r *http.Request, ing logs.Ingester, im *obs
 			writeError(w, http.StatusBadRequest, "invalid stream labels: "+err.Error())
 			return
 		}
+		if !ownTenant(w, r, labels, "stream") {
+			return
+		}
 		for _, e := range s.Entries {
 			batch = append(batch, logs.PendingEntry{Labels: labels, TimestampNs: e.T, Line: e.Line})
 		}
@@ -301,4 +309,18 @@ func logsPush(w http.ResponseWriter, r *http.Request, ing logs.Ingester, im *obs
 	}
 	im.LogLinesIngested.Add(float64(len(batch)))
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ownTenant reports whether a pushed series or stream belongs to the tenant the
+// request's header names (RequireTenant put it in the context), answering 400
+// when it does not. A gateway sends each push for one tenant and stamps every
+// label set with it, so a mismatch -- another tenant's label, or a mix -- is a
+// peer bug, refused before anything is admitted or appended.
+func ownTenant(w http.ResponseWriter, r *http.Request, l mlabels.Labels, kind string) bool {
+	want, got := tenant.From(r.Context()), mlabels.TenantOf(l)
+	if got == want {
+		return true
+	}
+	writeError(w, http.StatusBadRequest, fmt.Sprintf("%s belongs to tenant %q but the request is for tenant %q", kind, got, want))
+	return false
 }
