@@ -33,14 +33,15 @@ func (s *Server) pushCap(r *http.Request, def int64, limit func(*tenant.Limits, 
 }
 
 // rejectOversizePush answers 413 when err is a body-over-cap error, reporting
-// whether it did.
+// whether it did. Only a cap from the tenant resolver counts as a per-tenant
+// limit rejection; the fixed safety caps (no resolver) do not.
 func (s *Server) rejectOversizePush(w http.ResponseWriter, r *http.Request, err error) bool {
 	var mbe *http.MaxBytesError
 	if !errors.As(err, &mbe) {
 		return false
 	}
 	id := tenant.From(r.Context())
-	if s.onTenantReject != nil {
+	if s.tenants != nil && s.onTenantReject != nil {
 		s.onTenantReject(id, "push_bytes")
 	}
 	writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
