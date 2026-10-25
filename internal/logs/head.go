@@ -206,6 +206,10 @@ func (h *Head) report(flushed bool, err error) {
 	}
 }
 
+// ErrLockWait is a FlushContext that gave up waiting for the head lock. That
+// flush never started, so the flush hook never saw it: the caller reports it.
+var ErrLockWait = errors.New("logs: waiting for the head lock")
+
 // Flush drains the head to the sink and checkpoints the WAL. Safe to call when
 // the head is empty (no-op). Unlike a threshold-triggered flush, Flush always
 // attempts the sink even during a tolerant head's backoff window, and a
@@ -220,7 +224,7 @@ func (h *Head) Flush() error {
 // flush can hold for a whole flush.
 func (h *Head) FlushContext(ctx context.Context) error {
 	if err := h.mu.LockContext(ctx); err != nil {
-		return fmt.Errorf("logs: waiting for the head lock: %w", err)
+		return fmt.Errorf("%w: %w", ErrLockWait, err)
 	}
 	defer h.mu.Unlock()
 	flushed, err := h.flushLocked(ctx)
