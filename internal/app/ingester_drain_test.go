@@ -103,8 +103,9 @@ func (s *syncBuffer) String() string {
 	return s.b.String()
 }
 
-// A shutdown drain that cannot get the logs head lock within its budget gives
-// up then: it does not wait on that lock a second time without a deadline.
+// A shutdown that cannot get the logs head lock within its budget gives up
+// then: neither the drain nor the logs WAL close waits on that lock again
+// without a deadline. The store stays blocked until shutdown has returned.
 func TestIngesterShutdownDrainGivesUpOnAHeldLogsLock(t *testing.T) {
 	reached := make(chan struct{})
 	release := make(chan struct{})
@@ -146,19 +147,19 @@ func TestIngesterShutdownDrainGivesUpOnAHeldLogsLock(t *testing.T) {
 	defer cancel()
 	closed := make(chan struct{})
 	go func() { a.CloseContext(ctx); close(closed) }()
-	deadline := time.After(3 * time.Second)
-	for !strings.Contains(logBuf.String(), "drain failed") {
-		select {
-		case <-deadline:
-			unblock()
-			<-closed
-			t.Fatalf("the drain did not give up within 3s of a 200ms budget; log:\n%s", logBuf.String())
-		case <-time.After(10 * time.Millisecond):
-		}
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		t.Errorf("CloseContext did not return within 3s of a 200ms budget; log:\n%s", logBuf.String())
+		unblock()
+		<-closed
+		return
 	}
-	if !strings.Contains(logBuf.String(), "waiting for the head lock") {
-		t.Errorf("the drain failure does not name the lock wait; log:\n%s", logBuf.String())
+	log := logBuf.String()
+	if !strings.Contains(log, "drain failed") || !strings.Contains(log, "waiting for the head lock") {
+		t.Errorf("the drain failure does not name the lock wait; log:\n%s", log)
 	}
-	unblock()
-	<-closed
+	if !strings.Contains(log, "logs WAL close error") {
+		t.Errorf("the WAL close that gave up is not reported; log:\n%s", log)
+	}
 }
