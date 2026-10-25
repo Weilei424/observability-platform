@@ -257,7 +257,25 @@ func (h *Head) Close() error {
 // has already made its flush attempt (the ingester's bounded drain). Whatever
 // is still in the head is durable in the WAL and replays on the next start.
 func (h *Head) CloseWithoutFlush() error {
-	h.mu.Lock()
+	return h.CloseWithoutFlushContext(context.Background())
+}
+
+// CloseWithoutFlushContext is CloseWithoutFlush bounded by ctx. A free head
+// lock is taken even when ctx is already done, so the usual close needs no
+// budget. When another flush holds the lock past ctx, the WAL is not closed —
+// that flush may still checkpoint it — but synced under its own lock, which is
+// never held across a sink call, and ErrLockWait is returned. The process may
+// exit with the WAL open: its records were written straight to the segment
+// file and, synced, replay on the next start.
+func (h *Head) CloseWithoutFlushContext(ctx context.Context) error {
+	if !h.mu.TryLock() {
+		if err := h.mu.LockContext(ctx); err != nil {
+			if syncErr := h.wal.Sync(); syncErr != nil {
+				return errors.Join(fmt.Errorf("%w: %w", ErrLockWait, err), fmt.Errorf("logs: syncing the WAL: %w", syncErr))
+			}
+			return fmt.Errorf("%w: %w; the WAL is synced but left open", ErrLockWait, err)
+		}
+	}
 	defer h.mu.Unlock()
 	return h.wal.Close()
 }
