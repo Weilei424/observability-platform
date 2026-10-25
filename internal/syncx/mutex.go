@@ -36,6 +36,17 @@ func (m *Mutex) LockContext(ctx context.Context) error {
 	}
 }
 
+// TryLock acquires m if it is free, reporting whether it did, without
+// waiting.
+func (m *Mutex) TryLock() bool {
+	select {
+	case m.sem() <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
 // Unlock releases m. Unlocking an unlocked Mutex panics, as with sync.Mutex.
 func (m *Mutex) Unlock() {
 	select {
