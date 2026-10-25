@@ -56,12 +56,26 @@ func (b *BlockManager) ApplyRetention(now time.Time, policy tenant.RetentionPoli
 // newRetentionRequest is the wire form of a retention pass, shared by the
 // metrics and logs retention clients.
 func newRetentionRequest(now time.Time, policy tenant.RetentionPolicy) retentionRequest {
-	req := retentionRequest{NowMs: now.UnixMilli(), RetentionMs: policy.Default.Milliseconds()}
+	req := retentionRequest{NowMs: now.UnixMilli(), RetentionMs: retentionMs(policy.Default)}
 	if len(policy.Overrides) > 0 {
 		req.OverridesMs = make(map[string]int64, len(policy.Overrides))
 		for id, d := range policy.Overrides {
-			req.OverridesMs[id] = d.Milliseconds()
+			req.OverridesMs[id] = retentionMs(d)
 		}
 	}
 	return req
+}
+
+// retentionMs puts a retention on the wire in whole milliseconds. A store reads
+// 0 as "keep forever", so a positive retention rounds up -- truncating 500µs to
+// 0 would turn a retention into none -- while 0 and below stay 0.
+func retentionMs(d time.Duration) int64 {
+	if d <= 0 {
+		return 0
+	}
+	ms := d.Milliseconds()
+	if d%time.Millisecond != 0 {
+		ms++
+	}
+	return ms
 }
