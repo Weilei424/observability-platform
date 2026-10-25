@@ -3,6 +3,7 @@ package limits
 
 import (
 	"errors"
+	"math"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -38,6 +39,10 @@ func (f *fakeCounter) add(t string, ids ...uint64) {
 func TestShare(t *testing.T) {
 	for _, tc := range []struct{ limit, rf, n, want int }{
 		{0, 3, 3, 0}, {100, 1, 1, 100}, {100, 3, 3, 100}, {100, 1, 4, 25}, {100, 3, 4, 75}, {10, 1, 3, 4}, {100, 3, 0, 100},
+		// A huge limit must not overflow limit*rf: ceil(MaxInt*2/3), and at
+		// RF >= N the share is the limit itself.
+		{math.MaxInt, 2, 3, 6148914691236517205}, {math.MaxInt, 3, 3, math.MaxInt}, {math.MaxInt, 5, 3, math.MaxInt},
+		{math.MaxInt, 1, 1, math.MaxInt}, {1, 1, 3, 1},
 	} {
 		if got := Share(tc.limit, tc.rf, tc.n); got != tc.want {
 			t.Errorf("Share(%d,%d,%d) = %d, want %d", tc.limit, tc.rf, tc.n, got, tc.want)
