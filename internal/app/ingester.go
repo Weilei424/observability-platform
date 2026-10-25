@@ -174,12 +174,12 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 		Registry:    reg,
 		HTTP:        inst.HTTP,
 		Ingest:      inst.Ingest,
-		// No Tenants: per-tenant push caps belong to the gateway and
-		// all-in-one, so the ingester's own public write routes keep the fixed
-		// caps. Its limit gates below still read lim. The routes still act
-		// for the request's tenant.
+		// No Tenants or OnTenantReject: per-tenant push caps belong to the
+		// gateway and all-in-one, so the ingester's own public write routes
+		// keep the fixed caps, and a refusal by them is not a tenant limit
+		// rejection. Its limit gates below still read lim and count their own
+		// refusals. The routes still act for the request's tenant.
 		TenantRequired: cfg.TenantRequired,
-		OnTenantReject: tenantRejects(tm),
 		SeriesGate:     seriesGate,
 		StreamGate:     streamGate,
 		Internal: func(r chi.Router) {
@@ -235,7 +235,7 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 				}
 				metricsErr := writes.Drain(ctx)
 				logsErr := logHead.FlushContext(ctx)
-				return ingesterDrainErr(metricsErr, logsErr, logHead.Empty())
+				return ingesterDrainErr(metricsErr, logsErr, logHead.Empty)
 			}},
 			{component: "wal", msg: "wal close error", close: w.Close},
 			// The drain above made the one bounded attempt to flush the logs
@@ -253,16 +253,18 @@ func buildIngester(cfg *config.Config, log *slog.Logger) (*App, error) {
 // for the head lock (it never reached the hook), or lines left in the head
 // after a flush that returned nil. A logs flush failure the hook already logged
 // is not reported twice. Every failure is kept, so a metrics error does not
-// hide a logs one.
-func ingesterDrainErr(metricsErr, logsErr error, logsEmpty bool) error {
+// hide a logs one. logsEmpty takes the head lock without a deadline, so it is
+// asked only after a flush that returned nil: one that gave up waiting for the
+// lock must not wait for it again past the shutdown budget.
+func ingesterDrainErr(metricsErr, logsErr error, logsEmpty func() bool) error {
 	var errs []error
 	if metricsErr != nil {
 		errs = append(errs, fmt.Errorf("metrics: %w", metricsErr))
 	}
 	switch {
 	case errors.Is(logsErr, logs.ErrLockWait):
-		errs = append(errs, fmt.Errorf("logs: %w", logsErr))
-	case logsErr == nil && !logsEmpty:
+		errs = append(errs, logsErr) // already reads "logs: waiting for the head lock"
+	case logsErr == nil && !logsEmpty():
 		errs = append(errs, errors.New("logs: head not empty after the drain"))
 	}
 	return errors.Join(errs...)
