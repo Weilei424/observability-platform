@@ -198,16 +198,16 @@ func retention(w http.ResponseWriter, r *http.Request, apply func(time.Time, ten
 	if !decodeStrict(w, body, &req) {
 		return
 	}
-	if req.RetentionMs < 0 {
-		writeError(w, http.StatusBadRequest, "retention_ms must be >= 0")
+	if req.RetentionMs < 0 || req.RetentionMs > maxRetentionMs {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("retention_ms must be between 0 and %d", maxRetentionMs))
 		return
 	}
 	policy := tenant.RetentionPolicy{Default: time.Duration(req.RetentionMs) * time.Millisecond}
 	if len(req.OverridesMs) > 0 {
 		policy.Overrides = make(map[string]time.Duration, len(req.OverridesMs))
 		for id, ms := range req.OverridesMs {
-			if ms < 0 {
-				writeError(w, http.StatusBadRequest, "overrides_ms must be >= 0")
+			if ms < 0 || ms > maxRetentionMs {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("overrides_ms must be between 0 and %d", maxRetentionMs))
 				return
 			}
 			policy.Overrides[id] = time.Duration(ms) * time.Millisecond
