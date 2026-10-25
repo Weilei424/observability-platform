@@ -174,3 +174,20 @@ func TestIngesterTenantReadsAndShare(t *testing.T) {
 		}
 	}
 }
+
+// Per-tenant push caps belong to the gateway and all-in-one: the ingester's
+// own public write routes keep the fixed caps even when the overrides file it
+// reads (for the limit gates) sets a tenant's cap.
+func TestIngesterPublicWritesIgnoreTenantPushCaps(t *testing.T) {
+	cfg := withPeers(testConfig(t, config.TargetIngester))
+	tiny := int64(10)
+	cfg.TenantOverrides = map[string]tenant.Override{"team-b": {MaxMetricsPushBytes: &tiny, MaxLogsPushBytes: &tiny}}
+	h := buildTarget(t, cfg)
+	if rec := doAs(h, "team-b", http.MethodPost, "/api/v1/ingest/metrics", oneSample); rec.Code != http.StatusNoContent {
+		t.Errorf("team-b metrics write to the ingester = %d, want 204 under the fixed cap", rec.Code)
+	}
+	logBody := `{"streams":[{"stream":{"service":"api"},"values":[["1000000000","hello"]]}]}`
+	if rec := doAs(h, "team-b", http.MethodPost, "/loki/api/v1/push", logBody); rec.Code != http.StatusNoContent {
+		t.Errorf("team-b log write to the ingester = %d, want 204 under the fixed cap", rec.Code)
+	}
+}
