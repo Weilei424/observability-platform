@@ -4,6 +4,7 @@ package limits
 import (
 	"errors"
 	"math"
+	"math/big"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -39,10 +40,7 @@ func (f *fakeCounter) add(t string, ids ...uint64) {
 func TestShare(t *testing.T) {
 	for _, tc := range []struct{ limit, rf, n, want int }{
 		{0, 3, 3, 0}, {100, 1, 1, 100}, {100, 3, 3, 100}, {100, 1, 4, 25}, {100, 3, 4, 75}, {10, 1, 3, 4}, {100, 3, 0, 100},
-		// A huge limit must not overflow limit*rf: ceil(MaxInt*2/3), and at
-		// RF >= N the share is the limit itself.
-		{math.MaxInt, 2, 3, 6148914691236517205}, {math.MaxInt, 3, 3, math.MaxInt}, {math.MaxInt, 5, 3, math.MaxInt},
-		{math.MaxInt, 1, 1, math.MaxInt}, {1, 1, 3, 1},
+		{math.MaxInt, 3, 3, math.MaxInt}, {math.MaxInt, 5, 3, math.MaxInt}, {math.MaxInt, 1, 1, math.MaxInt}, {1, 1, 3, 1},
 	} {
 		if got := Share(tc.limit, tc.rf, tc.n); got != tc.want {
 			t.Errorf("Share(%d,%d,%d) = %d, want %d", tc.limit, tc.rf, tc.n, got, tc.want)
@@ -107,5 +105,34 @@ func TestRefusalIsReported(t *testing.T) {
 	_ = g.Admit(map[string][]uint64{"b": {1, 2}}, func() error { return nil })
 	if got != "b" {
 		t.Fatalf("onReject got %q", got)
+	}
+}
+
+// bigShare is Share computed with arbitrary-precision integers: the oracle the
+// overflow cases are checked against.
+func bigShare(limit, rf, n int64) int64 {
+	num := new(big.Int).Mul(big.NewInt(limit), big.NewInt(rf))
+	num.Add(num, big.NewInt(n-1))
+	share := num.Quo(num, big.NewInt(n)).Int64()
+	return min(max(share, 1), limit)
+}
+
+// No intermediate of Share may overflow, whatever the inputs: a huge limit, or
+// an ingester count near the limit (r*rf+n-1 is where a naive split overflows).
+func TestShareDoesNotOverflow(t *testing.T) {
+	for _, tc := range []struct{ limit, rf, n int64 }{
+		{math.MaxInt32, 2, 3},
+		{math.MaxInt32, math.MaxInt32 - 1, math.MaxInt32},
+		{math.MaxInt64, 2, 3},
+		{7999999999, 3999999999, 4000000000},
+		{math.MaxInt64, math.MaxInt64 - 1, math.MaxInt64},
+	} {
+		if tc.limit > math.MaxInt || tc.n > math.MaxInt {
+			continue // needs a 64-bit int
+		}
+		want := bigShare(tc.limit, tc.rf, tc.n)
+		if got := Share(int(tc.limit), int(tc.rf), int(tc.n)); int64(got) != want {
+			t.Errorf("Share(%d,%d,%d) = %d, want %d", tc.limit, tc.rf, tc.n, got, want)
+		}
 	}
 }
