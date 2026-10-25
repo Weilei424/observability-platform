@@ -57,6 +57,8 @@ func TestLoadOverridesRefusesBadInput(t *testing.T) {
 		{"zero push cap", "overrides:\n  a:\n    max_logs_push_bytes: 0\n", "max_logs_push_bytes"},
 		{"push cap too big", "overrides:\n  a:\n    max_metrics_push_bytes: 16777217\n", "max_metrics_push_bytes"},
 		{"top-level typo", "override:\n  a: {}\n", "override"},
+		{"second document", "overrides:\n  a:\n    max_active_series: 1\n---\noverrides:\n  b:\n    max_active_series: 2\n", "one YAML document"},
+		{"second document with an unknown key", "overrides: {}\n---\nmax_series: 1\n", "one YAML document"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := LoadOverrides(writeFile(t, tc.body))
